@@ -1,0 +1,131 @@
+/**
+ * pickTasks 选卡语义（Python `QuizEngine._select` parity）：
+ * review = 到期优先 + 未评测（attempts=0）新卡补位；dueOnly（review 命令）
+ * 只出到期卡不补位；排序 attempts 升序优先；new 模式反选到期概念；
+ * concept 聚焦忽略到期语义；count 截断。
+ */
+
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { loadProgressBoard, saveProgressBoard, upsertProgressRecord, writeTaskPool } from '@studyclaw/course-builder'
+import type { HarnessTask } from '@studyclaw/course-builder'
+import { pickTasks } from '../src/index.ts'
+
+const tmpRoots: string[] = []
+afterEach(async () => {
+  await Promise.all(tmpRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+async function makeCourse(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'studyclaw-pick-'))
+  tmpRoots.push(root)
+  const course = join(root, 'demo')
+  await mkdir(join(course, 'tasks'), { recursive: true })
+  // 进度板：c_a 已到期（昨日），c_b/c_c 为新播种概念（nextReviewAt=null）。
+  let board = {
+    overallMastery: 0,
+    dueCount: 0,
+    lastUpdatedAt: '2026-08-20 10:00',
+    concepts: [] as Awaited<ReturnType<typeof loadProgressBoard>>['concepts'],
+  }
+  board = upsertProgressRecord(board, {
+    conceptId: 'c_a', name: '概念A', chapter: '章一', mastery: 0.6, evals: 1,
+    passRate: 0.5, ef: 2.5, nextReviewAt: '2026-08-20', misattribution: 'none',
+  })
+  board = upsertProgressRecord(board, {
+    conceptId: 'c_b', name: '概念B', chapter: '章一', mastery: 0, evals: 0,
+    passRate: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
+  })
+  board = upsertProgressRecord(board, {
+    conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0, evals: 0,
+    passRate: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
+  })
+  await saveProgressBoard(join(course, 'progress.md'), board)
+  return course
+}
+
+function makeTask(taskId: string, conceptId: string, attempts: number, difficulty = 2): HarnessTask {
+  return {
+    task_id: taskId,
+    concept_id: conceptId,
+    source_ref: { file: 'overview.md', chunk_id: 'chunk_001', line_range: [1, 10] },
+    type: 'concept',
+    difficulty,
+    question: `${conceptId} 考题`,
+    options: null,
+    evaluation_criteria: { rubric: ['要点一', '要点二'], keywords: [conceptId] },
+    history: { attempts, last_score: null, pass_count: 0, last_review_at: null, next_review_at: null, ef: 2.5 },
+    deprecated: false,
+    dynamic: false,
+    target_id: null,
+  }
+}
+
+describe('pickTasks', () => {
+  it('review：到期概念优先，到期不足时用未评测新卡补位', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 5),
+      makeTask('t_b01', 'c_b', 0),
+      makeTask('t_c01', 'c_c', 0),
+    ])
+    const picked = await pickTasks(course, 'review', null, 3, '2026-08-21')
+    expect(picked.map(task => task.task_id)).toEqual(['t_a01', 't_b01', 't_c01'])
+  })
+
+  it('review 补位：attempts 升序先出，且每概念只补一张（Python parity）', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_b01', 'c_b', 0),
+      makeTask('t_d01', 'c_b', 0, 3), // 同概念第二卡：补位按概念去重，不应出现
+      makeTask('t_c01', 'c_c', 3),
+    ])
+    const picked = await pickTasks(course, 'review', null, 2, '2026-08-21')
+    // 无到期卡 → 全部来自补位；attempts=0 优先，同概念只补一张。
+    expect(picked.map(task => task.task_id)).toEqual(['t_b01'])
+  })
+
+  it('dueOnly：只出到期卡，不补新卡（review 命令语义）', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 5),
+      makeTask('t_b01', 'c_b', 0),
+    ])
+    const picked = await pickTasks(course, 'review', null, 3, '2026-08-21', true)
+    expect(picked.map(task => task.task_id)).toEqual(['t_a01'])
+  })
+
+  it('new：反选到期概念，未到期概念卡正常挑选', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 1),
+      makeTask('t_b01', 'c_b', 0),
+    ])
+    const picked = await pickTasks(course, 'new', null, 5, '2026-08-21')
+    expect(picked.map(task => task.concept_id)).not.toContain('c_a')
+    expect(picked.map(task => task.task_id)).toEqual(['t_b01'])
+  })
+
+  it('concept 聚焦：忽略到期语义，直接出目标概念卡', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 5),
+      makeTask('t_c01', 'c_c', 0),
+    ])
+    const picked = await pickTasks(course, 'review', 'c_c', 5, '2026-08-21')
+    expect(picked.map(task => task.task_id)).toEqual(['t_c01'])
+  })
+
+  it('count 截断与 deprecated 过滤', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 5),
+      makeTask('t_b01', 'c_b', 0),
+      { ...makeTask('t_z01', 'c_b', 0, 5), deprecated: true },
+    ])
+    const picked = await pickTasks(course, 'review', null, 1, '2026-08-21')
+    expect(picked.map(task => task.task_id)).toEqual(['t_a01'])
+  })
+})

@@ -1,0 +1,135 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { SessionEventStore } from '../src/events.ts'
+
+describe('SessionEventStore', () => {
+  it('appends, validates sequence, and projects an agent session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-'))
+    const store = new SessionEventStore(root)
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'session/model', payload: { provider: 'acme', model: 'small' } },
+      { ts: '2026-08-22T12:00:00.001Z', type: 'turn/start', payload: {} },
+      { ts: '2026-08-22T12:00:00.002Z', type: 'user/input', payload: { content: 'hello' } },
+      { ts: '2026-08-22T12:00:00.003Z', type: 'assistant/message', payload: { content: 'world' } },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'turn/end', payload: {} },
+    )
+    const rows = await store.load('s')
+    expect(rows.map(row => row.seq)).toEqual([1, 2, 3, 4, 5])
+    await expect(store.project('s')).resolves.toMatchObject({
+      currentModel: { provider: 'acme', model: 'small' },
+      phase: 'idle',
+      messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'world' }],
+    })
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('projects tool lifecycle, approval, plan, todo and usage state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-projection-'))
+    const store = new SessionEventStore(root)
+    await Promise.all([
+      store.append('s', { ts: '2026-08-22T12:00:00.000Z', type: 'tool/call', payload: { callId: 'c1', name: 'read_file', args: { path: 'README.md' } } }),
+      store.append('s', { ts: '2026-08-22T12:00:00.001Z', type: 'approval/pending', payload: { requestId: 'a1', name: 'write_file', policy: 'write', args: { path: 'x' } } }),
+    ])
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.002Z', type: 'tool/result', payload: { callId: 'c1', name: 'read_file', status: 'success', summary: '已读取', data: { usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5 } } } },
+      { ts: '2026-08-22T12:00:00.003Z', type: 'approval/resolved', payload: { requestId: 'a1', decision: 'deny' } },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'plan/update', payload: { steps: [{ id: 's1', text: '检查文件', status: 'in_progress' }] } },
+      { ts: '2026-08-22T12:00:00.005Z', type: 'todo/update', payload: { items: [{ id: 't1', text: '确认结果', status: 'completed' }] } },
+      { ts: '2026-08-22T12:00:00.006Z', type: 'agent/child', payload: { childAgentId: 'child-1', childSessionId: 'child-session-1' } },
+    )
+    const projection = await store.project('s')
+    expect(projection.tools[0]).toMatchObject({ callId: 'c1', status: 'success', args: { path: 'README.md' } })
+    expect(projection.pendingApprovals).toEqual([])
+    expect(projection.plan.steps[0]).toMatchObject({ id: 's1', status: 'in_progress' })
+    expect(projection.todos[0]).toMatchObject({ id: 't1', status: 'completed' })
+    expect(projection.usage.totalTokens).toBe(5)
+    expect(projection.children).toEqual([{ agentId: 'child-1', sessionId: 'child-session-1', seq: 7 }])
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('forks event history with lineage and a chat boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-fork-'))
+    const store = new SessionEventStore(root)
+    await store.append('source',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'user/input', payload: { content: 'one' } },
+      { ts: '2026-08-22T12:00:00.001Z', type: 'assistant/message', payload: { content: 'answer' } },
+      { ts: '2026-08-22T12:00:00.002Z', type: 'user/input', payload: { content: 'two' } },
+    )
+    await store.forkSession('source', 'fork', 1)
+    const projection = await store.project('fork')
+    expect(projection.messages.map(message => message.content)).toEqual(['one', 'answer'])
+    expect(projection.lineage).toMatchObject({ parentSessionId: 'source', forkSeq: 2 })
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('projects durable maintenance jobs across queued, running and terminal events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-maintenance-'))
+    const store = new SessionEventStore(root)
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'maintenance/queued', payload: { jobId: 'm1', agentId: 'a1', kind: 'compaction', summary: 'trim' } },
+      { ts: '2026-08-22T12:00:00.001Z', type: 'maintenance/start', payload: { jobId: 'm1', agentId: 'a1', kind: 'compaction' } },
+      { ts: '2026-08-22T12:00:00.002Z', type: 'maintenance/end', payload: { jobId: 'm1', agentId: 'a1', kind: 'compaction', lastSeq: 3 } },
+      { ts: '2026-08-22T12:00:00.003Z', type: 'maintenance/queued', payload: { jobId: 'm2', agentId: 'a1', kind: 'checkpoint' } },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'maintenance/error', payload: { jobId: 'm2', agentId: 'a1', kind: 'checkpoint', message: 'busy' } },
+    )
+    const projection = await store.project('s')
+    expect(projection.maintenanceJobs).toEqual([
+      expect.objectContaining({ jobId: 'm1', status: 'done', summary: 'trim', startedAt: '2026-08-22T12:00:00.001Z' }),
+      expect.objectContaining({ jobId: 'm2', status: 'failed', error: 'busy' }),
+    ])
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('projects an immutable Agent runtime configuration snapshot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-agent-config-'))
+    const store = new SessionEventStore(root)
+    await store.append('s', {
+      ts: '2026-08-22T12:00:00.000Z',
+      type: 'agent/config',
+      payload: { agentPreset: 'general', permissionPreset: 'read-only', plugins: { learning: false, sandbox: true } },
+    })
+    await store.append('s', {
+      ts: '2026-08-22T12:00:00.001Z',
+      type: 'agent/config',
+      payload: { agentPreset: 'studyclaw-learning', permissionPreset: 'danger-full-access', plugins: { learning: true } },
+    })
+    await expect(store.project('s')).resolves.toMatchObject({
+      agentConfig: { agentPreset: 'general', permissionPreset: 'read-only', plugins: { learning: false, sandbox: true } },
+    })
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('validates typed first-party event payloads while keeping plugin events open', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-typed-'))
+    const store = new SessionEventStore(root)
+    await expect(store.appendKnown('s', 'turn/cancelled', { reason: '' })).rejects.toThrow()
+    expect(await store.load('s')).toEqual([])
+    await expect(store.appendKnown('s', 'turn/end', { reason: { kind: 'blocked', blockers: ['ask-user'] } })).resolves.toMatchObject({ type: 'turn/end' })
+    await expect(store.appendUnknown('s', 'plugin/custom', { value: true })).resolves.toMatchObject({ type: 'plugin/custom' })
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('projects blocked terminal turns as waiting instead of idle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-blocked-'))
+    const store = new SessionEventStore(root)
+    await store.appendKnown('s', 'ask/pending', { question: '继续吗？' })
+    await store.appendKnown('s', 'turn/end', { reason: { kind: 'blocked', blockers: ['ask-user'] } })
+    await expect(store.project('s')).resolves.toMatchObject({ phase: 'waiting', pendingAsk: '继续吗？' })
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('replays interrupted messages and structured terminal reasons', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-interrupted-'))
+    const store = new SessionEventStore(root)
+    await store.appendKnown('s', 'assistant/message', { content: 'partial', interrupted: true })
+    await store.appendKnown('s', 'turn/end', { reason: { kind: 'aborted', reason: { kind: 'disposed' } } })
+    await expect(store.project('s')).resolves.toMatchObject({
+      messages: [{ role: 'assistant', content: 'partial', interrupted: true }],
+      lastTurnEndReason: { kind: 'aborted', reason: { kind: 'disposed' } },
+      phase: 'cancelled',
+    })
+    await rm(root, { recursive: true, force: true })
+  })
+})

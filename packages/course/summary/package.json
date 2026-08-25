@@ -1,0 +1,18 @@
+{
+  "name": "@studyclaw/course-summary",
+  "version": "0.1.0",
+  "description": "Read-only course listing for one workspace root (ports Python list_courses): syllabus.json titles, progress.md meta, history mtimes",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

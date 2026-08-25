@@ -1,0 +1,25 @@
+{
+  "name": "@studyclaw/cli",
+  "version": "0.1.0",
+  "description": "StudyClaw CLI and host server (M1: serve command; npm bin packaging lands at M5)",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "studyclaw": "lib/bin.js"
+  },
+  "files": [
+    "lib/*.js"
+  ],
+  "dependencies": {
+    "@studyclaw/acp": "workspace:^",
+    "@studyclaw/apiproxy": "workspace:^",
+    "@studyclaw/course-summary": "workspace:^",
+    "@studyclaw/workspace": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/dsh-storage": "workspace:^",
+    "@deepseek-ai/dsh-storage-domain": "workspace:^",
+    "@deepseek-ai/dsh-storage-json": "workspace:^"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../packages/acp/acp"
+    },
+    {
+      "path": "../../vendor/cordis"
+    },
+    {
+      "path": "../../vendor/schemastery"
+    },
+    {
+      "path": "../../packages/storage/storage"
+    },
+    {
+      "path": "../../packages/storage/storage-domain"
+    },
+    {
+      "path": "../../packages/storage/storage-json"
+    },
+    {
+      "path": "../../packages/workspace/workspace"
+    },
+    {
+      "path": "../../packages/course/summary"
+    },
+    {
+      "path": "../../packages/host/apiproxy"
+    }
+  ]
+}

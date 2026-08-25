@@ -1,0 +1,40 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
+    "@xyflow/react": "^12.11.3",
+    "html-to-image": "^1.11.11",
+    "mind-elixir": "5.15.0",
+    "lucide-react": "^1.33.0",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.10.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
+    "jsdom": "^25.0.1",
+    "playwright-core": "^1.62.1",
+    "tailwindcss": "^4",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

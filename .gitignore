@@ -1,0 +1,25 @@
+node_modules/
+lib/
+!apps/web/src/lib/
+!apps/web/src/lib/**
+dist/
+*.tsbuildinfo
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+coverage/
+.next/
+out/
+
+# 临时 E2E 实验产物（非测试套件，勿提交）
+.e2e-*
+
+# 本地运行时产物（host 注册表 / E2E 工作区，勿提交）
+.studyclaw/
+e2e-workspace/
+
+# 损坏旧 .git 的备份（2026-08-24 重建仓库时保留，确认无误后可删除）
+.git.broken-20260824/

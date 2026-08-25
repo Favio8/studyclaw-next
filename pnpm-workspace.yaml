@@ -1,0 +1,7 @@
+packages:
+  - vendor/*
+  - packages/*/*
+  - apps/*
+allowBuilds:
+  esbuild: true
+linkWorkspacePackages: true

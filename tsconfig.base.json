@@ -1,0 +1,70 @@
+{
+  // Doubles as the resolution facade for tsx and vite-tsconfig-paths (vitest
+  // configs point here). NEVER add include/files to this file: it would leak
+  // into every extending package project and narrow the facade's match-all
+  // scope. Copied from dsh with the paths map trimmed to the copied packages;
+  // every new @studyclaw package appends its entry here.
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "sourceMap": true,
+    "declarationMap": true,
+    "composite": true,
+    "incremental": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"],
+    "paths": {
+      "@deepseek-ai/cordis": ["./vendor/cordis/src"],
+      "@deepseek-ai/cosmokit": ["./vendor/cosmokit/src"],
+      "@deepseek-ai/schemastery": ["./vendor/schemastery/src"],
+      "@deepseek-ai/cordis-plugin-loader": ["./vendor/loader/src"],
+      "@deepseek-ai/cordis-plugin-include": ["./vendor/include/src"],
+      "@deepseek-ai/cordis-plugin-group": ["./vendor/group/src"],
+      "@deepseek-ai/cordis-plugin-timer": ["./vendor/timer/src"],
+      "@deepseek-ai/cordis-plugin-hmr": ["./vendor/hmr/src"],
+      "@deepseek-ai/cordis-plugin-logger-console": ["./vendor/logger-console/src"],
+      "@deepseek-ai/dsh-invariants": ["./packages/runtime-diagnostics/invariants/src"],
+      "@deepseek-ai/dsh-invariants/invariant": ["./packages/runtime-diagnostics/invariants/src/invariant.ts"],
+      "@deepseek-ai/dsh-storage": ["./packages/storage/storage/src"],
+      "@deepseek-ai/dsh-storage-domain": ["./packages/storage/storage-domain/src"],
+      "@deepseek-ai/dsh-storage-domain/invariant": ["./packages/storage/storage-domain/src/invariant.ts"],
+      "@deepseek-ai/dsh-storage-json": ["./packages/storage/storage-json/src"],
+      "@deepseek-ai/dsh-storage-sqlite": ["./packages/storage/storage-sqlite/src"],
+      "@deepseek-ai/dsh-llm": ["./packages/llm/llm/src"],
+      "@deepseek-ai/dsh-llm/invariant": ["./packages/llm/llm/src/invariant.ts"],
+      "@deepseek-ai/dsh-llm-deepseek": ["./packages/llm/llm-deepseek/src"],
+      "@deepseek-ai/dsh-attachment": ["./packages/attachment/attachment/src"],
+      "@deepseek-ai/dsh-credentials": ["./packages/credentials/credentials/src"],
+      "@deepseek-ai/dsh-settings": ["./packages/settings/settings/src"],
+      "@deepseek-ai/dsh-anonymous-user-id": ["./packages/identity/anonymous-user-id/src"],
+      "@deepseek-ai/dsh-anonymous-user-id/invariant": ["./packages/identity/anonymous-user-id/src/invariant.ts"],
+      "@deepseek-ai/dsh-brand": ["./packages/util/brand/src"],
+      "@deepseek-ai/dsh-launch-environment": ["./packages/util/launch-environment/src"],
+      "@deepseek-ai/dsh-timeout": ["./packages/util/timeout/src"],
+      "@deepseek-ai/dsh-home-paths": ["./packages/util/home-paths/src"],
+      "@studyclaw/workspace": ["./packages/workspace/workspace/src"],
+      "@studyclaw/course-summary": ["./packages/course/summary/src"],
+      "@studyclaw/apiproxy": ["./packages/host/apiproxy/src"],
+      "@studyclaw/tools": ["./packages/tools/tools/src"],
+      "@studyclaw/session": ["./packages/session/session/src"],
+      "@studyclaw/chat-service": ["./packages/host/chat-service/src"],
+      "@studyclaw/course-builder": ["./packages/course/builder/src"],
+      "@studyclaw/learning": ["./packages/learning/learning/src"]
+      ,"@studyclaw/agent": ["./packages/agent/agent/src"]
+      ,"@studyclaw/acp": ["./packages/acp/acp/src"]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/runtime-diagnostics/invariants" },
+    { "path": "./packages/storage/storage" },
+    { "path": "./packages/storage/storage-domain" },
+    { "path": "./packages/storage/storage-json" },
+    { "path": "./packages/storage/storage-sqlite" },
+    { "path": "./packages/workspace/workspace" },
+    { "path": "./packages/course/summary" },
+    { "path": "./packages/host/apiproxy" },
+    { "path": "./packages/llm/llm" },
+    { "path": "./packages/llm/llm-deepseek" },
+    { "path": "./packages/attachment/attachment" },
+    { "path": "./packages/credentials/credentials" },
+    { "path": "./packages/settings/settings" },
+    { "path": "./packages/identity/anonymous-user-id" },
+    { "path": "./packages/util/brand" },
+    { "path": "./packages/util/launch-environment" },
+    { "path": "./packages/util/timeout" },
+    { "path": "./packages/util/home-paths" },
+    { "path": "./packages/tools/tools" },
+    { "path": "./packages/session/session" },
+    { "path": "./packages/agent/agent" },
+    { "path": "./packages/acp/acp" },
+    { "path": "./packages/host/chat-service" },
+    { "path": "./packages/course/builder" },
+    { "path": "./packages/learning/learning" },
+    { "path": "./apps/cli" }
+  ]
+}

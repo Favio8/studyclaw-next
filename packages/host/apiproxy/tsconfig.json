@@ -1,0 +1,24 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../../packages/workspace/workspace"
+    },
+    {
+      "path": "../../../packages/course/summary"
+    },
+    {
+      "path": "../../../packages/host/chat-service"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@studyclaw/apiproxy",
+  "version": "0.1.0",
+  "description": "StudyClaw RPC contract: method table, wire views, and business-error mapping over the workspace registry (M1 minimal set)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@studyclaw/chat-service": "workspace:^",
+    "@studyclaw/course-summary": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@studyclaw/workspace": "workspace:^"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@studyclaw/workspace": "workspace:^"
+  }
+}

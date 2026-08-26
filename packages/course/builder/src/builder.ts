@@ -13,6 +13,7 @@ import { join, relative, sep } from 'node:path'
 import { MarkdownIngestor } from './ingestor.ts'
 import { extractSourceText } from './extract.ts'
 import { graphAdjacency, projectChapterDependencies, type DependencyInferrerLike } from './dep-infer.ts'
+import { applySyllabusQualityGuard } from './quality-guard.ts'
 import { harnessTask, syllabus, type Chapter, type HarnessTask, type IngestArtifact, type Syllabus } from './models.ts'
 
 export const DEFAULT_SOURCE_EXTENSIONS = ['.md', '.txt', '.pdf', '.docx', '.xlsx', '.html', '.htm']
@@ -370,7 +371,10 @@ export class CourseBuilder {
       granularity: this.granularity,
       chapters: merged,
     }
-    await atomicWrite(path, JSON.stringify(updated, null, 2) + '\n')
+    // 质量守卫：净化名称空白（安全修复），其余问题上报 degraded 不阻塞。
+    const guarded = applySyllabusQualityGuard(updated)
+    if (guarded.issues.length > 0) report.degraded.push('syllabus-quality')
+    await atomicWrite(path, JSON.stringify(guarded.syllabus, null, 2) + '\n')
     report.version = updated.version
   }
 

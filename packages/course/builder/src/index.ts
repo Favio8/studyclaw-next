@@ -22,6 +22,16 @@ export {
 } from './dep-infer.ts'
 export type { DepInferrerOptions, DependencyInferenceResult, DependencyInferrerLike } from './dep-infer.ts'
 export {
+  checkSyllabusQuality,
+  applySyllabusQualityGuard,
+  normalizeName,
+  MAX_CONCEPT_NAME_LENGTH,
+  MAX_CHAPTERS,
+  MAX_CONCEPTS,
+  MAX_CHAPTERS_FINE,
+} from './quality-guard.ts'
+export type { SyllabusQualityIssue, SyllabusQualityIssueCode } from './quality-guard.ts'
+export {
   syllabus,
   chapter,
   concept,

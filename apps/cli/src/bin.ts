@@ -515,7 +515,9 @@ async function serve(port: number): Promise<void> {
             await handleAgentAnswerStream(request, response, body)
             return
           }
-          if (method === 'eval.submit') {
+          // 评测提交：Web 客户端用斜杠 `eval/submit`，CLI 自带命令用点号 `eval.submit`，
+          // 两种形式都路由到同一处理函数（保持向后兼容，修复 Quiz SSE 断路）。
+          if (method === 'eval.submit' || method === 'eval/submit') {
             await handleEvalSubmit(response, body)
             return
           }

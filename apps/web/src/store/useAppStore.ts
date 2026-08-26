@@ -22,6 +22,12 @@ import type { LearningMode } from "@/src/types";
 
 export type PanelTab = "progress" | "syllabus" | "heatmap" | "quiz";
 
+/** 大纲 Tab 内的视图（列表 / 思维导图 / 关系图），入 store 跨 Tab/重挂保持。 */
+export type SyllabusView = "tree" | "mindmap" | "graph";
+
+/** 大纲概念掌握度状态过滤（列表视图图例点击），null = 不过滤。 */
+export type SyllabusStatusFilter = "mastered" | "learning" | "weak" | "locked" | null;
+
 // ---------------------------------------------------------------------------
 // Quiz（🎯 题卡 Tab）状态：驱动与 SSE 编排在 lib/quizFlow.ts（store 保持纯同步）
 // ---------------------------------------------------------------------------
@@ -143,6 +149,12 @@ interface AppState {
   syllabusCollapsed: Record<string, boolean>;
   /** 大纲树搜索词（入 store，切视图不丢）。 */
   syllabusSearch: string;
+  /** 大纲当前视图（列表/导图/关系图），入 store 跨 Tab/重挂保持。 */
+  syllabusView: SyllabusView;
+  /** 思维导图折叠状态（key=章节 id）；入 store 跨视图/重挂保持。 */
+  syllabusMindmapCollapsed: Record<string, boolean>;
+  /** 列表视图状态过滤（图例点击），null = 不过滤。 */
+  syllabusStatusFilter: SyllabusStatusFilter;
 
   // -- 全局弹层 ----------------------------------------------------------------------
   paletteOpen: boolean;
@@ -179,6 +191,9 @@ interface AppState {
   setPanelData: (patch: Partial<Pick<AppState, "progress" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
   setSyllabusSearch: (search: string) => void;
+  setSyllabusView: (view: SyllabusView) => void;
+  setSyllabusMindmapCollapsed: (chapterId: string, collapsed: boolean) => void;
+  setSyllabusStatusFilter: (filter: SyllabusStatusFilter) => void;
   setQuiz: (patch: Partial<QuizState>) => void;
   quizReset: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -224,6 +239,9 @@ export const useAppStore = create<AppState>((set) => ({
   quiz: { ...initialQuiz },
   syllabusCollapsed: {},
   syllabusSearch: "",
+  syllabusView: "tree",
+  syllabusMindmapCollapsed: {},
+  syllabusStatusFilter: null,
   paletteOpen: false,
   wizardOpen: false,
   settingsOpen: false,
@@ -244,6 +262,9 @@ export const useAppStore = create<AppState>((set) => ({
       quiz: { ...initialQuiz },
       syllabusCollapsed: {},
       syllabusSearch: "",
+      syllabusView: "tree",
+      syllabusMindmapCollapsed: {},
+      syllabusStatusFilter: null,
       focusConceptId: null,
       buildStatus: "idle",
       wakeupCard: null,
@@ -322,6 +343,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSyllabusCollapsed: (chapterId, collapsed) =>
     set((state) => ({ syllabusCollapsed: { ...state.syllabusCollapsed, [chapterId]: collapsed } })),
   setSyllabusSearch: (syllabusSearch) => set({ syllabusSearch }),
+  setSyllabusView: (syllabusView) => set({ syllabusView }),
+  setSyllabusMindmapCollapsed: (chapterId, collapsed) =>
+    set((state) => ({ syllabusMindmapCollapsed: { ...state.syllabusMindmapCollapsed, [chapterId]: collapsed } })),
+  setSyllabusStatusFilter: (syllabusStatusFilter) => set({ syllabusStatusFilter }),
   setQuiz: (patch) =>
     set((state) => ({ quiz: { ...state.quiz, ...patch } })),
   quizReset: () => set({ quiz: { ...initialQuiz } }),
@@ -345,6 +370,9 @@ export const useAppStore = create<AppState>((set) => ({
       quiz: { ...initialQuiz },
       syllabusCollapsed: {},
       syllabusSearch: "",
+      syllabusView: "tree",
+      syllabusMindmapCollapsed: {},
+      syllabusStatusFilter: null,
       buildStatus: "idle",
     }),
 }));

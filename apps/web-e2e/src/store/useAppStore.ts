@@ -1,7 +1,7 @@
 /**
  * StudyClaw WebUI 全局状态（Zustand，T3.1）。
  *
- * 三栏共享：激活项目/会话、当前学习模式、右栏 Tab 与新事件角标、
+ * 三栏共享：激活项目/对话、当前学习模式、右栏 Tab 与新事件角标、
  * 中栏聚焦概念（大纲树/拓扑图点击 → Agent 注入对应 chunk 上下文）、
  * 同步指示灯（● Synced / ◌ Syncing）。
  */
@@ -21,6 +21,12 @@ import type {
 import type { LearningMode } from "@/src/types";
 
 export type PanelTab = "progress" | "syllabus" | "heatmap" | "quiz";
+
+/** 大纲 Tab 内的视图（列表 / 思维导图 / 关系图），入 store 跨 Tab/重挂保持。 */
+export type SyllabusView = "tree" | "mindmap" | "graph";
+
+/** 大纲概念掌握度状态过滤（列表视图图例点击），null = 不过滤。 */
+export type SyllabusStatusFilter = "mastered" | "learning" | "weak" | "locked" | null;
 
 // ---------------------------------------------------------------------------
 // Quiz（🎯 题卡 Tab）状态：驱动与 SSE 编排在 lib/quizFlow.ts（store 保持纯同步）
@@ -100,10 +106,10 @@ export interface ChatMessage {
 }
 
 interface AppState {
-  // -- 项目与会话（左栏） ------------------------------------------------------
+  // -- 项目与对话（左栏） ------------------------------------------------------
   courses: CourseSummary[];
   activeCourseId: string | null;
-  /** 已加载项目的会话树；左栏不能把当前项目的会话投影到其他项目下。 */
+  /** 已加载项目的对话树；左栏不能把当前项目的对话投影到其他项目下。 */
   courseSessions: Record<string, SessionSummary[]>;
   sessions: SessionSummary[];
   activeSessionId: string | null;
@@ -118,18 +124,18 @@ interface AppState {
   mode: LearningMode;
   focusConceptId: string | null;
   modeBanner: string | null; // 模式/状态切换横幅（1.6s 后自动消失）
-  sessionBanner: string | null; // 会话横幅（常驻，切换时闪现）
-  suggestedEntry: string | null; // 恢复会话的建议入口（可点击发送）
+  sessionBanner: string | null; // 对话横幅（常驻，切换时闪现）
+  suggestedEntry: string | null; // 恢复对话的建议入口（可点击发送）
   lastTurnId: string | null; // 最近完成轮次 id（断线 Last-Event-ID 重连用）
-  /** 学习中断唤醒（F6）：恢复/新建会话时的 1 道快问快答，可跳过。 */
+  /** 学习中断唤醒（F6）：恢复/新建对话时的 1 道快问快答，可跳过。 */
   wakeupCard: WakeupCard | null;
   /** M-C (Sprint 8): pending ask question for composer answer state. */
   pendingAsk: AskView | null;
   /** 当前生效的模型座位（chat meta 帧 / 模型座位切换写入，api_spec §3.1 v2.6）。 */
-  activeModel: { providerId: string; model: string } | null;
-  /** 当前活动工作区根目录（/api/workspaces 的 current；切换器显示用）。 */
+  activeModel: { providerId: string; model: string; effort?: string | null } | null;
+  /** 当前活动项目根目录（/api/workspaces 的 current；切换器显示用）。 */
   workspacePath: string | null;
-  /** dsh InputMachine 语义：未发送草稿按工作区/课程/会话隔离，切回时恢复。 */
+  /** dsh InputMachine 语义：未发送草稿按项目/课程/对话隔离，切回时恢复。 */
   composerDrafts: Record<string, string>;
 
   // -- 右栏面板 --------------------------------------------------------------------
@@ -143,6 +149,12 @@ interface AppState {
   syllabusCollapsed: Record<string, boolean>;
   /** 大纲树搜索词（入 store，切视图不丢）。 */
   syllabusSearch: string;
+  /** 大纲当前视图（列表/导图/关系图），入 store 跨 Tab/重挂保持。 */
+  syllabusView: SyllabusView;
+  /** 思维导图折叠状态（key=章节 id）；入 store 跨视图/重挂保持。 */
+  syllabusMindmapCollapsed: Record<string, boolean>;
+  /** 列表视图状态过滤（图例点击），null = 不过滤。 */
+  syllabusStatusFilter: SyllabusStatusFilter;
 
   // -- 全局弹层 ----------------------------------------------------------------------
   paletteOpen: boolean;
@@ -171,7 +183,7 @@ interface AppState {
   setLastTurnId: (turnId: string | null) => void;
   setWakeupCard: (card: WakeupCard | null) => void;
   setPendingAsk: (ask: AskView | null) => void;
-  setActiveModel: (active: { providerId: string; model: string } | null) => void;
+  setActiveModel: (active: { providerId: string; model: string; effort?: string | null } | null) => void;
   setWorkspacePath: (path: string | null) => void;
   setComposerDraft: (key: string, draft: string) => void;
   setActiveTab: (tab: PanelTab) => void;
@@ -179,6 +191,9 @@ interface AppState {
   setPanelData: (patch: Partial<Pick<AppState, "progress" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
   setSyllabusSearch: (search: string) => void;
+  setSyllabusView: (view: SyllabusView) => void;
+  setSyllabusMindmapCollapsed: (chapterId: string, collapsed: boolean) => void;
+  setSyllabusStatusFilter: (filter: SyllabusStatusFilter) => void;
   setQuiz: (patch: Partial<QuizState>) => void;
   quizReset: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -224,6 +239,9 @@ export const useAppStore = create<AppState>((set) => ({
   quiz: { ...initialQuiz },
   syllabusCollapsed: {},
   syllabusSearch: "",
+  syllabusView: "tree",
+  syllabusMindmapCollapsed: {},
+  syllabusStatusFilter: null,
   paletteOpen: false,
   wizardOpen: false,
   settingsOpen: false,
@@ -236,6 +254,7 @@ export const useAppStore = create<AppState>((set) => ({
       sessions: [],
       activeSessionId: null,
       activeSessionTitle: "",
+      activeModel: null,
       messages: [],
       progress: null,
       mastery: null,
@@ -243,6 +262,9 @@ export const useAppStore = create<AppState>((set) => ({
       quiz: { ...initialQuiz },
       syllabusCollapsed: {},
       syllabusSearch: "",
+      syllabusView: "tree",
+      syllabusMindmapCollapsed: {},
+      syllabusStatusFilter: null,
       focusConceptId: null,
       buildStatus: "idle",
       wakeupCard: null,
@@ -256,7 +278,7 @@ export const useAppStore = create<AppState>((set) => ({
   setSessions: (sessions) => set({ sessions }),
   setActiveSession: (sessionId, title = "") =>
     // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）
-    set({ activeSessionId: sessionId, activeSessionTitle: title }),
+    set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
@@ -321,6 +343,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSyllabusCollapsed: (chapterId, collapsed) =>
     set((state) => ({ syllabusCollapsed: { ...state.syllabusCollapsed, [chapterId]: collapsed } })),
   setSyllabusSearch: (syllabusSearch) => set({ syllabusSearch }),
+  setSyllabusView: (syllabusView) => set({ syllabusView }),
+  setSyllabusMindmapCollapsed: (chapterId, collapsed) =>
+    set((state) => ({ syllabusMindmapCollapsed: { ...state.syllabusMindmapCollapsed, [chapterId]: collapsed } })),
+  setSyllabusStatusFilter: (syllabusStatusFilter) => set({ syllabusStatusFilter }),
   setQuiz: (patch) =>
     set((state) => ({ quiz: { ...state.quiz, ...patch } })),
   quizReset: () => set({ quiz: { ...initialQuiz } }),
@@ -344,6 +370,9 @@ export const useAppStore = create<AppState>((set) => ({
       quiz: { ...initialQuiz },
       syllabusCollapsed: {},
       syllabusSearch: "",
+      syllabusView: "tree",
+      syllabusMindmapCollapsed: {},
+      syllabusStatusFilter: null,
       buildStatus: "idle",
     }),
 }));

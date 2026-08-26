@@ -17,6 +17,16 @@ const { storeState, syllabus } = vi.hoisted(() => {
     setSyllabusSearch: vi.fn((search: string) => {
       storeState.syllabusSearch = search;
     }),
+    syllabusView: "tree" as "tree" | "mindmap" | "graph",
+    setSyllabusView: vi.fn((view: string) => {
+      storeState.syllabusView = view as never;
+    }),
+    syllabusMindmapCollapsed: {} as Record<string, boolean>,
+    setSyllabusMindmapCollapsed: vi.fn(),
+    syllabusStatusFilter: null as string | null,
+    setSyllabusStatusFilter: vi.fn((filter: string | null) => {
+      storeState.syllabusStatusFilter = filter;
+    }),
   };
   const syllabus = {
     courseId: "course-1",
@@ -63,17 +73,21 @@ afterEach(() => {
   cleanup();
   storeState.syllabusCollapsed = {};
   storeState.syllabusSearch = "";
+  storeState.syllabusView = "tree";
+  storeState.syllabusStatusFilter = null;
 });
 
 describe("SyllabusTab", () => {
   it("switches between the list, mindmap and graph views", async () => {
-    render(<SyllabusTab />);
+    const { rerender } = render(<SyllabusTab />);
 
     expect(await screen.findByText("章节与知识点")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关系图" }));
+    rerender(<SyllabusTab />);
     expect(screen.getByTestId("syllabus-graph")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "导图" }));
+    rerender(<SyllabusTab />);
     await waitFor(() => expect(screen.getByTestId("syllabus-mindmap")).toBeInTheDocument());
   });
 
@@ -98,5 +112,33 @@ describe("SyllabusTab", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /第一章/ }));
     expect(storeState.setSyllabusCollapsed).toHaveBeenCalledWith("chapter-1", true);
+  });
+
+  it("filts concepts by status legend and resets via retoggle", async () => {
+    const { rerender } = render(<SyllabusTab />);
+    await screen.findByText("章节与知识点");
+
+    // 无掌握度数据 → 全部概念默认 locked。
+    storeState.syllabusStatusFilter = "mastered";
+    rerender(<SyllabusTab />);
+    expect(screen.queryByText("调度")).not.toBeInTheDocument();
+    expect(screen.queryByText("网络策略")).not.toBeInTheDocument();
+
+    storeState.syllabusStatusFilter = null;
+    rerender(<SyllabusTab />);
+    expect(screen.getByText("调度")).toBeInTheDocument();
+  });
+
+  it("keeps the selected view in the store and restores it", async () => {
+    const { rerender } = render(<SyllabusTab />);
+    await screen.findByText("章节与知识点");
+
+    fireEvent.click(screen.getByRole("button", { name: "导图" }));
+    expect(storeState.syllabusView).toBe("mindmap");
+
+    storeState.syllabusView = "graph";
+    rerender(<SyllabusTab />);
+    const graph = await screen.findByTestId("syllabus-graph");
+    expect(graph).toBeInTheDocument();
   });
 });

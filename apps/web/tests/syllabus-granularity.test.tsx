@@ -29,6 +29,12 @@ const { storeState, apiMocks, syllabusFine, syllabusCoarse } = vi.hoisted(() => 
       setSyllabusCollapsed: vi.fn(),
       syllabusSearch: "",
       setSyllabusSearch: vi.fn(),
+      syllabusView: "tree" as const,
+      setSyllabusView: vi.fn(),
+      syllabusMindmapCollapsed: {},
+      setSyllabusMindmapCollapsed: vi.fn(),
+      syllabusStatusFilter: null,
+      setSyllabusStatusFilter: vi.fn(),
     },
     apiMocks: {
       syllabus: vi.fn(),

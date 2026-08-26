@@ -250,3 +250,120 @@ body {
     animation: none;
   }
 }
+
+/* 鐢诲竷鑳屾櫙閫忔槑锛堝鍣ㄥ簳鑹茬敱 studyclaw 闈㈡澘鍐冲畾锛?*/
+.studyclaw-mindmap .map-container {
+  background-color: transparent;
+}
+
+/* 鏍硅妭鐐癸細鍝佺墝钃濊兌鍥婏紙mind-elixir 榛樿 25px 鍦嗚澶у瓧鍙凤紝鏀剁獎鎴愬崱鐗囷級 */
+.studyclaw-mindmap .map-container me-root me-tpc {
+  color: var(--color-bg-panel);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 10px;
+  border: none;
+}
+
+/* 涓€绾у垎鏀紙绔犺妭锛夛細鐧藉崱 + hairline 杈规锛屽瓧鍙?13px */
+.studyclaw-mindmap .map-container me-main > me-wrapper > me-parent > me-tpc {
+  background-color: var(--color-bg-panel);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border-line);
+  box-shadow: 0 1px 2px rgba(15, 17, 21, 0.04);
+}
+.studyclaw-mindmap .map-container me-main > me-wrapper > me-parent > me-tpc:hover {
+  border-color: var(--color-accent-focus);
+}
+.studyclaw-mindmap .map-container me-main > me-wrapper > me-parent > me-tpc.selected {
+  outline-color: var(--color-accent-focus);
+}
+
+/* 浜岀骇鑺傜偣锛堟蹇碉級锛氬崱鐗囧寲 + 鐘舵€佽壊杈规銆侀€変腑鎬?*/
+.studyclaw-mindmap .map-container me-parent me-tpc {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-bg-card) 55%, var(--color-bg-panel));
+  border: 1px solid var(--color-border-faint);
+  transition: border-color 120ms ease, background-color 120ms ease, opacity 120ms ease;
+}
+.studyclaw-mindmap .map-container me-parent me-tpc:hover {
+  border-color: var(--color-accent-focus);
+}
+.studyclaw-mindmap .map-container me-parent me-tpc.selected {
+  outline: 2px solid var(--color-accent-focus);
+  outline-offset: 1px;
+}
+
+/* 鑺傜偣鍐呭甯冨眬锛坰emantic HTML from syllabusMindmapData.conceptHtml锛?*/
+.studyclaw-mindmap .map-container .sc-mm-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  white-space: nowrap;
+}
+.studyclaw-mindmap .map-container .sc-mm-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.studyclaw-mindmap .map-container .sc-mm-node[data-status="mastered"] .sc-mm-dot {
+  background: var(--color-accent-pass);
+}
+.studyclaw-mindmap .map-container .sc-mm-node[data-status="learning"] .sc-mm-dot {
+  background: var(--color-accent-warn);
+}
+.studyclaw-mindmap .map-container .sc-mm-node[data-status="weak"] .sc-mm-dot {
+  background: var(--color-accent-fail);
+}
+.studyclaw-mindmap .map-container .sc-mm-node[data-status="locked"] .sc-mm-dot {
+  background: var(--color-text-caption);
+  opacity: 0.7;
+}
+.studyclaw-mindmap .map-container .sc-mm-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.studyclaw-mindmap .map-container .sc-mm-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--color-bg-card);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border-faint);
+}
+.studyclaw-mindmap .map-container .sc-mm-pct {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.studyclaw-mindmap .map-container .sc-mm-dim {
+  opacity: 0.25;
+}
+
+/* 鎶樺彔鍦嗙偣锛坢e-epd锛夌粏绾垮寲锛岄伩鍏嶅噷涔憋紱hover 鎬佹樉鑹?*/
+.studyclaw-mindmap .map-container me-parent me-epd {
+  opacity: 0.55;
+  filter: grayscale(0.2);
+}
+.studyclaw-mindmap .map-container me-parent me-epd.minus {
+  opacity: 0.25;
+}
+@media (hover: hover) {
+  .studyclaw-mindmap .map-container me-parent me-epd.minus:hover {
+    opacity: 0.7;
+  }
+}
+

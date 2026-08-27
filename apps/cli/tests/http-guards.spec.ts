@@ -9,11 +9,7 @@ import { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody } from '../src/lib/http-guards.ts'
 
-class FakeRequest extends EventEmitter {
-  destroy(): void {
-    this.emit('error', new Error('destroyed'))
-  }
-}
+class FakeRequest extends EventEmitter {}
 
 function writeChunks(request: FakeRequest, chunks: Buffer[]): void {
   queueMicrotask(() => {
@@ -42,11 +38,13 @@ describe('readRequestBody', () => {
     await expect(pending).resolves.toBe(text)
   })
 
-  it('超过上限抛 PayloadTooLargeError 并中断读取', async () => {
+  it('超过上限抛 PayloadTooLargeError（丢弃余量但不撕连接）', async () => {
     const request = new FakeRequest()
     const pending = readRequestBody(request as unknown as IncomingMessage, 16)
     queueMicrotask(() => {
       request.emit('data', Buffer.alloc(32))
+      request.emit('data', Buffer.alloc(32))
+      request.emit('end')
     })
     await expect(pending).rejects.toBeInstanceOf(PayloadTooLargeError)
   })

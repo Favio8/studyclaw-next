@@ -684,15 +684,14 @@ async function serve(port: number): Promise<void> {
           response.writeHead(200)
           response.end(JSON.stringify(envelope))
         } catch (error) {
-          if (error instanceof PayloadTooLargeError) {
-            if (response.writableEnded || response.destroyed) return
-            response.writeHead(413)
-            response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
-            return
-          }
-          throw error
         }
       } catch (error) {
+        if (error instanceof PayloadTooLargeError) {
+          if (response.writableEnded || response.destroyed) return
+          response.writeHead(413)
+          response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
+          return
+        }
         // Every request must receive a JSON envelope. A native picker or a
         // newly added service can reject outside dispatch; without this
         // boundary catch Next reports a misleading HTTP 500/socket hangup.

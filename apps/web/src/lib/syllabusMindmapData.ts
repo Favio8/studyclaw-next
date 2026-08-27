@@ -38,7 +38,12 @@ export interface MindmapData {
 }
 
 function escHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /** 概念节点语义化 HTML：状态点 + 依赖角标 + 名称 + 掌握度（无内联样式）。 */
@@ -48,7 +53,7 @@ export function conceptHtml(name: string, meta: MindmapConceptMeta): string {
     : "";
   const pct = `<span class="sc-mm-pct">${Math.round(meta.mastery * 100)}%</span>`;
   const cls = `sc-mm-node${meta.dim ? " sc-mm-dim" : ""}`;
-  return `<span class="${cls}" data-status="${meta.status}"><span class="sc-mm-dot"></span>${badge}<span class="sc-mm-text">${escHtml(name)}</span>${pct}</span>`;
+  return `<span class="${cls}" data-status="${escHtml(meta.status)}"><span class="sc-mm-dot"></span>${badge}<span class="sc-mm-text">${escHtml(name)}</span>${pct}</span>`;
 }
 
 /**

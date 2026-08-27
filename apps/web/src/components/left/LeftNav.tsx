@@ -967,7 +967,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget) setConfirmForget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" tabIndex={-1} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setConfirmForget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
             <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
             <p className="mt-3 text-[13px] leading-6 text-text-secondary">
               将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
@@ -1228,8 +1228,8 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget) setConfirmForget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
-            <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title-expanded" tabIndex={-1} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setConfirmForget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
+            <h2 id="ws-forget-title-expanded" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
             <p className="mt-3 text-[13px] leading-6 text-text-secondary">
               将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
             </p>
@@ -1261,7 +1261,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget && !sessionRenameBusy) setSessionRenameTarget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="session-rename-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+          <div role="dialog" aria-modal="true" aria-labelledby="session-rename-title" tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape" && !sessionRenameBusy) { event.stopPropagation(); setSessionRenameTarget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
             <h2 id="session-rename-title" className="text-[16px] font-medium text-text-primary">重命名对话</h2>
             <input
               ref={sessionRenameInputRef}

@@ -69,15 +69,47 @@ export function useChatStream() {
   const lastSentRef = useRef<string>("");
   const expectedTurnRef = useRef(0);
   const sendRef = useRef<(text: string, opts?: { skipAppendUser?: boolean; queuedTurnId?: string }) => Promise<void>>(() => Promise.resolve());
-  const queuedMessagesRef = useRef<Array<{ text: string; turnId?: string }>>([]);
+  /** FE-1：SSE 业务 error 帧 → 终态标记，绝不进入网络重试循环。 */
+  const streamErrorRef = useRef<string | null>(null);
+  /** FE-4：done 后延迟刷新的定时器句柄，卸载时统一清理。 */
+  const deferredTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   useEffect(
     () => () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       if (abortRef.current) abortRef.current.abort();
+      for (const timer of deferredTimersRef.current) clearTimeout(timer);
+      deferredTimersRef.current.clear();
     },
     [],
   );
+
+  /** setTimeout 包装：记录句柄、触发后自清，卸载统一取消。 */
+  const scheduleDeferred = useCallback((fn: () => void, ms: number) => {
+    const timer = setTimeout(() => {
+      deferredTimersRef.current.delete(timer);
+      fn();
+    }, ms);
+    deferredTimersRef.current.add(timer);
+  }, []);
+
+  /** FE-2 队列归属守卫：只有"发起排队时的会话"仍处于激活状态才允许发送下一条，
+   * 否则丢弃并提示——修复 abort 走成功出口把旧会话文本发进新会话的串课。 */
+  const ownerRef = useRef<{ courseId: string | null; sessionId: string | null }>({ courseId: null, sessionId: null });
+
+  const drainQueueIfOwned = useCallback(() => {
+    const state = useAppStore.getState();
+    const next = state.shiftQueuedMessage();
+    if (next === undefined) return;
+    const owner = ownerRef.current;
+    const sameOwner = (state.activeCourseId ?? null) === owner.courseId
+      && (state.activeSessionId ?? null) === owner.sessionId;
+    if (!sameOwner) {
+      flashStatusBanner("已切换会话，丢弃旧队列消息");
+      return;
+    }
+    scheduleDeferred(() => { void sendRef.current(next.text, { queuedTurnId: next.turnId }); }, 0);
+  }, [flashStatusBanner, scheduleDeferred]);
 
   const refreshSessions = useCallback(
     async (courseId: string, sessionId?: string) => {
@@ -139,6 +171,8 @@ export function useChatStream() {
             setActiveSession(sessionId, "");
             const courseId = state.activeCourseId;
             if (courseId) void refreshSessions(courseId);
+            // FE-2：首条消息动态建会话 → 归属快照同步更新，队列仍属本会话。
+            if (ownerRef.current.sessionId === null) ownerRef.current.sessionId = sessionId;
           }
           break;
         }
@@ -226,7 +260,8 @@ export function useChatStream() {
             if (courseId) {
               const sessionId = state.activeSessionId;
               void refreshSessions(courseId, sessionId || undefined);
-              window.setTimeout(() => {
+              // FE-4：定时器登记句柄，卸载统一清理，不再卸载后 setState。
+              scheduleDeferred(() => {
                 void refreshSessions(useAppStore.getState().activeCourseId ?? courseId, useAppStore.getState().activeSessionId || undefined);
               }, 3000);
             }
@@ -234,14 +269,22 @@ export function useChatStream() {
           break;
         }
         case "error": {
-          throw new Error(`${ev.data.code}: ${ev.data.message}`);
+          // FE-1：服务端业务错误（限流/配额/工具失败）是终态——旧的 throw 进
+          // 网络重试循环导致整轮最多重发 3 次（副作用×3、费用×3）。标记后由
+          // send 循环直接收尾，不做任何重试。
+          streamErrorRef.current = `${ev.data.code}: ${ev.data.message}`;
+          cancelPendingFlush();
+          updateLastAgent({ streaming: false, error: streamErrorRef.current });
+          setSyncState("synced");
+          flashStatusBanner("✗ 服务端返回错误，已停止本回合（未重试）");
+          break;
         }
         default: {
           /* 未知事件类型：契约外，忽略 */
         }
       }
     },
-    [cancelPendingFlush, refreshPanel, refreshSessions, scheduleFlush, setActiveSession, setLastTurnId, setPendingAsk, setSyncState, updateLastAgent],
+    [cancelPendingFlush, flashStatusBanner, refreshPanel, refreshSessions, scheduleDeferred, scheduleFlush, setActiveSession, setLastTurnId, setPendingAsk, setSyncState, updateLastAgent],
   );
 
   const send = useCallback(
@@ -249,20 +292,20 @@ export function useChatStream() {
       const trimmed = text.trim();
       if (!trimmed) return;
       if (useAppStore.getState().streaming && !opts?.queuedTurnId) {
-        if (queuedMessagesRef.current.length >= 20) {
+        const state = useAppStore.getState();
+        if (state.queuedMessages.length >= 20) {
           flashStatusBanner("队列已满，请等待当前回合完成");
           return;
         }
-        const state = useAppStore.getState();
         if (state.activeSessionId) {
           try {
             const queued = await api.enqueueAgent(state.activeCourseId ?? "", state.activeSessionId, state.mode, trimmed);
-            queuedMessagesRef.current.push({ text: trimmed, turnId: queued.turnId });
+            state.enqueueQueuedMessage({ text: trimmed, turnId: queued.turnId });
           } catch {
-            queuedMessagesRef.current.push({ text: trimmed });
+            state.enqueueQueuedMessage({ text: trimmed });
           }
-        } else queuedMessagesRef.current.push({ text: trimmed });
-        flashStatusBanner(`已加入队列 · ${queuedMessagesRef.current.length}`);
+        } else state.enqueueQueuedMessage({ text: trimmed });
+        flashStatusBanner(`已加入队列 · ${useAppStore.getState().queuedMessages.length}`);
         return;
       }
 
@@ -371,6 +414,9 @@ export function useChatStream() {
       thinkingRef.current = "";
       thinkingStartRef.current = null;
         toolsRef.current = [];
+      streamErrorRef.current = null;
+      // FE-2：记录本回合的归属（项目+会话），drain 队列前比对。
+      ownerRef.current = { courseId: courseId ?? null, sessionId: sessionId ?? null };
 
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
         if (attempt > 0) {
@@ -381,6 +427,7 @@ export function useChatStream() {
             toolsRef.current = [];
           updateLastAgent({ content: "", thinking: "", streaming: true });
         }
+        let abortedMidStream = false;
         try {
           for await (const ev of streamChat(
             {
@@ -395,23 +442,42 @@ export function useChatStream() {
             },
             abort.signal,
           )) {
-            if (abort.signal.aborted) break;
+            if (abort.signal.aborted) { abortedMidStream = true; break; }
             handleEvent(ev);
+            // FE-1：业务 error 帧是终态，立刻退出事件循环且不计入网络重试。
+            if (streamErrorRef.current !== null) break;
+          }
+          if (abort.signal.aborted) abortedMidStream = true;
+          if (abortedMidStream) {
+            // 用户停止/切换对话：定格占位卡并退出；FE-2：不 drain 队列。
+            cancelPendingFlush();
+            updateLastAgent({ streaming: false });
+            break;
+          }
+          if (streamErrorRef.current !== null) {
+            // FE-1 终态失败：不重试。消息卡错误已在 error 分支写入。
+            cancelPendingFlush();
+            unregisterActiveChat(abort);
+            abortRef.current = null;
+            return;
           }
           // 成功完成：收尾（done 已定格消息卡，此处清全局流态）
           cancelPendingFlush();
           setStreaming(false);
           unregisterActiveChat(abort);
           abortRef.current = null;
-          const next = queuedMessagesRef.current.shift();
-          if (next !== undefined) window.setTimeout(() => { void sendRef.current(next.text, { queuedTurnId: next.turnId }); }, 0);
+          drainQueueIfOwned();
           return;
         } catch (exc) {
           if (isAbortError(exc) || abort.signal.aborted) {
-            // 用户停止/切换对话：定格占位卡（切换方随后可能清空消息）
+            // 用户停止/切换对话：定格占位卡（切换方随后可能清空消息）；
+            // FE-2：不走 drain——旧会话的排队文本绝不能发进当前会话。
             cancelPendingFlush();
             updateLastAgent({ streaming: false });
-            break;
+            abortRef.current = null;
+            setStreaming(false);
+            unregisterActiveChat(abort);
+            return;
           }
           if (attempt < MAX_ATTEMPTS - 1) continue;
           cancelPendingFlush();
@@ -420,6 +486,8 @@ export function useChatStream() {
             error: errorMessage(exc),
           });
           flashStatusBanner("✗ 对话流中断，可在消息卡上重试");
+          abortRef.current = null;
+          break;
         }
       }
       setStreaming(false);
@@ -471,8 +539,7 @@ export function useChatStream() {
       setStreaming(false);
       unregisterActiveChat(abort);
       abortRef.current = null;
-      const next = queuedMessagesRef.current.shift();
-      if (next !== undefined) window.setTimeout(() => { void sendRef.current(next.text, { queuedTurnId: next.turnId }); }, 0);
+      drainQueueIfOwned();
       return accepted;
     } catch (exc) {
       cancelPendingFlush();

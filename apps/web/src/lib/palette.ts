@@ -59,6 +59,12 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     keywords: "总结 笔记 summary 学习",
   },
   {
+    id: "help",
+    label: "/help",
+    desc: "查看全部可用命令",
+    keywords: "帮助 命令 help 帮助文档 用法",
+  },
+  {
     id: "new-session",
     label: "新建对话",
     desc: "在当前项目下新建对话",

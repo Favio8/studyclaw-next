@@ -20,6 +20,10 @@ import { api } from "@/src/lib/api";
 import { createNewSession } from "@/src/lib/sessionActions";
 import { nextMessageId, useAppStore } from "@/src/store/useAppStore";
 
+/** 模块级（跨所有 useSessionActions 实例共享）：手动选择纪元 + 自动选会话去重。 */
+let selectEpoch = 0;
+const autoSelectRuns = new Map<string, Promise<void>>();
+
 export function useSessionActions() {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
   const setSessions = useAppStore((s) => s.setSessions);
@@ -29,6 +33,12 @@ export function useSessionActions() {
   const setSessionBanner = useAppStore((s) => s.setSessionBanner);
   const setSuggestedEntry = useAppStore((s) => s.setSuggestedEntry);
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
+
+  /** 用户主动选中对话的计数：自动选会话 effect 完成前若发生了任何手动
+   * 选择，就不再覆盖用户的选择（FE-2 竞态守卫）。 */
+  function bumpSelectEpoch() {
+    return ++selectEpoch;
+  }
 
   async function loadSessions(courseId: string) {
     try {
@@ -47,6 +57,7 @@ export function useSessionActions() {
     if (courseId !== useAppStore.getState().activeCourseId) setActiveCourse(courseId);
     abortActiveChat(); // 中止旧流（若在流式）
     useAppStore.getState().setStreaming(false);
+    bumpSelectEpoch();
     try {
       const restored = await api.restoreSession(courseId, sessionId);
       // Resume the shared Host Agent so subsequent chat turns use one live
@@ -136,22 +147,35 @@ export function useSessionActions() {
   }
 
   // 项目切换 → 对话列表刷新 + 默认恢复最近对话（列表第一项，§3.2）
+  // FE-2：双实例收敛 + 归属守卫——同一课程的自动选择以模块级 promise 去重；
+  // 完成时若课程已再切换或期间发生过手动选择，则放弃覆盖。
   useEffect(() => {
     if (!activeCourseId) return;
     abortActiveChat();
-    void loadSessions(activeCourseId).then((sessions) => {
-      if (sessions.length > 0) {
-        void selectSession(sessions[0].sessionId);
-      } else {
-        setActiveSession(null);
-        setMessages([]);
-        setSuggestedEntry(null);
-        setSessionBanner(
-          `── 新对话 · ${modeLabel(useAppStore.getState().mode)}模式 ──`,
-        );
-      }
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const courseId = activeCourseId;
+    const epochAtStart = selectEpoch;
+    let run = autoSelectRuns.get(courseId);
+    if (run === undefined) {
+      run = (async () => {
+        const sessions = await loadSessions(courseId);
+        if (useAppStore.getState().activeCourseId !== courseId || selectEpoch !== epochAtStart) return;
+        if (sessions.length > 0) {
+          void selectSession(sessions[0].sessionId, courseId);
+        } else {
+          if (useAppStore.getState().activeCourseId !== courseId || selectEpoch !== epochAtStart) return;
+          setActiveSession(null);
+          setMessages([]);
+          setSuggestedEntry(null);
+          setSessionBanner(
+            `── 新对话 · ${modeLabel(useAppStore.getState().mode)}模式 ──`,
+          );
+        }
+      })();
+      autoSelectRuns.set(courseId, run);
+      void run.finally(() => {
+        if (autoSelectRuns.get(courseId) === run) autoSelectRuns.delete(courseId);
+      });
+    }
   }, [activeCourseId]);
 
   return { loadSessions, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession };

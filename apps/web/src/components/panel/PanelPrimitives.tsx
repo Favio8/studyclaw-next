@@ -27,15 +27,18 @@ export function PanelSection({
   title,
   icon: Icon,
   action,
+  className,
   children,
 }: {
   title: string;
   icon: LucideIcon;
   action?: ReactNode;
+  /** PERF-3：非激活视图传 "hidden" 保活挂载而不显示。 */
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <section className="space-y-2">
+    <section className={className === undefined ? "space-y-2" : `space-y-2 ${className}`}>
       <div className="flex min-h-5 items-center gap-2 px-0.5">
         <Icon size={15} strokeWidth={1.8} className="shrink-0 text-text-muted" aria-hidden />
         <h2 className="min-w-0 flex-1 text-[13px] font-medium text-text-primary">{title}</h2>

@@ -127,6 +127,9 @@ interface AppState {
   sessionBanner: string | null; // 对话横幅（常驻，切换时闪现）
   suggestedEntry: string | null; // 恢复对话的建议入口（可点击发送）
   lastTurnId: string | null; // 最近完成轮次 id（断线 Last-Event-ID 重连用）
+  /** FE-2：全局排队消息（streaming 时发送）。此前是 useChatStream 实例私有
+   * ref——ChatArea 与 CommandPalette 两个实例各自排队，Palette 关闭即蒸发。 */
+  queuedMessages: Array<{ text: string; turnId?: string }>;
   /** 学习中断唤醒（F6）：恢复/新建对话时的 1 道快问快答，可跳过。 */
   wakeupCard: WakeupCard | null;
   /** M-C (Sprint 8): pending ask question for composer answer state. */
@@ -185,6 +188,10 @@ interface AppState {
   setSessionBanner: (text: string | null) => void;
   setSuggestedEntry: (text: string | null) => void;
   setLastTurnId: (turnId: string | null) => void;
+  enqueueQueuedMessage: (entry: { text: string; turnId?: string }) => void;
+  /** 取出队首消息；无可取时返回 undefined。 */
+  shiftQueuedMessage: () => { text: string; turnId?: string } | undefined;
+  queuedCount: () => number;
   setWakeupCard: (card: WakeupCard | null) => void;
   setPendingAsk: (ask: AskView | null) => void;
   setActiveModel: (active: { providerId: string; model: string; effort?: string | null } | null) => void;
@@ -213,7 +220,7 @@ export function nextMessageId(): string {
   return `m_${Date.now().toString(36)}_${msgSeq}`;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   courses: [],
   activeCourseId: null,
   courseSessions: {},
@@ -223,6 +230,7 @@ export const useAppStore = create<AppState>((set) => ({
   sessionBanner: null,
   suggestedEntry: null,
   lastTurnId: null,
+  queuedMessages: [],
   wakeupCard: null,
   pendingAsk: null,
   activeModel: null,
@@ -325,6 +333,15 @@ export const useAppStore = create<AppState>((set) => ({
   setSessionBanner: (sessionBanner) => set({ sessionBanner }),
   setSuggestedEntry: (suggestedEntry) => set({ suggestedEntry }),
   setLastTurnId: (lastTurnId) => set({ lastTurnId }),
+  enqueueQueuedMessage: (entry) =>
+    set((state) => ({ queuedMessages: [...state.queuedMessages, entry] })),
+  shiftQueuedMessage: () => {
+    const current = get().queuedMessages;
+    if (current.length === 0) return undefined;
+    set({ queuedMessages: current.slice(1) });
+    return current[0];
+  },
+  queuedCount: () => get().queuedMessages.length,
   setWakeupCard: (wakeupCard) => set({ wakeupCard }),
   setPendingAsk: (pendingAsk) => set({ pendingAsk }),
   setActiveModel: (activeModel) => set({ activeModel }),
@@ -368,6 +385,7 @@ export const useAppStore = create<AppState>((set) => ({
       sessionBanner: null,
       suggestedEntry: null,
       lastTurnId: null,
+      queuedMessages: [], // 切项目即丢弃旧排队（串课防护）
       wakeupCard: null,
   pendingAsk: null,
       messages: [],

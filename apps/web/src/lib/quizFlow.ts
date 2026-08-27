@@ -138,9 +138,10 @@ export async function quizAnswer(answer: string): Promise<void> {
           if (wait > 0) await new Promise((r) => setTimeout(r, wait));
           lastRubricAt = Date.now();
           if (abort.signal.aborted) return;
-          useAppStore.getState().setQuiz({
-            rubrics: [...useAppStore.getState().quiz.rubrics, item],
-          });
+          // PERF-7：整段换新数组 + 单次 setQuiz，避免每条采分点 O(n²) 全量拷贝。
+          useAppStore.setState((prev) => ({
+            quiz: { ...prev.quiz, rubrics: [...prev.quiz.rubrics, item] },
+          }));
           break;
         }
         case "result": {

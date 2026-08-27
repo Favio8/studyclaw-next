@@ -13,13 +13,32 @@ import { useAppStore } from "@/src/store/useAppStore";
 import type { PanelTab } from "@/src/store/useAppStore";
 import { api } from "@/src/lib/api";
 
+/** 同一课程的并发刷新合并为一次在途请求——Console/ChatArea/Palette 多实例
+ * 的 usePanelData effect 此前各自打满三路请求，落地顺序不定还互相覆盖。 */
+const inflightByKey = new Map<string, Promise<void>>();
+
 /** progress/mastery/heatmap 三路并行刷新（读取 store 当前激活课程）。 */
 export async function refreshPanelData(): Promise<void> {
-  const { activeCourseId } = useAppStore.getState();
-  if (!activeCourseId) return;
+  const requestedCourseId = useAppStore.getState().activeCourseId;
+  if (!requestedCourseId) return;
+  // 同一课程的并发刷新合并为一次在途请求（多实例 effect 去重）。
+  const existing = inflightByKey.get(requestedCourseId);
+  if (existing !== undefined) return await existing;
+  const task = (async () => {
+    await runPanelRefresh(requestedCourseId);
+  })();
+  inflightByKey.set(requestedCourseId, task);
+  try {
+    await task;
+  } finally {
+    if (inflightByKey.get(requestedCourseId) === task) inflightByKey.delete(requestedCourseId);
+  }
+}
+
+async function runPanelRefresh(courseId: string): Promise<void> {
   const [progress, mastery, heatmap] = await Promise.allSettled([
-    api.progress(activeCourseId),
-    api.mastery(activeCourseId),
+    api.progress(courseId),
+    api.mastery(courseId),
     api.heatmap(12),
   ]);
   // 进度一路失败必须显式落错（否则 ProgressTab 只有骨架屏可渲染，
@@ -30,6 +49,9 @@ export async function refreshPanelData(): Promise<void> {
       : progress.reason instanceof Error
         ? progress.reason.message
         : String(progress.reason);
+  // FE-3：落地前必须仍属于发起时的课程——快速切课时旧课程的慢响应
+  // 不允许覆盖新课的骨架数据。
+  if (useAppStore.getState().activeCourseId !== courseId) return;
   useAppStore.getState().setPanelData({
     progress: progress.status === "fulfilled" ? progress.value : null,
     progressError,
@@ -45,8 +67,10 @@ export async function refreshCourseList(): Promise<void> {
     if (!workspacePath) return;
     const { courses } = await api.courseList(workspacePath);
     useAppStore.getState().setCourses(courses);
-  } catch {
-    /* 静默：左栏下次装载再修正 */
+  } catch (error) {
+    // PERF-6：不再完全静默——横幅一次性提示；左栏下次装载仍会重试。
+    console.warn("[panelData] 课程列表刷新失败:", error);
+    useAppStore.getState().flashStatusBanner("✗ 课程列表加载失败，稍后自动重试");
   }
 }
 

@@ -35,11 +35,19 @@ interface EditorProfile {
 }
 
 /** 容量输入草稿：焦点期间保留原文，保存时才解析（避免「1000」被打断成「1K」）。 */
+/** 行级稳定 key（FE-4）：删除中间行时 React 复用正确 DOM，展开态/IME 不再串位。 */
 interface ModelDraft {
+  rowKey: string;
   id: string;
   name: string;
   contextText: string;
   maxText: string;
+}
+
+let rowKeySeq = 0;
+function nextRowKey(): string {
+  rowKeySeq += 1;
+  return `rk_${Date.now().toString(36)}_${rowKeySeq}`;
 }
 
 /** 添加卡按目录条目缓存整卡草稿（DSH：切换目录不丢已填内容）。 */
@@ -79,6 +87,7 @@ function formatCapacity(value: number | null): string {
 
 function draftsFrom(models: ProviderModelPayload[]): ModelDraft[] {
   return models.map((m) => ({
+    rowKey: nextRowKey(),
     id: m.id,
     name: m.name,
     contextText: formatCapacity(m.contextWindow),
@@ -135,7 +144,12 @@ function ProviderEditorCard({
   useEffect(() => {
     if (!draftCache || entryId === null) return;
     return () => {
-      if (draftRef.current) draftCache.set(entryId, draftRef.current);
+      if (draftRef.current) {
+        // FE-4：草稿缓存永不携带明文 apiKey——切走条目即丢弃未提交密钥。
+        const { apiKey: _droppedApiKey, ...rest } = draftRef.current;
+        void _droppedApiKey;
+        draftCache.set(entryId, { ...rest, apiKey: "" });
+      }
     };
   }, [entryId, draftCache]);
 
@@ -143,6 +157,7 @@ function ProviderEditorCard({
   const idValid = !creating || /^[a-z][a-z0-9-]*$/.test(id);
   const parsedRows = rows.map((row) => ({
     row,
+    rowKey: row.rowKey,
     id: row.id.trim(),
     context: parseCapacity(row.contextText),
     max: parseCapacity(row.maxText),
@@ -431,7 +446,7 @@ function ProviderEditorCard({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRows((current) => [...current, { id: "", name: "", contextText: "", maxText: "" }])}
+                  onClick={() => setRows((current) => [...current, { rowKey: nextRowKey(), id: "", name: "", contextText: "", maxText: "" }])}
                   className="rounded-lg border border-border-line px-2 py-1 text-xs text-text-muted hover:bg-bg-card"
                 >
                   ＋ 手动添加
@@ -449,8 +464,8 @@ function ProviderEditorCard({
               </p>
             ) : (
               <div className="flex flex-col gap-2">
-                {parsedRows.map(({ row, id: rowId, context, max }, index) => (
-                  <div key={index} className="rounded-lg border border-border-line bg-bg-root p-2">
+                {parsedRows.map(({ row, id: rowId, context, max, rowKey }, index) => (
+                  <div key={rowKey} className="rounded-lg border border-border-line bg-bg-root p-2">
                     <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
                       <input
                         value={row.id}

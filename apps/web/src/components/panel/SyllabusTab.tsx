@@ -91,10 +91,10 @@ export default function SyllabusTab() {
       />
     );
   }
-  // The loader's initial state is its loading state. Remounting when the
-  // course build changes starts a fresh request without a synchronous effect
-  // state update.
-  return <SyllabusLoader key={`${courseId}-${buildStatus}`} courseId={courseId} />;
+  // PERF-5：key 只含 courseId——组件随课程切换重挂；buildStatus 变化不再
+  // 整树卸载重建（图/导图的 ResizeObserver、布局计算全部作废重来），
+  // loader 内部已订阅 buildStatus 并在变化时静默 revalidate（保 UI，不闪）。
+  return <SyllabusLoader key={courseId} courseId={courseId} />;
 }
 
 function SyllabusLoader({ courseId }: { courseId: string }) {
@@ -118,6 +118,14 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [granularityBusy, setGranularityBusy] = useState(false);
+  // PERF-3：重图组件"首激活渲染、之后保活"，首屏不再承担布局初始化成本。
+  const [graphEverShown, setGraphEverShown] = useState(false);
+  const [mindmapEverShown, setMindmapEverShown] = useState(false);
+
+  useEffect(() => {
+    if (syllabusView === "graph") setGraphEverShown(true);
+    if (syllabusView === "mindmap") setMindmapEverShown(true);
+  }, [syllabusView]);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -336,9 +344,11 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
               </button>
             ) : null}
           </div>
-          <div key={syllabusView} className="ds-row-in">
-            {syllabusView === "graph" ? (
-              <PanelSection title="知识关系" icon={Network}>
+          <div className="ds-row-in">
+            {/* PERF-3：重图组件首次切换到对应视图才初始化（LazyMount 保活），
+                首屏只挂列表视图；后续切换不卸载，切回零成本。 */}
+            <PanelSection title="知识关系" icon={Network} className={syllabusView === "graph" ? "" : "hidden"}>
+              {graphEverShown ? (
                 <SyllabusGraph
                   syllabus={syllabus}
                   statusMap={statusMap}
@@ -346,9 +356,10 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
                   focusConceptId={focusConceptId}
                   onFocusConcept={focusConcept}
                 />
-              </PanelSection>
-            ) : syllabusView === "mindmap" ? (
-              <PanelSection title="思维导图" icon={Map}>
+              ) : null}
+            </PanelSection>
+            <PanelSection title="思维导图" icon={Map} className={syllabusView === "mindmap" ? "" : "hidden"}>
+              {mindmapEverShown && (
                 <SyllabusMindmap
                   syllabus={syllabus}
                   statusMap={statusMap}
@@ -358,14 +369,15 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
                   onToggleCollapse={setSyllabusMindmapCollapsed}
                   onFocusConcept={focusConcept}
                 />
-              </PanelSection>
-            ) : (
-              <PanelSection
-                title="章节与知识点"
-                icon={ListTree}
-                action={<span className="text-[11px] text-text-faint">{(syllabus.chapters ?? []).length} 个章节</span>}
-              >
-                <div className="mb-1.5 flex flex-wrap gap-1" role="group" aria-label="掌握度状态过滤">
+              )}
+            </PanelSection>
+            <PanelSection
+              title="章节与知识点"
+              icon={ListTree}
+              className={syllabusView === "tree" ? "" : "hidden"}
+              action={<span className="text-[11px] text-text-faint">{(syllabus.chapters ?? []).length} 个章节</span>}
+            >
+              <div className="mb-1.5 flex flex-wrap gap-1" role="group" aria-label="掌握度状态过滤">
                   {STATUS_LEGEND.map(({ value, label }) => {
                     const active = syllabusStatusFilter === value;
                     return (
@@ -465,7 +477,6 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
                   )}
                 </div>
               </PanelSection>
-            )}
           </div>
         </>
       )}

@@ -319,11 +319,12 @@ describe("ModelsSection 批次1（X2/X3/X4/X5）", () => {
     fireEvent.click(screen.getByRole("button", { name: "＋ 手动添加" }));
     fireEvent.change(await screen.findByLabelText("模型 ID 1"), { target: { value: "custom-1" } });
 
-    // 切到 sensenova 再切回 deepseek：Key 和模型行都应还在。
+    // 切到 sensenova 再切回 deepseek：模型行保留；API Key 按新安全契约
+    // （FE-4）不进草稿缓存——切走即丢弃未提交密钥，返回后为空，防明文驻留。
     fireEvent.change(providerSelect, { target: { value: "sensenova" } });
     await screen.findByDisplayValue("sensenova-6.8-flash-lite");
     fireEvent.change(providerSelect, { target: { value: "deepseek" } });
-    expect(screen.getByPlaceholderText("输入 API Key")).toHaveValue("sk-ds");
+    expect(screen.getByPlaceholderText("输入 API Key")).toHaveValue("");
     expect(screen.getByLabelText("模型 ID 1")).toHaveValue("custom-1");
   });
 

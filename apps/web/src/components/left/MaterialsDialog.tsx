@@ -14,7 +14,7 @@
  * accent-focus），与 NewProjectWizard 错误弹层同构。
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FolderPlus, Upload, X } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { refreshCourseList, refreshPanelData } from "@/src/lib/panelData";
@@ -40,12 +40,16 @@ async function awaitBuild(
   jobId: string,
   courseId: string,
   report: (msg: string) => void,
+  signal?: { aborted: boolean },
 ): Promise<void> {
   try {
     // F-7/PERF-8：消费 job.progress 展示"N/M 当前文件"，30 分钟不再黑盒。
     let lastProgress = "";
     for (let attempt = 0; attempt < 3600; attempt += 1) {
+      // FE-4：弹窗已关闭/组件卸载时立即停止轮询并停止 setState。
+      if (signal?.aborted) return;
       const job = await api.job(jobId);
+      if (signal?.aborted) return;
       if (job.status === "done") {
         report(`✓ 知识索引构建完成（syllabus 生成，共 ${job.result?.tasksGenerated ?? 0} 张题卡）`);
         return;
@@ -81,6 +85,9 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // FE-4：轮询生命周期绑定——关闭/卸载后不再 setState 空转最长 30 分钟。
+  const buildPollSignalRef = useRef({ aborted: false });
+  useEffect(() => () => { buildPollSignalRef.current.aborted = true; }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pickedFiles, setPickedFiles] = useState<File[]>([]);
   const [urlInput, setUrlInput] = useState("");
@@ -204,7 +211,7 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
         await awaitBuild(result.buildJobId, activeCourseId, (msg) => {
           setUrlNotice((prev) => `${prev ?? ""}
 ${msg}`);
-        });
+        }, buildPollSignalRef.current);
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);

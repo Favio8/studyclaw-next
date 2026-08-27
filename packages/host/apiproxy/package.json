@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/apiproxy",
     "version":  "0.1.0",
     "description":  "StudyClaw RPC contract: method table, wire views, and business-error mapping over the workspace registry (M1 minimal set)",

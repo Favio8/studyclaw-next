@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/session",
     "version":  "0.1.0",
     "description":  "StudyClaw session domain: JSONL store, stream splitters, context assembly, and the four-mode tutor chat loop (ported from Python core/session.py)",

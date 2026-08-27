@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "studyclaw": "lib/bin.js"
+    "studyclaw": "./lib/types/bin.js"
   },
   "files": [
     "lib/*.js"
@@ -15,12 +15,19 @@
     "@studyclaw/apiproxy": "workspace:^",
     "@studyclaw/course-summary": "workspace:^",
     "@studyclaw/directory-picker-native": "workspace:^",
-    "@studyclaw/workspace": "workspace:^"
+    "@studyclaw/workspace": "workspace:^",
+    "@studyclaw/chat-service": "workspace:^",
+    "@studyclaw/course-builder": "workspace:^",
+    "@studyclaw/session": "workspace:^",
+    "@studyclaw/agent": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-storage": "workspace:^",
     "@deepseek-ai/dsh-storage-domain": "workspace:^",
     "@deepseek-ai/dsh-storage-json": "workspace:^"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
   }
 }

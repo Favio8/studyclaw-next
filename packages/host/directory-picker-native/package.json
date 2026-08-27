@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/directory-picker-native",
     "version":  "0.1.0",
     "description":  "Native OS directory picker for the StudyClaw host (Windows IFileOpenDialog child process; adapted from dsh directory-picker-native)",

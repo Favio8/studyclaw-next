@@ -54,15 +54,27 @@ importers:
       '@studyclaw/acp':
         specifier: workspace:^
         version: link:../../packages/acp/acp
+      '@studyclaw/agent':
+        specifier: workspace:^
+        version: link:../../packages/agent/agent
       '@studyclaw/apiproxy':
         specifier: workspace:^
         version: link:../../packages/host/apiproxy
+      '@studyclaw/chat-service':
+        specifier: workspace:^
+        version: link:../../packages/host/chat-service
+      '@studyclaw/course-builder':
+        specifier: workspace:^
+        version: link:../../packages/course/builder
       '@studyclaw/course-summary':
         specifier: workspace:^
         version: link:../../packages/course/summary
       '@studyclaw/directory-picker-native':
         specifier: workspace:^
         version: link:../../packages/host/directory-picker-native
+      '@studyclaw/session':
+        specifier: workspace:^
+        version: link:../../packages/session/session
       '@studyclaw/workspace':
         specifier: workspace:^
         version: link:../../packages/workspace/workspace
@@ -288,6 +300,9 @@ importers:
 
   packages/learning/learning:
     dependencies:
+      '@deepseek-ai/dsh-llm':
+        specifier: workspace:^
+        version: link:../../llm/llm
       '@studyclaw/course-builder':
         specifier: workspace:^
         version: link:../../course/builder
@@ -316,6 +331,9 @@ importers:
       '@deepseek-ai/dsh-timeout':
         specifier: workspace:^
         version: link:../../util/timeout
+      fast-check:
+        specifier: ^4.9.0
+        version: 4.9.0
 
   packages/llm/llm-deepseek:
     dependencies:
@@ -2520,6 +2538,10 @@ packages:
     resolution: {integrity: sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==}
     engines: {node: '>=12.0.0'}
 
+  fast-check@4.9.0:
+    resolution: {integrity: sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg==}
+    engines: {node: '>=12.17.0'}
+
   fast-csv@4.3.1:
     resolution: {integrity: sha512-hCvT77K9fEVvR9iKt8OsOwbci/r1BHn8qcVOghjnllkHaKkpzjrc96IcLHC/2jpuPcPrzXpshk/TOqaRQZK8bA==}
     engines: {node: '>=10.0.0'}
@@ -3727,6 +3749,9 @@ packages:
   punycode@2.3.1:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
+
+  pure-rand@8.4.2:
+    resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
 
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
@@ -6414,6 +6439,10 @@ snapshots:
 
   expect-type@1.4.0: {}
 
+  fast-check@4.9.0:
+    dependencies:
+      pure-rand: 8.4.2
+
   fast-csv@4.3.1:
     dependencies:
       '@fast-csv/format': 4.3.1
@@ -7840,6 +7869,8 @@ snapshots:
   property-information@7.2.0: {}
 
   punycode@2.3.1: {}
+
+  pure-rand@8.4.2: {}
 
   queue-microtask@1.2.3: {}
 

@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/workspace",
     "version":  "0.1.0",
     "description":  "Durable workspace registry: uuid-keyed records, canonical-path uniqueness, manual display order (ported from dsh-workspace)",

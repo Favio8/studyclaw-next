@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/course-builder",
     "version":  "0.1.0",
     "description":  "StudyClaw course build engine: markdown ingest (two-level outline + semantic chunks), SHA-256 checksum incrementality, syllabus merge, task pool, progress seeding, and structured LLM task generation (ported from Python builder.py/ingestor.py/task_gen.py)",

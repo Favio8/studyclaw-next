@@ -4,5 +4,5 @@ packages:
   - apps/*
 allowBuilds:
   esbuild: true
-  koffi: set this to true or false
+  koffi: true # directory-picker-native 的原生依赖需要执行安装脚本（ENG-1）
 linkWorkspacePackages: true

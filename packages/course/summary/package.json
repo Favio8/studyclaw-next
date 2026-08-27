@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/course-summary",
     "version":  "0.1.0",
     "description":  "Read-only course listing for one workspace root (ports Python list_courses): syllabus.json titles, progress.md meta, history mtimes",

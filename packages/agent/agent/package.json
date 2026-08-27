@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/agent",
     "version":  "0.1.0",
     "description":  "DSH-style StudyClaw Agent lifecycle, turn queue, cancellation, and event projection",

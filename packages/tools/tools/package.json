@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/tools",
     "version":  "0.1.0",
     "description":  "StudyClaw agent tool registry: specs, JSON-schema argument validation, mode-based policy filtering, and file-course handlers (ported from Python agent_tools.py)",

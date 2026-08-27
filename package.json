@@ -12,7 +12,8 @@
     "typecheck": "tsc -b tsconfig.json",
     "test": "vitest run",
     "smoke:storage": "tsx --tsconfig tsconfig.base.json scripts/smoke-storage.ts",
-    "serve": "tsx --tsconfig tsconfig.base.json apps/cli/src/bin.ts serve"
+    "serve": "tsx --tsconfig tsconfig.base.json apps/cli/src/bin.ts serve",
+    "build": "tsc -b tsconfig.json && node scripts/sync-built-package-json.mjs"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",

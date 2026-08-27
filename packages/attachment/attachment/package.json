@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@deepseek-ai/dsh-attachment",
     "description":  "Durable immutable attachment storage seam for the DeepSeek Harness",
     "version":  "0.1.0-rc.8",

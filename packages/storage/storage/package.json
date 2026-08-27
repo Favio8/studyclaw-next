@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@deepseek-ai/dsh-storage",
     "description":  "Storage hub (ctx.storage): named backend registry plus mounted data-form facilities for the DeepSeek Harness",
     "version":  "0.1.0-rc.8",

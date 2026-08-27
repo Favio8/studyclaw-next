@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@deepseek-ai/dsh-brand",
     "description":  "Type-only Branded\u003cB\u003e nominal-typing primitive for the DeepSeek Harness",
     "version":  "0.1.0-rc.8",

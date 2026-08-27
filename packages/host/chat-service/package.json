@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@studyclaw/chat-service",
     "version":  "0.1.0",
     "description":  "StudyClaw chat host: config.yaml/credentials resolution, dsh DeepSeekAdapter tool-client adapter, and the session/stream service wired to TutorSession",

@@ -136,7 +136,7 @@ export default function QuizTab() {
                     className={`flex min-h-9 w-full items-center gap-2 rounded-md border px-2.5 text-left text-[12px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus disabled:cursor-not-allowed disabled:opacity-70 ${statusClass}`}
                   >
                     <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-bg-card text-[10px] font-medium text-text-muted">{letter}</span>
-                    <span className="min-w-0 flex-1 break-words">{option}</span>
+                    <span className="min-w-0 flex-1 [overflow-wrap:anywhere] leading-5">{option}</span>
                     <span className="shrink-0 text-[10px] text-text-faint">Alt+{index + 1}</span>
                   </button>
                 );
@@ -191,7 +191,7 @@ export default function QuizTab() {
                 {quiz.rubrics.map((rubric) => (
                   <div key={rubric.index} className="flex min-w-0 items-start gap-2 rounded-md bg-bg-root px-2 py-1.5 text-[11px]">
                     {rubric.hit ? <Check size={13} strokeWidth={2} className="mt-0.5 shrink-0 text-accent-pass" aria-label="命中" /> : <X size={13} strokeWidth={2} className="mt-0.5 shrink-0 text-accent-fail" aria-label="未命中" />}
-                    <span className="min-w-0 break-words text-text-muted">{rubric.criterion}</span>
+                    <span className="min-w-0 [overflow-wrap:anywhere] text-text-muted">{rubric.criterion}</span>
                   </div>
                 ))}
               </div>
@@ -222,7 +222,7 @@ export default function QuizTab() {
           {quiz.error ? (
             <div className="mt-3 flex items-center gap-2 rounded-md border border-accent-fail/25 bg-accent-fail/8 px-2.5 py-2 text-[11px] text-accent-fail" role="alert">
               <AlertCircle size={14} strokeWidth={1.8} className="shrink-0" aria-hidden />
-              <span className="min-w-0 flex-1 break-words">{quiz.error}</span>
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{quiz.error}</span>
               <button
                 type="button"
                 className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-accent-fail/30 px-2 text-[11px] transition-colors hover:bg-accent-fail/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"

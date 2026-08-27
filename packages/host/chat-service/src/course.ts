@@ -45,7 +45,7 @@ let manualCardSeq = 0
 import { stateDirOf } from '@studyclaw/course-builder'
 import { localDateKey } from '@studyclaw/course-builder'
 import type { ResolvedChatConfig } from './config.ts'
-import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionEventStore, SessionStore, utcTs } from '@studyclaw/session'
 import { loadChatConfig } from './config.ts'
 
@@ -456,13 +456,20 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const task = pool.find(candidate => candidate.task_id === taskId)
       if (task === undefined) throw new Error(`题卡不存在: ${taskId}`)
       yield { event: 'scan', data: { phase: 'rubric' } }
-      const evaluator = new RubricEvaluator(createDeepSeekToolClient(config), {
-        model: config.model, provider: config.providerId || 'studyclaw', temperature: config.temperature,
+      // A 档提速：判题走独立路由——专用模型（缺省跟随主模型）、思考缺省
+      // 关闭（判题是二元命中判定，思维链是纯等待）、输出预算收紧。用户可
+      // 用 config.yaml 的 llm.judge_model / llm.judge_reasoning_effort 覆写。
+      const judgeModel = config.judgeModel ?? config.model
+      const judgeEffort = config.judgeEffort ?? 'off'
+      const judgeClient = createDeepSeekToolClient({ ...config, model: judgeModel, reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096 })
+      const evaluator = new RubricEvaluator(judgeClient, {
+        model: judgeModel, provider: config.providerId || 'studyclaw', temperature: config.temperature,
+        reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096,
       })
       const memory = await readGlobalMemory(workspaceRoot)
       const result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
-      for (const [criterion, hit] of Object.entries(result.rubricHits)) {
-        yield { event: 'rubric', data: { index: 0, criterion, hit } }
+      for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
+        yield { event: 'rubric', data: { index, criterion, hit } }
       }
       // Update the task history + progress board (SM-2) under the course lock
       // (P1-6)：读板→upsert→存板的整个 RMW 在临界区内，避免并发评测丢更新。

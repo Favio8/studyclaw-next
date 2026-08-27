@@ -15,6 +15,10 @@ export interface ResolvedChatConfig {
   readonly model: string
   /** DSH-style per-Agent reasoning effort; absent means provider default. */
   readonly reasoningEffort?: string | null
+  /** 判题专用模型（A 档提速）：config.yaml `llm.judge_model`；null=跟随主模型。 */
+  readonly judgeModel?: string | null
+  /** 判题思考档位：`llm.judge_reasoning_effort`；null=判题路径缺省 off（关思考）。 */
+  readonly judgeEffort?: 'off' | 'low' | 'high' | 'max' | null
   readonly baseUrl: string
   readonly apiKeyEnv: string | null
   readonly apiKey: string | null
@@ -29,7 +33,7 @@ export interface ResolvedChatConfig {
 }
 
 interface ConfigYaml {
-  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number; max_tokens?: number | null }
+  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number; max_tokens?: number | null; judge_model?: string | null; judge_reasoning_effort?: string | null }
   readonly active_provider?: string
   readonly providers?: Record<string, {
     readonly base_url?: string | null
@@ -98,6 +102,8 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
       providerId: '',
       model: '',
       reasoningEffort: null,
+      judgeModel: null,
+      judgeEffort: null,
       baseUrl: '',
       apiKeyEnv: null,
       apiKey: null,
@@ -128,10 +134,16 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
     : 'workspace-write'
   const plugins: Record<string, boolean> = {}
   for (const [id, enabled] of Object.entries(config.plugins ?? {})) if (typeof enabled === 'boolean') plugins[id] = enabled
+  const judgeEffortRaw = config.llm?.judge_reasoning_effort
+  const judgeEffort = judgeEffortRaw === 'off' || judgeEffortRaw === 'low' || judgeEffortRaw === 'high' || judgeEffortRaw === 'max'
+    ? judgeEffortRaw
+    : null
   return {
     providerId,
     model,
     reasoningEffort: null,
+    judgeModel: config.llm?.judge_model ?? null,
+    judgeEffort,
     baseUrl,
     apiKeyEnv,
     apiKey,

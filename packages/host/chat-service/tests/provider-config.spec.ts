@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -78,6 +78,39 @@ describe('provider configuration write/read contract', () => {
       expect(resolved.providerId).toBe('first')
       // baseUrl 规范化：去尾部斜杠
       expect(resolved.baseUrl).toBe('https://one.example/v1')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('judge 路由：judge_model/judge_reasoning_effort 解析与非法值兜底（判题提速 A 档）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-judge-route-'))
+    try {
+      await mkdir(join(root, '.studyclaw'), { recursive: true })
+      await writeFile(join(root, '.studyclaw', 'config.yaml'), [
+        'version: 1',
+        'llm:',
+        '  provider: mock',
+        '  model: deepseek-v4-pro',
+        '  judge_model: deepseek-v4-flash',
+        '  judge_reasoning_effort: off',
+      ].join('\n'), 'utf8')
+      const resolved = await loadChatConfig(root)
+      expect(resolved.model).toBe('deepseek-v4-pro')
+      expect(resolved.judgeModel).toBe('deepseek-v4-flash')
+      expect(resolved.judgeEffort).toBe('off')
+
+      // 非法档位兜底为 null（判题路径再缺省 off）。
+      await writeFile(join(root, '.studyclaw', 'config.yaml'), [
+        'version: 1',
+        'llm:',
+        '  provider: mock',
+        '  model: deepseek-v4-pro',
+        '  judge_reasoning_effort: ultra',
+      ].join('\n'), 'utf8')
+      const fallback = await loadChatConfig(root)
+      expect(fallback.judgeModel).toBeNull()
+      expect(fallback.judgeEffort).toBeNull()
     } finally {
       await rm(root, { recursive: true, force: true })
     }

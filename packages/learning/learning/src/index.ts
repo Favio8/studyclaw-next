@@ -13,7 +13,7 @@ import { structuredCall, type StructuredCallClient } from '@studyclaw/course-bui
 import { EVALUATOR_SYSTEM, DYNAMIC_CARD_SYSTEM } from '@studyclaw/course-builder'
 import { evaluatorUser } from '@studyclaw/course-builder'
 import { dynamicCardUser } from '@studyclaw/course-builder'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 import { loadTaskPool } from '@studyclaw/course-builder'
 import { loadProgressBoard, dueRecords } from '@studyclaw/course-builder'
@@ -53,6 +53,10 @@ export interface EvaluatorOptions {
   model: string
   provider: string
   temperature?: number
+  /** 判题提速（A 档）：'off' 直接映射 thinking:disabled，砍掉思维链等待。 */
+  reasoningEffort?: GenerateOptions['reasoningEffort']
+  /** 判题输出只有几百 token 的 JSON，缺省继承适配器大预算纯属浪费。 */
+  maxTokens?: number
 }
 
 /** Rubric binary-hit evaluator over the dsh-adapter stream client. */
@@ -80,6 +84,8 @@ export class RubricEvaluator {
         system: EVALUATOR_SYSTEM,
         messages: [createUserMessage({ content: [{ type: 'text', text: evaluatorUser(task.question, rubric, studentAnswer, userMemory) }], source: { kind: 'user' } })],
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
+        ...(this.options.reasoningEffort !== undefined ? { reasoningEffort: this.options.reasoningEffort } : {}),
+        ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
       },
       this.options.maxRetries ?? 3,
     )

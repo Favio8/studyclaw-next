@@ -475,8 +475,9 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           ? (record.passRate * record.evals + (result.passed ? 1 : 0)) / attempts
           : (result.passed ? 1 : 0)
         // F-12：SM-2 的 repetitions 入参是"连续成功次数"，失败清零。
+        const priorEf = record?.ef ?? 2.5
         const priorStreak = result.passed ? record?.streak ?? 0 : 0
-        const nextLocal = reviewSchedule(record?.ef ?? 2.5, priorStreak, result.score)
+        const nextLocal = reviewSchedule(priorEf, priorStreak, result.score)
         const dueDate = new Date(Date.now() + Math.min(nextLocal.intervalDays, 365) * 86_400_000)
         const dueDateKey = localDateKey(dueDate)
         const updated = upsertProgressRecord(board, {
@@ -492,9 +493,9 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
         })
         await saveProgressBoard(boardPath, updated)
-        return { next: nextLocal, nextReviewAt: dueDateKey }
+        return { next: nextLocal, nextReviewAt: dueDateKey, priorEf }
       })
-      const { next, nextReviewAt } = schedule
+      const { next, nextReviewAt, priorEf } = schedule
       // 追加评测审计事件到会话事件流。路径必须与 chat 运行时一致：
       // `<课程根>/.studyclaw/history`（P1-1——旧代码漏掉 .studyclaw 段，
       // exists() 恒 false，审计被静默跳过）。评分结果已落 progress.md，
@@ -528,7 +529,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         }
       }
       yield { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } }
-      yield { event: 'sm2', data: { ef: next.ef, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } }
+      yield { event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } }
       yield { event: 'done', data: { taskId } }
     },
     job(jobId) {

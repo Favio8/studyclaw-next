@@ -9,6 +9,7 @@
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
+import { sealCredentials, unsealCredentials, writeFileAtomicRestricted } from './secret-box.ts'
 
 export interface ProviderModelPayload {
   readonly id: string
@@ -145,24 +146,46 @@ async function writeConfig(workspaceRoot: string, config: ConfigYaml): Promise<v
   await rename(tmp, path)
 }
 
-async function readCredentials(workspaceRoot: string): Promise<Record<string, string>> {
-  const raw = await readFile(credentialsPath(workspaceRoot), 'utf8').catch(() => null)
-  if (raw === null) return {}
+/** Workspace-wide read/modify/write serialization for credentials.json. */
+const credentialLocks = new Map<string, Promise<unknown>>()
+
+/** Run `fn` while holding the workspace credential lock (SEC-7：并发保存两个
+ * provider 的 key 不再互相丢更新)。 */
+async function withCredentialLock<T>(workspaceRoot: string, fn: () => Promise<T>): Promise<T> {
+  const previous = credentialLocks.get(workspaceRoot) ?? Promise.resolve()
+  const current = previous.then(fn, fn)
+  credentialLocks.set(workspaceRoot, current)
   try {
-    const parsed = JSON.parse(raw) as unknown
-    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, string> : {}
-  } catch {
-    return {}
+    return await current
+  } finally {
+    if (credentialLocks.get(workspaceRoot) === current) credentialLocks.delete(workspaceRoot)
   }
 }
 
+/**
+ * Read `.studyclaw/credentials.json`. Legacy plaintext files are transparently
+ * re-sealed on first successful read so the migration needs no explicit step.
+ */
+async function readCredentials(workspaceRoot: string): Promise<Record<string, string>> {
+  const raw = await readFile(credentialsPath(workspaceRoot), 'utf8').catch(() => null)
+  if (raw === null || raw.trim() === '') return {}
+  let parsed: Awaited<ReturnType<typeof unsealCredentials>>
+  try {
+    parsed = await unsealCredentials(raw)
+  } catch {
+    // 密钥不匹配或文件损坏时宁可报错也不能当作“未配置密钥”静默继续。
+    throw new Error('credentials.json 解密失败（master.key 与该工作区凭据不匹配？）')
+  }
+  if (parsed.wasPlaintext && Object.keys(parsed.data).length > 0) {
+    await writeCredentials(workspaceRoot, parsed.data).catch(() => undefined)
+  }
+  return parsed.data
+}
+
+/** Seal + atomic owner-only write (0600/fsync)：分享工作区不再带走明文 key。 */
 async function writeCredentials(workspaceRoot: string, credentials: Record<string, string>): Promise<void> {
-  const path = credentialsPath(workspaceRoot)
-  const { mkdir } = await import('node:fs/promises')
-  await mkdir(join(workspaceRoot, '.studyclaw'), { recursive: true })
-  const tmp = path + '.tmp'
-  await writeFile(tmp, JSON.stringify(credentials, null, 2), 'utf8')
-  await rename(tmp, path)
+  const sealed = await sealCredentials(credentials)
+  await writeFileAtomicRestricted(credentialsPath(workspaceRoot), sealed)
 }
 
 /** DSH key-ref rule: uppercase, non-alnum → underscore, `_API_KEY` suffix. */
@@ -292,13 +315,50 @@ export function parseModelsPayload(payload: unknown): ProviderModelPayload[] {
   return models
 }
 
+/**
+ * Model-endpoint probe hardening (SEC-2):
+ * - only http(s), no embedded credentials;
+ * - `apiKeyEnv` must look like an API-key variable (provider prefix or
+ *   *_API_KEY / *_API_TOKEN suffix) so arbitrary env values — e.g. PATH —
+ *   can never be attached as Bearer credentials to an attacker URL;
+ * - error messages never echo the caller-supplied target URL.
+ * Loopback/private hosts stay allowed: local model servers (Ollama 等) are a
+ * first-class use case, and cross-site browser callers are already blocked
+ * by the serve 入口的 Origin 门禁.
+ */
+const API_KEY_ENV_RE = /^(?:DEEPSEEK|OPENAI|ANTHROPIC|GOOGLE|GEMINI|DASHSCOPE|MOONSHOT|ZHIPU|SENSENOVA|OPENROUTER|SILICONFLOW|CUSTOM|STUDYCLAW)_[A-Z0-9_]+$|^[A-Z][A-Z0-9_]*_(?:API_KEY|API_TOKEN)$/
+
+/** Validate and normalize a user-supplied model endpoint base URL. */
+export function validateModelBaseUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim()
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error('Base URL 不是合法的 URL')
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Base URL 只支持 http/https 协议')
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new Error('Base URL 不允许内嵌用户名或密码')
+  }
+  return trimmed.replace(/\/+$/, '')
+}
+
 /** Probe `GET {baseUrl}/models` (read-only, no persistence). */
 export async function discoverModels(input: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null }): Promise<ProviderModelPayload[]> {
-  const base = input.baseUrl.trim().replace(/\/+$/, '')
+  const base = validateModelBaseUrl(input.baseUrl)
   if (base === '') throw new Error('Base URL 不能为空')
   let apiKey = input.apiKey?.trim() ?? null
-  if (apiKey === null && input.apiKeyEnv !== null && input.apiKeyEnv !== undefined) {
-    apiKey = process.env[input.apiKeyEnv] ?? null
+  if (
+    apiKey === null
+    && input.apiKeyEnv !== null && input.apiKeyEnv !== undefined && input.apiKeyEnv.trim() !== ''
+  ) {
+    if (!API_KEY_ENV_RE.test(input.apiKeyEnv.trim())) {
+      throw new Error('环境变量名不在允许列表内（仅支持各 Provider 的 API_KEY 命名）')
+    }
+    apiKey = process.env[input.apiKeyEnv.trim()] ?? null
   }
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (apiKey !== null && apiKey !== '') headers['Authorization'] = `Bearer ${apiKey}`
@@ -306,7 +366,8 @@ export async function discoverModels(input: { baseUrl: string; apiKey?: string |
   try {
     response = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(5000) })
   } catch {
-    throw new Error(`无法连接 ${base}/models（请检查 Base URL 与网络）`)
+    // 不回显目标地址：错误细节本身就是内网探测的回显信道。
+    throw new Error('无法连接模型端点（请检查 Base URL 与网络）')
   }
   if (!response.ok) {
     const hint = response.status === 401 || response.status === 403 ? '，请检查 API Key 是否正确' : ''
@@ -435,9 +496,11 @@ export async function setCredential(workspaceRoot: string, providerId: string, a
   const provider = config.providers?.[providerId]
   if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
   const ref = deriveKeyRef(providerId)
-  const credentials = await readCredentials(workspaceRoot)
-  credentials[ref] = apiKey
-  await writeCredentials(workspaceRoot, credentials)
+  await withCredentialLock(workspaceRoot, async () => {
+    const credentials = await readCredentials(workspaceRoot)
+    credentials[ref] = apiKey
+    await writeCredentials(workspaceRoot, credentials)
+  })
   const providers = { ...(config.providers ?? {}) }
   providers[providerId] = { ...provider, api_key_env: ref }
   await writeConfig(workspaceRoot, { ...config, providers })

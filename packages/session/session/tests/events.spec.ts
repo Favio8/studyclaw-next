@@ -5,6 +5,20 @@ import { describe, expect, it } from 'vitest'
 import { SessionEventStore } from '../src/events.ts'
 
 describe('SessionEventStore', () => {
+  it('拒绝路径注入式 sessionId（SEC-6）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-injection-'))
+    const store = new SessionEventStore(root)
+    for (const evil of ['../../../sources/x', '..\\escape', '/abs/path', 'a/b', '.hidden', '..']) {
+      expect(() => store.pathFor(evil)).toThrow('非法会话 ID')
+      await expect(store.append(evil, { ts: '2026-08-22T12:00:00.000Z', type: 'turn/start', payload: {} })).rejects.toThrow('非法会话 ID')
+      await expect(store.load(evil)).rejects.toThrow('非法会话 ID')
+    }
+    // 合法形态不受影响：时间戳 id 与不透明运行时 id。
+    await store.append('20260822-120000', { ts: '2026-08-22T12:00:00.000Z', type: 'turn/start', payload: {} })
+    await store.append('child-session-1', { ts: '2026-08-22T12:00:00.001Z', type: 'turn/end', payload: {} })
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('appends, validates sequence, and projects an agent session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-'))
     const store = new SessionEventStore(root)

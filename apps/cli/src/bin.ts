@@ -10,7 +10,7 @@
 import { createServer } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFile, realpath, readdir, stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -51,6 +51,7 @@ import { createCourseService } from '@studyclaw/chat-service'
 import { AgentRegistry } from '@studyclaw/agent'
 import { hostRpc } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
+import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody } from './lib/http-guards.ts'
 import { quizCommand } from './commands/quiz.ts'
 import { reviewCommand } from './commands/review.ts'
 import { chatCommand } from './commands/chat.ts'
@@ -82,40 +83,74 @@ const BROWSE_HIDDEN = new Set(['$RECYCLE.BIN', 'System Volume Information', 'Con
 
 /**
  * DSH browse-backend pattern: server-side directory listing, one fast RPC per
- * page. `null` lists the roots (drive letters on Windows, `/` elsewhere).
- * Unlike the native modal dialog this never blocks a request, so it is safe
- * behind the dev proxy and needs no interactive desktop.
+ * page. `null` lists the workspace root (and its children) — SEC-5: the old
+ * implementation enumerated every drive and accepted any absolute path with
+ * canonical-path echo in errors, i.e. a free whole-disk tree reader once
+ * combined with a cross-origin RPC call. Browsing is now confined to the
+ * currently opened workspace.
  */
-async function browseLocalDirectory(requested: string | null | undefined): Promise<DirectoryBrowseResult> {
+async function browseLocalDirectory(
+  requested: string | null | undefined,
+  workspaceRoot: string,
+): Promise<DirectoryBrowseResult> {
   const { readdir } = await import('node:fs/promises')
-  if (requested === null || requested === undefined || requested.trim() === '') {
-    if (process.platform !== 'win32') {
-      const entries = (await readdir('/', { withFileTypes: true }))
-        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-        .map(entry => ({ name: entry.name, path: join('/', entry.name) }))
-        .sort((a, b) => a.name.localeCompare(b.name))
-      return { path: '', parent: null, entries }
-    }
+  if (workspaceRoot === '') throw new Error('尚未打开工作区，无法浏览目录')
+  const requestedTrimmed = requested === null || requested === undefined ? '' : requested.trim()
+  if (requestedTrimmed === '') {
     const entries: DirectoryEntry[] = []
-    for (let code = 65; code <= 90; code += 1) {
-      const drive = `${String.fromCharCode(code)}:\\`
-      try {
-        if ((await stat(drive)).isDirectory()) entries.push({ name: drive, path: drive })
-      } catch {
-        // 不存在的盘符跳过。
-      }
-    }
-    return { path: '', parent: null, entries }
+    for (const entry of await browseWorkspaceChildren(workspaceRoot, readdir)) entries.push(entry)
+    return { path: workspaceRoot, parent: null, entries }
   }
-  const canonical = await realpath(requested.trim())
-  if (!(await stat(canonical)).isDirectory()) throw new Error(`不是目录: ${canonical}`)
-  const children = await readdir(canonical, { withFileTypes: true }).catch(() => [])
-  const entries = children
+  // 以工作区为唯一根：`..`、盘符切换等路径在 realpath 前先做前缀校验。
+  const candidate = join(workspaceRoot, requestedTrimmed)
+  const canonical = await realpath(candidate).catch(() => null)
+  if (canonical === null || !isInsideRoot(workspaceRoot, canonical)) {
+    throw new Error('目标路径不在当前工作区内')
+  }
+  let stats
+  try {
+    stats = await stat(canonical)
+  } catch {
+    throw new Error('目标路径不存在或不可访问')
+  }
+  if (!stats.isDirectory()) throw new Error('目标路径不是文件夹')
+  const entries: DirectoryEntry[] = await browseWorkspaceChildren(canonical, readdir)
+  return { path: canonical, parent: dirname(canonical), entries }
+}
+
+function isInsideRoot(root: string, candidate: string): boolean {
+  const normalizedRoot = root.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+  const normalizedCandidate = candidate.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+  if (normalizedCandidate === normalizedRoot) return true
+  return normalizedCandidate.startsWith(`${normalizedRoot}/`)
+}
+
+async function browseWorkspaceChildren(
+  dir: string,
+  readdir: typeof import('node:fs/promises').readdir,
+): Promise<DirectoryEntry[]> {
+  const children = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  return children
     .filter(entry => entry.isDirectory() && !BROWSE_HIDDEN.has(entry.name))
-    .map(entry => ({ name: entry.name, path: join(canonical, entry.name) }))
+    .map(entry => ({ name: entry.name, path: join(dir, entry.name) }))
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
-  const isDriveRoot = /^[A-Za-z]:\\?$/.test(canonical) || canonical === '/'
-  return { path: canonical, parent: isDriveRoot ? null : dirname(canonical), entries }
+}
+
+/** 单文件/单次上传的体积与数量上限（P1-5：此前完全无上限，10MB body 直接吃进内存）。 */
+const UPLOAD_FILE_LIMIT_BYTES = 25 * 1024 * 1024
+const UPLOAD_MAX_FILES = 10
+
+/** 在 dir 内为 filename 找一个不冲突的名字：重名追加 -1/-2 序号而不是覆盖。 */
+async function uniqueDestinationPath(dir: string, filename: string): Promise<string> {
+  const taken = new Set((await readdir(dir)).map(entry => entry.toLowerCase()))
+  const dot = filename.lastIndexOf('.')
+  const stem = dot > 0 ? filename.slice(0, dot) : filename
+  const ext = dot > 0 ? filename.slice(dot) : ''
+  let candidate = filename
+  for (let index = 1; taken.has(candidate.toLowerCase()); index += 1) {
+    candidate = `${stem}-${index}${ext}`
+  }
+  return join(dir, candidate)
 }
 
 /**
@@ -330,7 +365,7 @@ async function serve(port: number): Promise<void> {
     // see @studyclaw/directory-picker-native). Non-Windows resolves null and
     // the client falls back to the browse backend.
     pickDirectory: () => pickNativeDirectory(),
-    browseDirectory: path => browseLocalDirectory(path),
+    browseDirectory: path => browseLocalDirectory(path, registry.lastOpenedPath),
     sessionService: {
       list: courseId => listSessions(registry.lastOpenedPath, courseId),
       search: async (query, limit) => {
@@ -578,8 +613,21 @@ async function serve(port: number): Promise<void> {
 
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json; charset=utf-8')
-    response.setHeader('Access-Control-Allow-Origin', '*')
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    // 健康探针最先放行：标准 LB/容器探针用 GET/HEAD，不能被 POST 守卫拦成 405。
+    if (url.pathname === '/api/health') {
+      response.writeHead(200)
+      response.end(JSON.stringify({ ok: true }))
+      return
+    }
+    // 本地源门禁：浏览器跨站请求必带 Origin 且页面脚本无法伪造，无 Origin 的
+    // curl/CLI 不受限。dev 前端经 Next 代理透传 localhost Origin。去掉通配
+    // CORS 后，恶意网页既无法预检通过也无法读取响应（drive-by 关闭，SEC-1）。
+    if (!isLoopbackOrigin(request.headers.origin)) {
+      response.writeHead(403)
+      response.end(JSON.stringify({ error: { code: 'cross-origin-forbidden', message: 'cross-origin requests are not allowed', details: null } }))
+      return
+    }
     if (request.method === 'OPTIONS') {
       response.writeHead(204)
       response.end()
@@ -588,12 +636,6 @@ async function serve(port: number): Promise<void> {
     if (request.method !== 'POST') {
       response.writeHead(405)
       response.end(JSON.stringify({ error: { code: 'method-not-allowed', message: `method ${request.method ?? ''} is not supported`, details: null } }))
-      return
-    }
-    const url = new URL(request.url ?? '/', 'http://localhost')
-    if (url.pathname === '/api/health') {
-      response.writeHead(200)
-      response.end(JSON.stringify({ ok: true }))
       return
     }
     if (!url.pathname.startsWith('/api/')) {
@@ -607,11 +649,9 @@ async function serve(port: number): Promise<void> {
       void handleUpload(request, response, decodeURIComponent(uploadMatch[1]!))
       return
     }
-    let body = ''
-    request.setEncoding('utf8')
-    request.on('data', (chunk: string) => { body += chunk })
-    request.on('end', () => {
-      void (async () => {
+    void (async () => {
+      try {
+        const body = await readRequestBody(request)
         try {
           if (method === 'chat/stream') {
             await handleChatStream(request, response, body)
@@ -644,17 +684,25 @@ async function serve(port: number): Promise<void> {
           response.writeHead(200)
           response.end(JSON.stringify(envelope))
         } catch (error) {
-          // Every request must receive a JSON envelope. A native picker or a
-          // newly added service can reject outside dispatch; without this
-          // boundary catch Next reports a misleading HTTP 500/socket hangup.
-          console.error(`[studyclaw] rpc ${method} 失败:`, error)
-          if (response.writableEnded || response.destroyed) return
-          const message = error instanceof Error ? error.message : String(error)
-          response.writeHead(500)
-          response.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message, details: null } }))
+          if (error instanceof PayloadTooLargeError) {
+            if (response.writableEnded || response.destroyed) return
+            response.writeHead(413)
+            response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
+            return
+          }
+          throw error
         }
-      })()
-    })
+      } catch (error) {
+        // Every request must receive a JSON envelope. A native picker or a
+        // newly added service can reject outside dispatch; without this
+        // boundary catch Next reports a misleading HTTP 500/socket hangup.
+        console.error(`[studyclaw] rpc ${method} 失败:`, error)
+        if (response.writableEnded || response.destroyed) return
+        const message = error instanceof Error ? error.message : String(error)
+        response.writeHead(500)
+        response.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message, details: null } }))
+      }
+    })()
   })
 
   /** Minimal DSH-compatible JSON-RPC/ACP bridge. It delegates every method to Host dispatch. */
@@ -714,7 +762,6 @@ async function serve(port: number): Promise<void> {
   async function handleUpload(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse, courseId: string): Promise<void> {
     const { default: Busboy } = await import('busboy')
     const { mkdir, writeFile } = await import('node:fs/promises')
-    const { join } = await import('node:path')
     const root = registry.lastOpenedPath
     if (root === '') {
       response.writeHead(409)
@@ -724,41 +771,73 @@ async function serve(port: number): Promise<void> {
     const sourcesDir = join(root, 'sources')
     await mkdir(sourcesDir, { recursive: true })
     const added: string[] = []
-    let uploadError: Error | null = null
+    const rejected: Array<{ file: string; reason: string }> = []
+    // 写入串行链：同批落盘顺序确定，且响应在全部写盘完成后才发出，
+    // 杜绝旧实现 `void writeFile` 失败既不进响应也无日志的 fire-and-forget。
+    let writeChain: Promise<void> = Promise.resolve()
+    let busboyError: Error | null = null
     try {
-      const busboy = Busboy({ headers: request.headers })
+      const busboy = Busboy({
+        headers: request.headers,
+        limits: { fileSize: UPLOAD_FILE_LIMIT_BYTES, files: UPLOAD_MAX_FILES },
+      })
+      busboy.on('filesLimit', () => {
+        rejected.push({ file: '(后续文件)', reason: `超过单次 ${UPLOAD_MAX_FILES} 个文件的上限` })
+      })
       busboy.on('file', (_name, stream, info) => {
         const filename = info.filename.split(/[\\/]/).pop() ?? 'upload.txt'
-        const safe = filename.replace(/[^\w.\u4e00-\u9fff-]/g, '_').slice(0, 120)
-        const path = join(sourcesDir, safe)
+        const safe = filename.replace(/[^\w.\u4e00-\u9fff-]/g, '_').slice(0, 120) || 'upload.txt'
         const chunks: Buffer[] = []
+        let truncated = false
         stream.on('data', chunk => chunks.push(chunk as Buffer))
-        stream.on('end', () => { void writeFile(path, Buffer.concat(chunks)) })
-        added.push(safe)
+        // busboy 在 fileSize 处截断并丢弃剩余字节；带 limit 标记的文件不落盘。
+        stream.on('limit', () => { truncated = true })
+        stream.on('end', () => {
+          writeChain = writeChain.then(async () => {
+            if (truncated) {
+              rejected.push({ file: safe, reason: `超过单个 ${Math.round(UPLOAD_FILE_LIMIT_BYTES / 1024 / 1024)}MB 的上限` })
+              return
+            }
+            try {
+              // 重名不再静默互相覆盖：追加 -1/-2 序号生成唯一文件名。
+              const path = await uniqueDestinationPath(sourcesDir, safe)
+              await writeFile(path, Buffer.concat(chunks))
+              added.push(path.slice(sourcesDir.length + 1))
+            } catch (error) {
+              rejected.push({ file: safe, reason: error instanceof Error ? error.message : String(error) })
+            }
+          })
+        })
       })
-      busboy.on('error', (error: Error) => { uploadError = error })
+      busboy.on('error', (error: Error) => { busboyError = error })
       request.pipe(busboy)
       await new Promise<void>(resolve => busboy.on('close', resolve))
+      await writeChain
     } catch (error) {
-      uploadError = error instanceof Error ? error : new Error(String(error))
+      busboyError = error instanceof Error ? error : new Error(String(error))
     }
-    if (uploadError !== null) {
+    if (busboyError !== null) {
       response.writeHead(400)
-      response.end(JSON.stringify({ error: { code: 'invalid-request', message: `上传失败: ${uploadError.message}`, details: null } }))
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: `上传失败: ${busboyError.message}`, details: null } }))
       return
     }
     let buildJobId: string | null = null
+    let buildError: string | undefined
     try {
       const config = await configFacts()
       if (config !== null && config.model !== '' && config.baseUrl !== '') {
         // 上传后直接同步构建（异步 job 路径由 sync 端点覆盖）
         await services.courseService.sync(courseId)
       }
-    } catch {
-      // Build failure does not fail the upload itself.
+    } catch (error) {
+      // Build failure does not fail the upload itself, but it must reach the
+      // client instead of vanishing into a silent catch.
+      buildError = error instanceof Error ? error.message : String(error)
     }
     response.writeHead(200)
-    response.end(JSON.stringify({ added, buildJobId }))
+    response.end(JSON.stringify(buildError === undefined && rejected.length === 0
+      ? { added, buildJobId }
+      : { added, buildJobId, ...(buildError !== undefined ? { buildError } : {}), ...(rejected.length > 0 ? { rejected } : {}) }))
   }
 
   /** `POST /api/eval.submit` (SSE): scan / rubric×N / result / sm2 / done frames. */
@@ -784,7 +863,6 @@ async function serve(port: number): Promise<void> {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
     })
     const writeFrame = (event: string, data: unknown): void => {
       if (response.writableEnded || response.destroyed) return
@@ -838,7 +916,6 @@ async function serve(port: number): Promise<void> {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
     })
     const writeFrame = (event: string, data: unknown): void => {
       if (response.writableEnded || response.destroyed) return
@@ -922,7 +999,6 @@ async function serve(port: number): Promise<void> {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
     })
     const writeFrame = (event: string, data: unknown): void => {
       if (response.writableEnded || response.destroyed) return

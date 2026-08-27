@@ -146,31 +146,37 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
 }
 
 /** Credential resolution: env var first, then `.studyclaw/credentials.json`. */
+function credentialsPathOf(workspaceRoot: string): string {
+  return join(workspaceRoot, '.studyclaw', 'credentials.json')
+}
+
 async function resolveCredential(workspaceRoot: string, providerId: string, apiKeyEnv: string | null): Promise<string | null> {
   if (apiKeyEnv !== null) {
     const envValue = process.env[apiKeyEnv]
     if (typeof envValue === 'string' && envValue !== '') return envValue
   }
-  const credentialsPath = join(workspaceRoot, '.studyclaw', 'credentials.json')
-  const credsRaw = await readFile(credentialsPath, 'utf8').catch(() => null)
-  if (credsRaw !== null) {
-    try {
-      const creds = JSON.parse(credsRaw) as Record<string, unknown>
-      // Settings writes credentials under the generated apiKeyEnv ref
-      // (e.g. `MOCK_API_KEY`), while older workspaces may still use the
-      // provider id or a `default` entry. Accept all compatible keys without
-      // exposing the secret in the resolved config payload.
-      for (const key of [apiKeyEnv, providerId, providerId.replace(/^openai\//, ''), 'default']) {
-        if (key === null) continue
-        const value = creds[key]
-        if (typeof value === 'string' && value !== '') return value
-      }
-      const nested = creds['providers'] as Record<string, unknown> | undefined
-      const nestedValue = nested?.[providerId]
-      if (typeof nestedValue === 'string' && nestedValue !== '') return nestedValue
-    } catch {
-      // Malformed credentials file: treated as unconfigured.
-    }
+  const credsRaw = await readFile(credentialsPathOf(workspaceRoot), 'utf8').catch(() => null)
+  if (credsRaw === null || credsRaw.trim() === '') return null
+  let creds: Record<string, unknown>
+  try {
+    // P0-2：凭据为 AES-GCM 密文；legacy 明文由 settings 层读取时自动迁移，
+    // 这里只需透明解密。解密失败按“未配置”降级而不是让所有 chat 崩溃。
+    const { unsealCredentials } = await import('./secret-box.ts')
+    creds = (await unsealCredentials(credsRaw)).data
+  } catch {
+    return null
   }
+  // Settings writes credentials under the generated apiKeyEnv ref
+  // (e.g. `MOCK_API_KEY`), while older workspaces may still use the
+  // provider id or a `default` entry. Accept all compatible keys without
+  // exposing the secret in the resolved config payload.
+  for (const key of [apiKeyEnv, providerId, providerId.replace(/^openai\//, ''), 'default']) {
+    if (key === null) continue
+    const value = creds[key]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  const nested = creds['providers'] as Record<string, unknown> | undefined
+  const nestedValue = nested?.[providerId]
+  if (typeof nestedValue === 'string' && nestedValue !== '') return nestedValue
   return null
 }

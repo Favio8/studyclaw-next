@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   activateProvider,
   deleteProvider,
@@ -18,10 +19,13 @@ import {
   updateSettings,
 } from '../src/settings.ts'
 import { loadChatConfig } from '../src/config.ts'
+import { unsealCredentials } from '../src/secret-box.ts'
 
 async function setup(): Promise<{ root: string; ws: string }> {
   const root = await mkdtemp(join(tmpdir(), 'studyclaw-settings-'))
   const ws = join(root, 'ws')
+  // 隔离 master.key：密封凭据的密钥必须落在测试临时目录而不是真实用户目录。
+  process.env.STUDYCLAW_HOME = join(ws, '.studyclaw')
   await mkdir(join(ws, '.studyclaw'), { recursive: true })
   await writeFile(join(ws, '.studyclaw', 'config.yaml'), [
     'version: 1',
@@ -52,6 +56,10 @@ async function setup(): Promise<{ root: string; ws: string }> {
 }
 
 describe('settings domain', () => {
+  afterEach(() => {
+    delete process.env.STUDYCLAW_HOME
+  })
+
   it('resolves credentials saved under the generated apiKeyEnv reference', async () => {
     const { root, ws } = await setup()
     await setCredential(ws, 'mock', 'mock-secret')
@@ -89,14 +97,34 @@ describe('settings domain', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it('setCredential writes credentials.json and backfills api_key_env', async () => {
+  it('setCredential seals credentials.json and backfills api_key_env (P0-2)', async () => {
     const { root, ws } = await setup()
     await setCredential(ws, 'mock', 'sk-test-123')
-    const creds = JSON.parse(await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')) as Record<string, string>
+    const raw = await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')
+    // 密文形态：明文 key 不允许再出现在落盘文件里。
+    expect(raw).toContain('"sealed": true')
+    expect(raw).not.toContain('sk-test-123')
+    const creds = (await unsealCredentials(raw)).data
     expect(creds['MOCK_API_KEY']).toBe('sk-test-123')
     const payload = await settingsPayload(ws)
     expect(payload.providers[0]!.apiKeyConfigured).toBe(true)
     expect(payload.providers[0]!.apiKeyEnv).toBe('MOCK_API_KEY')
+    process.env.STUDYCLAW_HOME = ''
+    delete process.env.STUDYCLAW_HOME
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('legacy 明文凭据在读取时自动迁移为密文（P0-2）', async () => {
+    const { root, ws } = await setup()
+    await writeFile(join(ws, '.studyclaw', 'credentials.json'), JSON.stringify({ MOCK_KEY: 'sk-legacy' }), 'utf8')
+    const payload = await settingsPayload(ws)
+    expect(payload.providers[0]!.apiKeyConfigured).toBe(true)
+    const raw = await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')
+    expect(raw).toContain('"sealed": true')
+    const creds = (await unsealCredentials(raw)).data
+    expect(creds['MOCK_KEY']).toBe('sk-legacy')
+    process.env.STUDYCLAW_HOME = ''
+    delete process.env.STUDYCLAW_HOME
     await rm(root, { recursive: true, force: true })
   })
 
@@ -106,8 +134,11 @@ describe('settings domain', () => {
     const payload = await deleteProvider(ws, 'mock')
     expect(payload.providers).toHaveLength(0)
     expect(payload.activeProviderId).toBe('')
-    const creds = JSON.parse(await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')) as Record<string, string>
+    const raw = await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')
+    const creds = (await unsealCredentials(raw)).data
     expect(creds['MOCK_API_KEY']).toBeUndefined()
+    process.env.STUDYCLAW_HOME = ''
+    delete process.env.STUDYCLAW_HOME
     await rm(root, { recursive: true, force: true })
   })
 
@@ -165,6 +196,27 @@ describe('settings domain', () => {
       { id: 'model-b', name: 'model-b', contextWindow: null, maxTokens: null },
     ])
     await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+
+  it('discoverModels 拒绝非 http(s)、内嵌凭据与白名单外环境变量（SEC-2）', async () => {
+    await expect(discoverModels({ baseUrl: 'file:///etc/passwd' })).rejects.toThrow('只支持 http/https')
+    await expect(discoverModels({ baseUrl: 'http://user:pass@example.com/v1' })).rejects.toThrow('不允许内嵌用户名')
+    // PATH 不是 API Key 命名：即使配合恶意 URL 也带不出任意环境变量值。
+    process.env.STUDYCLAW_TEST_SECRET_ENV = 'secret-value'
+    await expect(discoverModels({ baseUrl: 'http://127.0.0.1:9/x', apiKeyEnv: 'PATH' }))
+      .rejects.toThrow('环境变量名不在允许列表内')
+    delete process.env.STUDYCLAW_TEST_SECRET_ENV
+  })
+
+  it('discoverModels 连接失败的报错不回显目标地址（SEC-2 脱敏）', async () => {
+    let message = ''
+    try {
+      await discoverModels({ baseUrl: 'http://127.0.0.1:9/probe-path' })
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).not.toContain('/probe-path')
+    expect(message).toContain('无法连接模型端点')
   })
 
   it('saveProvider merges: omitted temperature/maxConcurrency/models survive', async () => {

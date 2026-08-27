@@ -179,7 +179,15 @@ export interface SessionProjection {
   readonly lastSeq: number
 }
 
+/**
+ * SEC-6：EventStore 的 id 空间还包含运行时/测试用的不透明 id（旧 SessionStore
+ * 则只有时间戳格式），因此这里防的是路径注入而不是强约束格式——只允许字母
+ * 数字开头的安全字符集，挡住 `../`、分隔符、控制字符等穿越原语。
+ */
+const EVENT_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/
+
 function eventPath(historyDir: string, sessionId: string): string {
+  if (!EVENT_SESSION_ID_RE.test(sessionId)) throw new Error(`非法会话 ID: ${sessionId}`)
   return join(historyDir, `session_${sessionId}.events.jsonl`)
 }
 

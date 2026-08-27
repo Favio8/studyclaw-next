@@ -262,6 +262,24 @@ function runtimeConfigOf(config: ResolvedChatConfig): AgentRuntimeConfig {
 
 const runtimeConfigLocks = new Map<string, Promise<AgentRuntimeConfig>>()
 
+/**
+ * P1-8：AgentLoop 的请求级重试钩子此前从未被任何生产调用方传入——adapter
+ * 声明的 retryPolicy（maxRetries:0）也只是元数据，真正执行的是这个钩子。
+ * 仅对瞬时故障码重试，最多 3 次，配合 AgentLoop 内置的线性退避。
+ */
+const TRANSIENT_MODEL_ERROR_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'] as const
+const MAX_AGENT_REQUEST_RETRIES = 3
+
+export function isTransientModelError(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error)
+  return TRANSIENT_MODEL_ERROR_CODES.some(code => text.includes(code)) || /\b(429|502|503|504)\b/.test(text)
+}
+
+async function transientRetryHook(error: unknown, attempt: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false
+  return attempt <= MAX_AGENT_REQUEST_RETRIES && isTransientModelError(error)
+}
+
 /** Persist one immutable runtime snapshot; concurrent callers are idempotent. */
 async function ensureAgentRuntimeConfig(events: SessionEventStore, sessionId: string, config: ResolvedChatConfig): Promise<AgentRuntimeConfig> {
   const key = events.pathFor(sessionId)
@@ -335,6 +353,8 @@ export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
     ...(options.runtimeConfig?.permissionPreset === undefined ? {} : { permissionPreset: options.runtimeConfig.permissionPreset }),
     ...(preset.systemPrompt === undefined ? {} : { systemPrompt: preset.systemPrompt }),
     modelSelection: options.modelSelection ?? null,
+    retry: transientRetryHook,
+    retryDelayMs: 400,
     runner: async function* (turn, context) {
       // Tool/plugin injections are parked by Agent until a model boundary.
       // Fold them into the model-visible prompt while keeping the durable
@@ -440,10 +460,25 @@ export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
 
 /** Host-side lifecycle facade. It owns live Agent instances and approval state. */
 export class LearningAgentService {
-  private readonly answerHandles = new Map<string, AgentTurnHandle>()
-  private readonly queuedHandles = new Map<string, AgentTurnHandle>()
+  /** PERF-10：句柄带时间戳入库，插入时做 TTL 清扫——客户端不来消费
+   * SSE 时（第一轮已知无重连）不再让整包事件常驻内存。 */
+  private static readonly HANDLE_TTL_MS = 30 * 60 * 1000
+  private readonly answerHandles = new Map<string, { handle: AgentTurnHandle; createdMs: number }>()
+  private readonly queuedHandles = new Map<string, { handle: AgentTurnHandle; createdMs: number }>()
   private readonly queuedConsumers = new Set<string>()
   private readonly maintenanceRuns = new Map<string, Promise<void>>()
+
+  private noteHandle(map: Map<string, { handle: AgentTurnHandle; createdMs: number }>, turnId: string, handle: AgentTurnHandle): void {
+    const now = Date.now()
+    for (const [key, entry] of map) {
+      if (now - entry.createdMs > LearningAgentService.HANDLE_TTL_MS) map.delete(key)
+    }
+    map.set(turnId, { handle, createdMs: now })
+  }
+
+  private takeHandle(map: Map<string, { handle: AgentTurnHandle; createdMs: number }>, turnId: string): AgentTurnHandle | undefined {
+    return map.get(turnId)?.handle
+  }
 
   constructor(readonly registry: AgentRegistry, readonly approvals = new ApprovalQueue()) {
     this.approvals.onResolved((request, decision) => {
@@ -598,7 +633,7 @@ export class LearningAgentService {
     const handle = agent.send({ content: text, metadata: { resumeAsk: true } })
     // Keep the exact turn stream available to the SSE answer transport. A
     // unary RPC cannot carry the resumed assistant chunks itself.
-    this.answerHandles.set(handle.turnId, handle)
+    this.noteHandle(this.answerHandles, handle.turnId, handle)
     return { ...agent.status, turnId: handle.turnId }
   }
 
@@ -608,13 +643,13 @@ export class LearningAgentService {
     const agent = this.registry.get(registered.agentId)
     if (agent === undefined) throw new SessionError(`Agent 不存在: ${registered.agentId}`)
     const handle = agent.send({ content, mode, metadata })
-    this.queuedHandles.set(handle.turnId, handle)
+    this.noteHandle(this.queuedHandles, handle.turnId, handle)
     return { agentId: registered.agentId, sessionId, turnId: handle.turnId, status: agent.status }
   }
 
   async *queuedEvents(agentId: string, turnId: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     if (this.queuedConsumers.has(turnId)) throw new SessionError(`队列回合已被消费: ${turnId}`)
-    const handle = this.queuedHandles.get(turnId) ?? this.registry.get(agentId)?.attach(turnId)
+    const handle = this.takeHandle(this.queuedHandles, turnId) ?? this.registry.get(agentId)?.attach(turnId)
     if (handle === undefined) throw new SessionError(`队列回合不存在: ${turnId}`)
     this.queuedConsumers.add(turnId)
     this.queuedHandles.delete(turnId)
@@ -626,14 +661,16 @@ export class LearningAgentService {
     } finally {
       this.queuedConsumers.delete(turnId)
       if (signal?.aborted) {
-        this.registry.get(agentId)?.cancel({ keepInbox: true, cause: 'system' })
+        // P1-9：断连取消必须连同待审批一起清理（走服务级 cancel 内含
+        // approvals.cancelForAgent），否则审批条目带定时器挂死会话的 waiting。
+        void this.cancel(agentId, true).catch(() => undefined)
       }
     }
   }
 
   /** Consume the stream created by a preceding `agents.answer` call. */
   async *answerEvents(agentId: string, turnId: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
-    const handle = this.answerHandles.get(turnId)
+    const handle = this.takeHandle(this.answerHandles, turnId)
     if (handle === undefined) throw new SessionError(`回答回合不存在: ${turnId}`)
     this.answerHandles.delete(turnId)
     try {
@@ -642,7 +679,7 @@ export class LearningAgentService {
         yield event
       }
     } finally {
-      if (signal?.aborted) this.registry.get(agentId)?.cancel({ keepInbox: true, cause: 'system' })
+      if (signal?.aborted) void this.cancel(agentId, true).catch(() => undefined)
     }
   }
   async cancel(agentId: string, keepInbox = false): Promise<Record<string, unknown>> {

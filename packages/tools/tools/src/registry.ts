@@ -534,8 +534,18 @@ async function waitForDelay(ms: number, signal?: AbortSignal): Promise<void> {
 async function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return promise
   if (signal.aborted) throw new Error('tool cancelled')
-  return await Promise.race([
-    promise,
-    new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(new Error('tool cancelled')), { once: true })),
-  ])
+  let onAbort!: () => void
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = (): void => reject(new Error('tool cancelled'))
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    // 保持 Promise.race 语义：先结算者胜（已经 resolve 的 promise 即使后于
+    // abort 发生也不会被改判）。
+    return await Promise.race([promise, aborted])
+  } finally {
+    // PERF-11：未触发的监听器必须摘除——审批的控制器是长生命周期对象，
+    // once 只在触发时自动移除，其余会一路泄漏到回合结束。
+    signal.removeEventListener('abort', onAbort)
+  }
 }

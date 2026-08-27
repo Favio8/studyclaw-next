@@ -5,6 +5,8 @@
  * @module @studyclaw/tools/src/result
  */
 
+import { MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
+
 /** Recoverable tool failure (bad args / policy); maps to `rejected`. */
 export class ToolError extends Error {
   constructor(message: string, readonly code = 'TOOL_EXECUTION_FAILED') {
@@ -22,6 +24,26 @@ export class ToolRejected extends ToolError {
 }
 
 export type ToolStatus = 'success' | 'degraded' | 'rejected'
+
+/** 回灌模型时允许进入消息体的 data 键（白名单，防止把审计/元数据整包灌回）。 */
+const MODEL_DATA_KEYS = new Set([
+  'lines', 'content', 'text', 'matches', 'results', 'sources', 'items',
+  'notes', 'output', 'stdout', 'stderr', 'diff', 'links', 'errors', 'cards',
+])
+
+function serializeModelData(data: Record<string, unknown>): string {
+  const pieces: string[] = []
+  for (const [key, value] of Object.entries(data)) {
+    if (!MODEL_DATA_KEYS.has(key)) continue
+    if (value === undefined || value === null) continue
+    try {
+      pieces.push(`${key}: ${JSON.stringify(value)}`)
+    } catch {
+      // 循环引用等不可序列化值直接跳过。
+    }
+  }
+  return pieces.join('\n')
+}
 
 /**
  * One tool execution outcome: a user-facing summary, optional structured
@@ -45,9 +67,24 @@ export class ToolResult {
     return new ToolResult('degraded', summary, {}, code, 0, renderIntent)
   }
 
-  /** The `tool`-role message content fed back to the model (no data body). */
-  toToolMessage(): string {
-    return this.summary
+  /**
+   * The `tool`-role message content fed back to the model.
+   *
+   * F-18：旧实现只回 summary（"我读了"），模型永远看不到读到的内容。
+   * 现在按白名单键裁剪 data 序列化进消息体，并遵守全局字符预算——
+   * 超预算截尾并显式标记，防 token 爆炸，也不把 audit 数据整个灌回去。
+   */
+  toToolMessage(maxChars: number = MAX_TOOL_MESSAGE_CHARS): string {
+    const parts: string[] = [this.summary]
+    if (this.status === 'success' || this.status === 'degraded') {
+      const body = serializeModelData(this.data)
+      if (body !== '') parts.push(body)
+    }
+    let message = parts.filter(part => part !== '').join('\n')
+    if (message.length > maxChars) {
+      message = `${message.slice(0, maxChars)}\n…[内容超预算已截断，原长 ${message.length} 字符]`
+    }
+    return message
   }
 
   /** The SSE `tool` event payload shape (same as the audit-line projection). */

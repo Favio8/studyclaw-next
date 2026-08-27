@@ -117,7 +117,6 @@ export interface AgentOptions {
   readonly workspaceRoot?: string
   readonly courseId?: string
   readonly tools?: AgentToolExecutor
-  readonly maxParallelToolCalls?: number
   /** Optional transient request retry hook owned by the provider/Host. */
   readonly retry?: (error: unknown, attempt: number, signal: AbortSignal) => Promise<boolean>
   readonly retryDelayMs?: number
@@ -376,9 +375,11 @@ export class Agent {
   private disposed = false
   private wakeRequested = false
   private activityDone: Promise<void> = Promise.resolve()
+
+  /** PERF-9：waitForActivity 的宏任务退让周期。 */
+  private static readonly ACTIVITY_TICK_MS = 50
   private activityResolve: (() => void) | null = null
   private maintenanceController: AbortController | null = null
-  private readonly maxParallelToolCalls: number
   private restored = false
   private readonly completedTurnIds = new Set<string>()
   /** Immutable scope/preset/capability snapshot owned by this live Agent. */
@@ -389,7 +390,6 @@ export class Agent {
   readonly inbox: AgentInbox
 
   constructor(readonly options: AgentOptions) {
-    this.maxParallelToolCalls = Math.max(1, Math.floor(options.maxParallelToolCalls ?? 5))
     this.runtime = createAgentRuntimeState({
       agentId: options.agentId,
       sessionId: options.sessionId,
@@ -619,7 +619,14 @@ export class Agent {
     do {
       activity = this.activityDone
       if (this.active === null && this.maintenanceController === null && this.pending.length === 0 && this.nextStep.length === 0) return
-      await activity
+      // PERF-9：activity 可能早已 settle（activityResolve 为 null），而
+      // pending>0 却因驱动侧阻塞（如 restore() 挂起的 ask）长期不变——
+      // 只 await 已完成 promise 是微任务热自旋，会饿死定时器/IO。加定时
+      // 兜底强制回到宏任务队列。
+      await Promise.race([
+        activity,
+        new Promise<void>(resolve => setTimeout(resolve, AgentLoop.ACTIVITY_TICK_MS)),
+      ])
     } while (activity !== this.activityDone || this.active !== null || this.maintenanceController !== null || this.pending.length > 0 || this.nextStep.length > 0)
   }
 
@@ -1016,28 +1023,6 @@ export class Agent {
         return entries.map(entry => entry.input)
       },
     }
-  }
-
-  /** Execute a bounded model-ordered tool batch with exclusive barriers. */
-  async executeToolBatch(calls: readonly AgentToolCall[], executor: AgentToolExecutor, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
-    const results: Array<Record<string, unknown> | undefined> = Array.from({ length: calls.length })
-    let cursor = 0
-    while (cursor < calls.length) {
-      const first = calls[cursor]!
-      if (first.mode !== 'parallel') {
-        results[cursor] = await executor.execute(first, signal ?? new AbortController().signal)
-        cursor += 1
-        continue
-      }
-      const batch: Array<{ index: number; call: AgentToolCall }> = []
-      while (cursor < calls.length && calls[cursor]!.mode === 'parallel' && batch.length < this.maxParallelToolCalls) {
-        batch.push({ index: cursor, call: calls[cursor]! })
-        cursor += 1
-      }
-      const settled = await Promise.all(batch.map(async item => ({ index: item.index, result: await executor.execute(item.call, signal ?? new AbortController().signal) })))
-      for (const item of settled) results[item.index] = item.result
-    }
-    return results.map(result => result ?? {})
   }
 
   private async append(type: string, payload: Record<string, unknown>, turnId?: string): Promise<SessionEventEnvelope> {

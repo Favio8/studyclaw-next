@@ -164,17 +164,30 @@ interface MutableJob {
   progress: { total: number; finished: number; currentFile: string | null }
   result: { syllabusVersion: string; tasksGenerated: number } | null
   error: string | null
+  /** PERF-10：终结时间戳，用于 TTL 回收。 */
+  finishedAtMs: number | null
 }
 
 /** In-memory async build jobs (progress + polling, Python jobs.py parity). */
 export class JobManager {
   private readonly jobs = new Map<string, MutableJob>()
 
+  /** PERF-10：终结态任务保留 10 分钟供前端收尾轮询，随后回收，长跑不涨内存。 */
+  private static readonly FINISHED_TTL_MS = 10 * 60 * 1000
+
   start(courseDir: string, courseId: string, ctx: BuildContext): string {
+    this.sweep()
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    this.jobs.set(jobId, { jobId, status: 'queued', progress: { total: 0, finished: 0, currentFile: null }, result: null, error: null })
+    this.jobs.set(jobId, { jobId, status: 'queued', progress: { total: 0, finished: 0, currentFile: null }, result: null, error: null, finishedAtMs: null })
     void this.run(jobId, courseDir, courseId, ctx)
     return jobId
+  }
+
+  private sweep(): void {
+    const now = Date.now()
+    for (const [jobId, job] of this.jobs) {
+      if (job.finishedAtMs !== null && now - job.finishedAtMs > JobManager.FINISHED_TTL_MS) this.jobs.delete(jobId)
+    }
   }
 
   private async run(jobId: string, courseDir: string, _courseId: string, ctx: BuildContext): Promise<void> {
@@ -192,6 +205,8 @@ export class JobManager {
     } catch (error) {
       job.status = 'failed'
       job.error = error instanceof Error ? error.message : String(error)
+    } finally {
+      job.finishedAtMs = Date.now()
     }
   }
 

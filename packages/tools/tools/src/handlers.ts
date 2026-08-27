@@ -129,6 +129,8 @@ export async function handlerSearchFiles(ctx: ToolContext, args: Record<string, 
   const maxResults = Number(args['maxResults'] ?? 50)
   const matches: Array<{ path: string; line: number; text: string }> = []
   const walk = async (dir: string): Promise<void> => {
+    // PERF-11：整树扫描必须感知取消，超时/停止后不再继续烧 CPU/IO。
+    if (ctx.signal?.aborted) return
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
       const path = join(dir, entry.name)
@@ -315,10 +317,12 @@ export async function handlerReadSource(ctx: ToolContext, args: Record<string, u
   return [`已读取 ${relPath} ${start}-${last} 行（共 ${total} 行）${truncated ? '（已截断）' : ''}`, data]
 }
 
-async function* iterSourceFiles(root: string): AsyncGenerator<string> {
+async function* iterSourceFiles(root: string, signal?: AbortSignal): AsyncGenerator<string> {
   const excluded = new Set<string>()
   const stack = [root]
   while (stack.length > 0) {
+    // PERF-11：感知取消——超时后的扫描不再空转。
+    if (signal?.aborted) return
     const current = stack.pop()!
     let entries: import('node:fs').Dirent[]
     try {
@@ -355,7 +359,8 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   let skippedOversize = 0
   // 二进制/富文档无法按行 utf8 grep，静默读会产生乱码匹配；显式跳过并上报。
   const BINARY_SOURCE_RE = /\.(pdf|docx?|pptx?|xlsx?|rtf|odt)$/i
-  for await (const path of iterSourceFiles(root)) {
+  for await (const path of iterSourceFiles(root, ctx.signal)) {
+    if (ctx.signal?.aborted) break
     const parts = relative(root, path).split(/[\\/]/)
     if (inplace && parts.some(part => INPLACE_SOURCE_EXCLUDED_DIRS.has(part))) continue
     if ((await stat(path)).size > MAX_FILE_BYTES) { skippedOversize += 1; continue }

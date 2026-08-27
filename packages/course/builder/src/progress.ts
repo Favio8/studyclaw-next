@@ -6,7 +6,7 @@
  * @module @studyclaw/learning/src/progress
  */
 
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 
 export interface ProgressRecord {
   readonly conceptId: string
@@ -15,6 +15,8 @@ export interface ProgressRecord {
   readonly mastery: number
   readonly evals: number
   readonly passRate: number
+  /** 连续答对次数（F-12：SM-2 的 repetitions 输入；失败清零）。 */
+  readonly streak: number
   readonly ef: number
   readonly nextReviewAt: string | null
   readonly misattribution: string
@@ -30,12 +32,25 @@ export interface ProgressBoard {
   readonly concepts: ProgressRecord[]
 }
 
-export const COLUMNS = ['concept_id', 'name', 'chapter', 'mastery', 'evals', 'pass_rate', 'ef', 'next_review_at', 'misattribution'] as const
+export const COLUMNS = ['concept_id', 'name', 'chapter', 'mastery', 'evals', 'pass_rate', 'ef', 'next_review_at', 'misattribution', 'streak'] as const
 const NO_DATE = '-'
 const MASTERY_CELL_RE = /[🟢🟡🔴]?\s*(\d+(?:\.\d+)?)\s*%/
 const MASTERY_RE = /-\s*\*\*总体掌握度\*\*[:：]\s*([\d.]+)%/
 const DUE_RE = /-\s*\*\*待复习卡片数\*\*[:：]\s*(\d+)/
 const UPDATED_RE = /-\s*\*\*最后更新时间\*\*[:：]\s*([\d\- :]+)/
+
+/**
+ * F-13：本地时区的 YYYY-MM-DD。到期/今日/热力图分桶统一用它——
+ * `toISOString()` 是 UTC，UTC+8 的用户在 00:00–07:59 会整体错一天，
+ * 而早晨正是复习高发时段。
+ */
+export function localDateKey(value: Date | string | number = new Date()): string {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) throw new RangeError('无效日期')
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
 
 export function renderMastery(mastery: number): string {
   const emoji = mastery >= 0.7 ? '🟢' : mastery >= 0.4 ? '🟡' : '🔴'
@@ -48,36 +63,77 @@ function parseMasteryCell(cell: string): number {
   return Math.min(1, Number(match[1]) / 100)
 }
 
+/** F-11：单元格写入前转义 `|`、反斜杠与换行——章节标题来自用户讲义，
+ * 未转义会让一行坏表把解析截断、其后所有概念的掌握度历史静默丢失。 */
+function escapeCell(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\s*[\r\n]+\s*/g, ' ')
+}
+
+/** 与 escapeCell 对应的拆分器：按未转义的 `|` 切分，转义序列还原为字面值。 */
+function splitTableCells(row: string): string[] {
+  const cells: string[] = []
+  let current = ''
+  let escaped = false
+  for (const ch of row) {
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === '|') {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (escaped) current += '\\'
+  cells.push(current.trim())
+  return cells
+}
+
 function renderRecordRow(record: ProgressRecord): string {
   const cells = [
-    `\`${record.conceptId}\``,
-    record.name,
-    record.chapter,
+    `\`${escapeCell(record.conceptId)}\``,
+    escapeCell(record.name),
+    escapeCell(record.chapter),
     renderMastery(record.mastery),
     String(record.evals),
     `${Math.round(record.passRate * 100)}%`,
     record.ef.toFixed(2),
     record.nextReviewAt !== null ? record.nextReviewAt.slice(0, 10) : NO_DATE,
     record.misattribution,
+    String(record.streak ?? 0),
   ]
   return `| ${cells.join(' | ')} |`
 }
 
 function parseRecordRow(line: string): ProgressRecord | null {
-  const cells = line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim())
-  if (cells.length !== COLUMNS.length) return null
-  const dateRaw = cells[7]!
+  const body = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  const cells = splitTableCells(body)
+  // F-11：列数不再静默丢行。concept_id 缺失视为不可恢复；其余字段缺省兜底。
+  const conceptId = cells[0]!.replace(/^`|`$/g, '').trim()
+  if (conceptId === '') return null
+  const dateRaw = cells[7]?.trim() ?? ''
   const nextReviewAt = dateRaw !== '' && dateRaw !== NO_DATE ? dateRaw : null
   return {
-    conceptId: cells[0]!.replace(/^`|`$/g, ''),
-    name: cells[1]!,
-    chapter: cells[2]!,
-    mastery: parseMasteryCell(cells[3]!),
+    conceptId,
+    name: cells[1] ?? conceptId,
+    chapter: cells[2] ?? '',
+    mastery: parseMasteryCell(cells[3] ?? ''),
     evals: Number(cells[4] ?? 0) || 0,
-    passRate: parsePercent(cells[5]!),
+    passRate: parsePercent(cells[5] ?? ''),
     ef: Number(cells[6] ?? 2.5) || 2.5,
     nextReviewAt,
-    misattribution: cells[8]!,
+    misattribution: cells[8] ?? 'none',
+    streak: Number(cells[9] ?? 0) || 0,
   }
 }
 
@@ -103,7 +159,9 @@ export async function loadProgressBoard(path: string): Promise<ProgressBoard> {
     const trimmed = line.trim()
     if (trimmed.startsWith('|') && trimmed.includes('concept_id')) { inTable = true; continue }
     if (!inTable) continue
-    if (!trimmed.startsWith('|')) break
+    // F-11：遇非表格行不再 break——旧实现会把标题含换行的记录之后的
+    // 所有概念行静默丢弃。空行/分隔行跳过，后续表格行继续收集。
+    if (!trimmed.startsWith('|')) continue
     const separator = trimmed.slice(1, -1).replace(/[|\-\s:]/g, '')
     if (separator === '') continue
     const record = parseRecordRow(trimmed)
@@ -128,14 +186,14 @@ export async function saveProgressBoard(path: string, board: ProgressBoard, now 
   }
   const concepts = board.concepts
   const overall = concepts.length > 0 ? concepts.reduce((sum, concept) => sum + concept.mastery, 0) / concepts.length : 0
-  const today = now.toISOString().slice(0, 10)
+  const today = localDateKey(now)
   const due = concepts.filter(concept => concept.nextReviewAt !== null && concept.nextReviewAt.slice(0, 10) <= today).length
   const rows = [
     '# 学习进度',
     '',
     `- **总体掌握度**：${Math.round(overall * 100)}%`,
     `- **待复习卡片数**：${due}`,
-    `- **最后更新时间**：${now.toISOString().replace('T', ' ').slice(0, 16)}`,
+    `- **最后更新时间**：${localDateKey(now)} ${now.toTimeString().slice(0, 5)}`,
     '',
     `| ${COLUMNS.join(' | ')} |`,
     `|${COLUMNS.map(() => '---').join('|')}|`,
@@ -143,9 +201,14 @@ export async function saveProgressBoard(path: string, board: ProgressBoard, now 
     '',
     ...(notes !== '' ? [notes, ''] : []),
   ]
-  const tmp = path + '.tmp'
+  const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`
   await writeFile(tmp, rows.join('\n'), 'utf8')
-  await rename(tmp, path)
+  try {
+    await rename(tmp, path)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 /** Upsert one record by conceptId (replace or append). */
@@ -171,16 +234,22 @@ export function scoreToQuality(score: number): number {
   return 1
 }
 
+/** EF 夹在标准 [1.3, 2.9] 区间——上限钳制防止极端序列下无限增长（F-12）。 */
 export function updateEf(currentEf: number, quality: number): number {
   const delta = 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)
-  return Math.max(1.3, currentEf + delta)
+  return Math.min(2.9, Math.max(1.3, currentEf + delta))
 }
+
+const MAX_INTERVAL_DAYS = 365
 
 export function intervalDays(repetitions: number, ef: number): number {
   if (repetitions <= 1) return 1
   let interval = 3
-  for (let i = 3; i <= repetitions; i += 1) interval = Math.round(interval * ef)
-  return Math.max(1, interval)
+  for (let i = 3; i <= repetitions; i += 1) {
+    interval = Math.round(interval * ef)
+    if (interval >= MAX_INTERVAL_DAYS) return MAX_INTERVAL_DAYS
+  }
+  return Math.max(1, Math.min(MAX_INTERVAL_DAYS, interval))
 }
 
 export interface ScheduleState {
@@ -189,7 +258,11 @@ export interface ScheduleState {
   readonly intervalDays: number
 }
 
-/** One review schedule: pass (q≥3) → repetitions+1 + interval; fail → reset. */
+/**
+ * One review schedule: pass (q≥3) → repetitions+1 + interval; fail → reset.
+ * F-12：`repetitions` 必须传"连续成功次数"（record.streak），而不是累计
+ * 评测总数——否则失败重置失效，反复答错的概念复习间隔反而越来越长。
+ */
 export function reviewSchedule(currentEf: number, repetitions: number, score: number): ScheduleState {
   const quality = scoreToQuality(score)
   const ef = updateEf(currentEf, quality)

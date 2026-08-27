@@ -38,7 +38,12 @@ import { createDeepSeekToolClient } from './adapter.ts'
 import { fetchUrlSafe } from './fetch-url-safe.ts'
 import { buildDefaultSpecs } from '@studyclaw/course-builder'
 import { buildGenericSpecs, INPLACE_SOURCE_EXCLUDED_DIRS } from '@studyclaw/tools'
+import { withCourseLock } from '@studyclaw/tools'
+
+/** F-14：手动建卡的调用序号，保证 chunk_id 唯一。 */
+let manualCardSeq = 0
 import { stateDirOf } from '@studyclaw/course-builder'
+import { localDateKey } from '@studyclaw/course-builder'
 import type { ResolvedChatConfig } from './config.ts'
 import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionEventStore, SessionStore, utcTs } from '@studyclaw/session'
@@ -274,7 +279,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     async quiz(workspaceRoot, courseId, mode, count, conceptId, dueOnly) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const tasks = await pickTasks(dir, mode, conceptId, count, new Date().toISOString().slice(0, 10), dueOnly)
+      const tasks = await pickTasks(dir, mode, conceptId, count, localDateKey(), dueOnly)
       return tasks.map(quizView)
     },
     async taskPool(workspaceRoot, courseId, conceptId, limit) {
@@ -374,17 +379,36 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const generator = requireGenerator({ workspaceRoot, config })
       const title = payload.title ?? payload.content.slice(0, 30)
       const conceptId = payload.conceptId ?? slugId(title)
+      // F-14：chunk_id 全局常量 'manual_001' 改为每次调用唯一，溯源不再串。
+      const chunkStamp = `manual_${Date.now().toString(36)}${(++manualCardSeq).toString(36)}`
       const chunk = {
-        chunk_id: 'manual_001',
+        chunk_id: chunkStamp,
         chapter_id: 'chap_manual',
         concept_id: conceptId,
         title,
         content: payload.content,
-        source_ref: { file: 'manual', chunk_id: 'manual_001' },
+        source_ref: { file: 'manual', chunk_id: chunkStamp },
       }
-      const tasks = await generator.generateTasks(chunk, payload.count ?? 1)
-      const pool = await loadTaskPool(dir)
-      await writeTaskPool(dir, [...pool, ...tasks])
+      const generated = await generator.generateTasks(chunk, payload.count ?? 1)
+      // P1-6 + F-14：池内读改写上锁；与既有 task_id 冲突的手动卡重编号，
+      // 避免评测 find(task_id) 命中错误题卡。
+      const tasks = await withCourseLock(dir, async () => {
+        const pool = await loadTaskPool(dir)
+        const takenIds = new Set(pool.map(card => card.task_id))
+        const uniquified = generated.map(card => {
+          if (!takenIds.has(card.task_id)) {
+            takenIds.add(card.task_id)
+            return card
+          }
+          let sequence = 2
+          while (takenIds.has(`${card.task_id}_${sequence}`)) sequence += 1
+          const reassigned = `${card.task_id}_${sequence}`
+          takenIds.add(reassigned)
+          return { ...card, task_id: reassigned }
+        })
+        await writeTaskPool(dir, [...pool, ...uniquified])
+        return uniquified
+      })
       return { courseId, tasks }
     },
     async dynamicCards(workspaceRoot, courseId, payload) {
@@ -401,7 +425,10 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         payload.count ?? 1,
         payload.targetId ?? null,
       )
-      await writeTaskPool(dir, [...pool, ...cards])
+      await withCourseLock(dir, async () => {
+        const current = await loadTaskPool(dir)
+        await writeTaskPool(dir, [...current, ...cards])
+      })
       return { courseId, tasks: cards }
     },
     async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null) {
@@ -419,35 +446,43 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       for (const [criterion, hit] of Object.entries(result.rubricHits)) {
         yield { event: 'rubric', data: { index: 0, criterion, hit } }
       }
-      // Update the task history + progress board (SM-2).
-      const board = await loadProgressBoard(join(stateDirOf(dir), 'progress.md'))
-      const record = board.concepts.find(candidate => candidate.conceptId === task.concept_id)
-      const attempts = (record?.evals ?? 0) + 1
-      const passRate = record !== undefined
-        ? (record.passRate * record.evals + (result.passed ? 1 : 0)) / attempts
-        : (result.passed ? 1 : 0)
-      const next = reviewSchedule(record?.ef ?? 2.5, attempts, result.score)
-      const nextReviewAt = new Date(Date.now() + next.intervalDays * 86_400_000).toISOString().slice(0, 10)
-      const updated = upsertProgressRecord(board, {
-        conceptId: task.concept_id,
-        name: record?.name ?? task.concept_id,
-        chapter: record?.chapter ?? '',
-        mastery: result.passed ? Math.max(record?.mastery ?? 0, result.score) : Math.min(record?.mastery ?? 0, result.score * 0.9),
-        evals: attempts,
-        passRate,
-        ef: next.ef,
-        nextReviewAt,
-        misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
+      // Update the task history + progress board (SM-2) under the course lock
+      // (P1-6)：读板→upsert→存板的整个 RMW 在临界区内，避免并发评测丢更新。
+      const boardPath = join(stateDirOf(dir), 'progress.md')
+      const schedule = await withCourseLock(dir, async () => {
+        const board = await loadProgressBoard(boardPath)
+        const record = board.concepts.find(candidate => candidate.conceptId === task.concept_id)
+        const attempts = (record?.evals ?? 0) + 1
+        const passRate = record !== undefined
+          ? (record.passRate * record.evals + (result.passed ? 1 : 0)) / attempts
+          : (result.passed ? 1 : 0)
+        // F-12：SM-2 的 repetitions 入参是"连续成功次数"，失败清零。
+        const priorStreak = result.passed ? record?.streak ?? 0 : 0
+        const nextLocal = reviewSchedule(record?.ef ?? 2.5, priorStreak, result.score)
+        const dueDate = new Date(Date.now() + Math.min(nextLocal.intervalDays, 365) * 86_400_000)
+        const dueDateKey = localDateKey(dueDate)
+        const updated = upsertProgressRecord(board, {
+          conceptId: task.concept_id,
+          name: record?.name ?? task.concept_id,
+          chapter: record?.chapter ?? '',
+          mastery: result.passed ? Math.max(record?.mastery ?? 0, result.score) : Math.min(record?.mastery ?? 0, result.score * 0.9),
+          evals: attempts,
+          passRate,
+          streak: nextLocal.repetitions,
+          ef: nextLocal.ef,
+          nextReviewAt: dueDateKey,
+          misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
+        })
+        await saveProgressBoard(boardPath, updated)
+        return { next: nextLocal, nextReviewAt: dueDateKey }
       })
-      await saveProgressBoard(join(stateDirOf(dir), 'progress.md'), updated)
-      // 追加评测审计事件到会话事件流。旧实现误用 SessionStore.append 写
-      // legacy session_<id>.jsonl，而 chat/stream 会话 persistLegacy:false 只
-      // 落 session_<id>.events.jsonl → stat 落空 → 抛「会话不存在」断流。
-      // 改走 SessionEventStore（与 chat 同一命名 session_<id>.events.jsonl，
-      // 统一读写路径）。评分结果已落 progress.md，审计仅历史留痕：写盘前
-      // 校验会话存在，追加失败降级 warn，不阻断 result/sm2/done 帧，避免
-      // 「服务端记分、客户端只收 error」的状态分裂。
-      const historyDir = join(dir, 'history')
+      const { next, nextReviewAt } = schedule
+      // 追加评测审计事件到会话事件流。路径必须与 chat 运行时一致：
+      // `<课程根>/.studyclaw/history`（P1-1——旧代码漏掉 .studyclaw 段，
+      // exists() 恒 false，审计被静默跳过）。评分结果已落 progress.md，
+      // 审计写入失败不阻断 result/sm2/done，但必须以 warning 帧显式告知
+      // 客户端（F-10：静默吞错升级为可见告警）。
+      const historyDir = join(stateDirOf(dir), 'history')
       const auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
       if (auditSessionId !== null) {
         const eventStore = new SessionEventStore(historyDir)
@@ -466,9 +501,12 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
               },
             })
           } catch (error) {
-            // 评分结果已落盘，审计写入失败不影响 result/sm2/done 下发。
-            console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${error instanceof Error ? error.message : String(error)}`)
+            const message = error instanceof Error ? error.message : String(error)
+            console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${message}`)
+            yield { event: 'warning', data: { code: 'AUDIT_WRITE_FAILED', message: `评分已记录，但审计留痕失败：${message}` } }
           }
+        } else {
+          console.warn(`[evalSubmit] 会话 ${auditSessionId} 不存在审计留痕（historyDir=${historyDir}）`)
         }
       }
       yield { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } }

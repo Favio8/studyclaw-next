@@ -42,9 +42,11 @@ export class LlmTaskGenerator {
       this.generateOptions(chunk.title, chunk.content, count),
       this.options.maxRetries ?? DEFAULT_MAX_RETRIES,
     )
-    return batch.tasks.map(task => ({
+    return batch.tasks.map((task, index) => ({
       ...task,
-      task_id: this.taskId(chunk.concept_id),
+      // F-14：批内唯一编号（_001/_002…），不再整批共用 _001——否则评测
+      // find(task_id) 永远命中第一张，分数记到错误题卡头上。
+      task_id: this.taskId(chunk.concept_id, index + 1),
       concept_id: chunk.concept_id,
       source_ref: chunk.source_ref,
       history: { attempts: 0, last_score: null, pass_count: 0, last_review_at: null, next_review_at: null, ef: 2.5 },
@@ -64,9 +66,9 @@ export class LlmTaskGenerator {
     }
   }
 
-  private taskId(conceptId: string): string {
+  private taskId(conceptId: string, sequence: number): string {
     const prefix = conceptId.replace(/^c_/, '')
-    return `${prefix}_001`
+    return `${prefix}_${String(sequence).padStart(3, '0')}`
   }
 }
 

@@ -508,7 +508,7 @@ export class CourseBuilder {
       if (prior === undefined) {
         refreshed.push({
           conceptId, name: meta.name, chapter: meta.chapter,
-          mastery: 0, evals: 0, passRate: 0, ef: 2.5,
+          mastery: 0, evals: 0, passRate: 0, streak: 0, ef: 2.5,
           nextReviewAt: null, misattribution: 'none',
         })
         changed = true

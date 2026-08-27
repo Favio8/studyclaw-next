@@ -69,5 +69,6 @@ export {
   updateEf,
   intervalDays,
   reviewSchedule,
+  localDateKey,
 } from './progress.ts'
 export type { ProgressBoard, ProgressRecord } from './progress.ts'

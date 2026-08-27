@@ -7,7 +7,7 @@
  * @module @studyclaw/session/events
  */
 
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { utcTs } from './store.ts'
@@ -191,13 +191,34 @@ function eventPath(historyDir: string, sessionId: string): string {
   return join(historyDir, `session_${sessionId}.events.jsonl`)
 }
 
-function parseRows(text: string): SessionEventEnvelope[] {
+/**
+ * P0-6 容错回放：逐行扫描，坏行/序号断裂处截断——不再让一行半写数据把整个
+ * 会话锁死。`damaged` 表示截断点之后仍有内容（append 时据此自愈重建）。
+ */
+function scanRowsTolerant(text: string, sessionId: string): { rows: SessionEventEnvelope[]; damaged: boolean } {
   const rows: SessionEventEnvelope[] = []
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() === '') continue
-    rows.push(sessionEventEnvelope.parse(JSON.parse(line) as unknown))
+  const lines = text.split(/\r?\n/)
+  let expected = 1
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!.trim()
+    if (line === '') continue
+    try {
+      const row = sessionEventEnvelope.parse(JSON.parse(line) as unknown)
+      if (row.seq !== expected) throw new Error(`seq=${row.seq} 应为 ${expected}`)
+      rows.push(row)
+      expected += 1
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      console.warn(`[events] 会话 ${sessionId} 事件文件在第 ${index + 1} 行后截断（${reason}）；后续行将在下次追加时归档为 .corrupt 备份`)
+      return { rows, damaged: lines.slice(index).some(candidate => candidate.trim() !== '') }
+    }
   }
-  return rows
+  return { rows, damaged: false }
+}
+
+/** P0-6 自愈追加语义：健康文件走纯 `fs.appendFile`+fsync，坏文件一次性原子重建并备份原件。 */
+function serializeRows(rows: ReadonlyArray<SessionEventEnvelope>): string {
+  return rows.map(row => JSON.stringify(row)).join('\n') + '\n'
 }
 
 /** Windows can briefly hold the destination while a concurrent projection
@@ -230,13 +251,7 @@ export class SessionEventStore {
 
   async load(sessionId: string): Promise<SessionEventEnvelope[]> {
     const text = await readFile(this.pathFor(sessionId), 'utf8').catch(() => '')
-    const rows = parseRows(text)
-    let expected = 1
-    for (const row of rows) {
-      if (row.seq !== expected) throw new Error(`会话事件序号断裂: ${sessionId} expected=${expected} actual=${row.seq}`)
-      expected += 1
-    }
-    return rows
+    return scanRowsTolerant(text, sessionId).rows
   }
 
   async loadAfter(sessionId: string, afterSeq = 0): Promise<SessionEventEnvelope[]> {
@@ -254,12 +269,33 @@ export class SessionEventStore {
     await previousLock
     try {
       await mkdir(this.historyDir, { recursive: true })
-      const existing = await this.load(sessionId)
+      const raw = await readFile(path, 'utf8').catch(() => null)
+      const { rows: existing, damaged } = raw === null ? { rows: [] as SessionEventEnvelope[], damaged: false } : scanRowsTolerant(raw, sessionId)
       const next = events.map((event, index) => sessionEventEnvelope.parse({ ...event, seq: existing.length + index + 1 }))
-      const previous = await readFile(path, 'utf8').catch(() => '')
-      const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      await writeFile(tmp, previous + next.map(event => JSON.stringify(event)).join('\n') + '\n', 'utf8')
-      await replaceEventFile(tmp, path)
+      const chunk = serializeRows(next)
+      if (raw !== null && !damaged) {
+        // P0-6：健康路径不再整文件重写（大日志下 O(n)/次且断电丢整本），
+        // 改为纯追加 + 每批 fsync——半行损坏在下次读取时被容错截断。
+        const handle = await open(path, 'a')
+        try {
+          await handle.writeFile(chunk, 'utf8')
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+      } else if (raw === null || !damaged) {
+        // 新文件：一次性原子写入初始事件。
+        const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        await writeFile(tmp, chunk, 'utf8')
+        await replaceEventFile(tmp, path)
+      } else {
+        // 自愈：原件备份 .corrupt-<时间戳>，以合法前缀 + 新事件原子重建。
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        await writeFile(`${path}.corrupt-${stamp}`, raw, 'utf8').catch(() => undefined)
+        const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        await writeFile(tmp, serializeRows(existing) + chunk, 'utf8')
+        await replaceEventFile(tmp, path)
+      }
       return next
     } finally {
       release()

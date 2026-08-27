@@ -17,6 +17,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 import { loadTaskPool } from '@studyclaw/course-builder'
 import { loadProgressBoard, dueRecords } from '@studyclaw/course-builder'
+import { localDateKey } from '@studyclaw/course-builder'
 
 // ---------------------------------------------------------------------------
 // Evaluator (rubric binary hit)
@@ -82,10 +83,25 @@ export class RubricEvaluator {
       },
       this.options.maxRetries ?? 3,
     )
+    // F-15：按 criterion 文本对齐判定结果，而不是数组下标——LLM 调换顺序
+    // 或漏条时，下标法会把命中记到错误的采分点上。未匹配的采分点按"未命中"
+    // 计并在日志中显式暴露，宁可错杀不可错记。
+    const normalizeCriterion = (value: string): string => value.replace(/\s+/g, '').toLowerCase()
+    const hitByCriterion = new Map<string, boolean>()
+    for (const judgement of verdict.judgements) {
+      const key = normalizeCriterion(judgement.criterion)
+      if (!hitByCriterion.has(key)) hitByCriterion.set(key, judgement.hit)
+    }
     const hits: Record<string, boolean> = {}
-    rubric.forEach((criterion, index) => {
-      hits[criterion] = verdict.judgements[index]?.hit ?? false
+    let aligned = 0
+    rubric.forEach(criterion => {
+      const hit = hitByCriterion.get(normalizeCriterion(criterion))
+      if (hit !== undefined) aligned += 1
+      hits[criterion] = hit ?? false
     })
+    if (aligned < rubric.length) {
+      console.warn(`[evaluator] LLM 判定与评分点仅对齐 ${aligned}/${rubric.length} 条；缺失项按未命中计`)
+    }
     const passed = Object.values(hits).every(Boolean)
     return {
       taskId: task.task_id,
@@ -112,11 +128,11 @@ export async function pickTasks(
   mode: 'review' | 'new',
   conceptId: string | null,
   count: number,
-  today = new Date().toISOString().slice(0, 10),
+  today: string = localDateKey(),
   dueOnly = false,
 ): Promise<HarnessTask[]> {
   const pool = (await loadTaskPool(courseDir)).filter(task => !task.deprecated)
-  const board = await loadProgressBoard(join(courseDir, 'progress.md'))
+  const board = await loadProgressBoard(join(courseDir, '.studyclaw', 'progress.md'))
   const due = new Set(dueRecords(board, today).map(record => record.conceptId))
 
   if (mode === 'review') {
@@ -223,7 +239,8 @@ export async function readGlobalMemory(workspaceRoot: string): Promise<string> {
 
 /** Read the course memory pool evidence (sync audit lines). */
 export async function readCourseMemoryPool(courseDir: string): Promise<string[]> {
-  const historyDir = join(courseDir, 'history')
+  // P1-7：与写入侧一致——历史目录在 <课程根>/.studyclaw/history。
+  const historyDir = join(courseDir, '.studyclaw', 'history')
   const hints: string[] = []
   if (!(await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) return hints
   for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
@@ -290,8 +307,10 @@ function levelOf(score: number): 0 | 1 | 2 | 3 {
 function rowDate(row: Record<string, unknown>): string | null {
   const ts = row['ts']
   if (typeof ts !== 'string') return null
-  const match = /^(\d{4}-\d{2}-\d{2})/.exec(ts)
-  return match === null ? null : match[1]!
+  // F-13：时间戳按本地时区归日（ISO 时间戳是 UTC，直接截日期会错桶）。
+  const parsed = new Date(ts)
+  if (Number.isNaN(parsed.getTime())) return null
+  return localDateKey(parsed)
 }
 
 /** Aggregate chat/eval/weak-cleared per day over all course histories. */
@@ -306,8 +325,8 @@ export async function heatmap(workspaceRoot: string, weeks = 12): Promise<Heatma
     days.set(date, fresh)
     return fresh
   }
-  // 项目即课程：会话历史直接位于项目根 history/。
-  const historyDir = join(workspaceRoot, 'history')
+  // 项目即课程：会话历史位于项目根 .studyclaw/history（P1-7 双轨制修复）。
+  const historyDir = join(workspaceRoot, '.studyclaw', 'history')
   if ((await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) {
     for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
       const text = await readFile(join(historyDir, name), 'utf8').catch(() => '')
@@ -340,13 +359,11 @@ export async function heatmap(workspaceRoot: string, weeks = 12): Promise<Heatma
   }
 
   // Normalize scores, fill the window, and compute streaks.
-  const start = new Date()
-  start.setDate(start.getDate() - weeks * 7)
   const window: HeatmapDay[] = []
   for (let offset = weeks * 7 - 1; offset >= 0; offset -= 1) {
     const date = new Date()
     date.setDate(date.getDate() - offset)
-    const key = date.toISOString().slice(0, 10)
+    const key = localDateKey(date)
     const day = days.get(key) ?? { date: key, score: 0, level: 0, tasks: 0, chatTurns: 0, weakSpotsCleared: 0 }
     const score = day.chatTurns + day.tasks * 2 + day.weakSpotsCleared * 3
     window.push({ ...day, score, level: levelOf(score) })
@@ -380,8 +397,8 @@ export interface HeatmapDayDetail {
 export async function heatmapDay(workspaceRoot: string, date: string): Promise<HeatmapDayDetail> {
   const changelog: string[] = []
   const events: HeatmapDayDetail['events'] = []
-  // 项目即课程：会话历史直接位于项目根 history/。
-  const historyDir = join(workspaceRoot, 'history')
+  // 项目即课程：会话历史位于项目根 .studyclaw/history（P1-7 双轨制修复）。
+  const historyDir = join(workspaceRoot, '.studyclaw', 'history')
   if ((await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) {
     for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
       const text = await readFile(join(historyDir, name), 'utf8').catch(() => '')

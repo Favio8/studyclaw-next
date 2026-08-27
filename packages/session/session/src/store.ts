@@ -5,7 +5,7 @@
  * @module @studyclaw/session/src/store
  */
 
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { chatLine, sessionMetaLine, sessionModelLine, type ChatLine, type HistoryLine, type LearningMode, type SessionMetaLine, type SessionModelLine } from './models.ts'
@@ -19,6 +19,20 @@ export class SessionError extends Error {
     super(message)
     this.name = 'SessionError'
   }
+}
+
+/** In-process serialization for whole-file meta rewrites (P1-6). */
+const metaRewriteLocks = new Map<string, Promise<void>>()
+
+async function withMetaRewriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = metaRewriteLocks.get(key) ?? Promise.resolve()
+  const run = previous.then(fn, fn)
+  const settled = run.then(() => undefined, () => undefined)
+  metaRewriteLocks.set(key, settled)
+  void settled.then(() => {
+    if (metaRewriteLocks.get(key) === settled) metaRewriteLocks.delete(key)
+  })
+  return run
 }
 
 /** UTC timestamp in file-contract form: `YYYY-MM-DDTHH:MM:SSZ`. */
@@ -354,13 +368,7 @@ export class SessionStore {
   async fillDefaultTitle(sessionId: string, userText: string): Promise<void> {
     const meta = await this.readMeta(sessionId)
     if (meta === null || meta.title !== '') return
-    const path = this.pathFor(sessionId)
-    const text = await readFile(path, 'utf8')
-    const rows = text.split(/\r?\n/)
-    rows[0] = dumps({ ...meta, title: userText.slice(0, 20) })
-    const tmp = path + '.tmp'
-    await writeFile(tmp, rows.join('\n'), 'utf8')
-    await rename(tmp, path)
+    await this.rewriteMetaLine(sessionId, { ...meta, title: userText.slice(0, 20) })
   }
 
   /** Explicitly rename a session by rewriting only its metadata line. */
@@ -372,13 +380,28 @@ export class SessionStore {
     }
     const meta = await this.readMeta(sessionId)
     if (meta === null) throw new SessionError(`会话不存在: ${sessionId}`)
+    await this.rewriteMetaLine(sessionId, { ...meta, title: title.trim() })
+  }
+
+  /**
+   * P1-6：两处 meta 重写共用此路径——唯一随机 tmp 名 + rename 原子替换，
+   * 并用进程内文件锁串行化，避免并发重写互相覆盖 / 固定 tmp 名互踩。
+   */
+  private async rewriteMetaLine(sessionId: string, metaLine: SessionMetaLine): Promise<void> {
     const path = this.pathFor(sessionId)
-    const text = await readFile(path, 'utf8')
-    const rows = text.split(/\r?\n/)
-    rows[0] = dumps({ ...meta, title: title.trim() })
-    const tmp = path + '.tmp'
-    await writeFile(tmp, rows.join('\n'), 'utf8')
-    await rename(tmp, path)
+    await withMetaRewriteLock(path, async () => {
+      const text = await readFile(path, 'utf8')
+      const rows = text.split(/\r?\n/)
+      rows[0] = dumps(metaLine)
+      const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      try {
+        await writeFile(tmp, rows.join('\n'), 'utf8')
+        await rename(tmp, path)
+      } catch (error) {
+        await rm(tmp, { force: true }).catch(() => undefined)
+        throw error
+      }
+    })
   }
 
   /**

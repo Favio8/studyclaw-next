@@ -1,10 +1,36 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SessionEventStore } from '../src/events.ts'
 
 describe('SessionEventStore', () => {
+  it('一行坏数据不再锁死会话：load 容错，append 自愈并备份原件（P0-6）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-durability-'))
+    const store = new SessionEventStore(root)
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'turn/start', payload: {} },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'turn/end', payload: {} },
+    )
+    const path = store.pathFor('s')
+    // 模拟断电半行写入。
+    await writeFile(path, (await readFile(path, 'utf8')) + '{"ts":"2026-08-22T12', 'utf8')
+    // load 只返回合法前缀，不抛错。
+    const before = await store.load('s')
+    expect(before.map(row => row.seq)).toEqual([1, 2])
+    // 追加自愈：seq 续排、文件重建为可读格式、原件备份落盘。
+    const appended = await store.append('s', { ts: '2026-08-22T12:00:01.000Z', type: 'user/input', payload: { content: '继续' } })
+    expect(appended.map(row => row.seq)).toEqual([3])
+    const healed = await store.load('s')
+    expect(healed).toHaveLength(3)
+    const files = await readdir(root)
+    expect(files.some(file => file.startsWith('session_s.events.jsonl.corrupt-'))).toBe(true)
+    // 再追加回到健康快速路径（纯追加），seq 依然连续。
+    await store.append('s', { ts: '2026-08-22T12:00:02.000Z', type: 'turn/end', payload: {} })
+    await expect(store.load('s').then(rows => rows.map(row => row.seq))).resolves.toEqual([1, 2, 3, 4])
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('拒绝路径注入式 sessionId（SEC-6）', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-injection-'))
     const store = new SessionEventStore(root)

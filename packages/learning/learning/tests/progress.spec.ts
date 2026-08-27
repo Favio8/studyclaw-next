@@ -79,14 +79,18 @@ describe('heatmap metrics', () => {
   it('aggregates chat/eval/weak-cleared per day', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-metrics-'))
     const ws = join(root, 'ws')
-    const historyDir = join(ws, 'history')
+    // P1-7：历史目录与写入侧一致，位于 <工作区根>/.studyclaw/history。
+    const historyDir = join(ws, '.studyclaw', 'history')
     await mkdir(historyDir, { recursive: true })
-    const today = new Date().toISOString().slice(0, 10)
+    // F-13：行内 ts 为 ISO（UTC），分桶按本地时区归日——夹具用正午 UTC
+    // 保证在任何时区都落在"今天"。
+    const today = new Date()
+    const iso = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), 12)).toISOString()
     await writeFile(join(historyDir, 'session_20260821-100000.jsonl'), [
-      JSON.stringify({ type: 'session_meta', title: '', mode: 'socratic', created_at: `${today}T10:00:00Z` }),
-      JSON.stringify({ type: 'chat', ts: `${today}T10:00:00Z`, role: 'user', content: 'hi' }),
-      JSON.stringify({ type: 'eval', ts: `${today}T10:01:00Z`, task_id: 't_1', concept_id: 'c_1', passed: false }),
-      JSON.stringify({ type: 'eval', ts: `${today}T10:02:00Z`, task_id: 't_1', concept_id: 'c_1', passed: true }),
+      JSON.stringify({ type: 'session_meta', title: '', mode: 'socratic', created_at: iso }),
+      JSON.stringify({ type: 'chat', ts: iso, role: 'user', content: 'hi' }),
+      JSON.stringify({ type: 'eval', ts: iso, task_id: 't_1', concept_id: 'c_1', passed: false }),
+      JSON.stringify({ type: 'eval', ts: iso, task_id: 't_1', concept_id: 'c_1', passed: true }),
     ].join('\n'), 'utf8')
     const payload = await heatmap(ws, 1)
     const day = payload.days[payload.days.length - 1]!

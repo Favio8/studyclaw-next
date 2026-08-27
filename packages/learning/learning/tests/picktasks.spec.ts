@@ -22,8 +22,9 @@ async function makeCourse(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'studyclaw-pick-'))
   tmpRoots.push(root)
   const course = join(root, 'demo')
-  await mkdir(join(course, 'tasks'), { recursive: true })
+  await mkdir(join(course, '.studyclaw'), { recursive: true })
   // 进度板：c_a 已到期（昨日），c_b/c_c 为新播种概念（nextReviewAt=null）。
+  // P1-7：板与写入侧一致，存放在 <课程根>/.studyclaw/progress.md。
   let board = {
     overallMastery: 0,
     dueCount: 0,
@@ -32,17 +33,17 @@ async function makeCourse(): Promise<string> {
   }
   board = upsertProgressRecord(board, {
     conceptId: 'c_a', name: '概念A', chapter: '章一', mastery: 0.6, evals: 1,
-    passRate: 0.5, ef: 2.5, nextReviewAt: '2026-08-20', misattribution: 'none',
+    passRate: 0.5, streak: 1, ef: 2.5, nextReviewAt: '2026-08-20', misattribution: 'none',
   })
   board = upsertProgressRecord(board, {
     conceptId: 'c_b', name: '概念B', chapter: '章一', mastery: 0, evals: 0,
-    passRate: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
+    passRate: 0, streak: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
   })
   board = upsertProgressRecord(board, {
     conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0, evals: 0,
-    passRate: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
+    passRate: 0, streak: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
   })
-  await saveProgressBoard(join(course, 'progress.md'), board)
+  await saveProgressBoard(join(course, '.studyclaw', 'progress.md'), board)
   return course
 }
 

@@ -10,15 +10,21 @@ import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolv
 import { ToolRejected } from './result.ts'
 import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
 
-/** Per-course in-process lock (write_note read-modify-write serialization). */
+/** Per-course in-process lock. P1-6：旧实现返回的是"上一个等待者"的 promise，
+ * 临界区从未真正互斥。现在返回值挂到"上一个持有者完成后才结算"的链上，
+ * 并发 read-modify-write 不再互相覆盖丢行。 */
 const courseLocks = new Map<string, Promise<void>>()
 
-function courseLock(courseDir: string): Promise<void> {
-  const key = courseDir
+export function withCourseLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = courseLocks.get(key) ?? Promise.resolve()
-  const next = previous.then(() => undefined, () => undefined)
-  courseLocks.set(key, next)
-  return previous
+  // run 只在之前的临界区完全结束后才开始执行（无论成败）。
+  const run = previous.then(fn, fn)
+  const settled = run.then(() => undefined, () => undefined)
+  courseLocks.set(key, settled)
+  void settled.then(() => {
+    if (courseLocks.get(key) === settled) courseLocks.delete(key)
+  })
+  return run
 }
 
 /** The tuple returned by every host-side learning action. */
@@ -428,7 +434,9 @@ export async function handlerGetCourseState(ctx: ToolContext, _args: Record<stri
   const progressText = await readFile(await resolveStateFile(ctx.courseDir, 'progress.md'), 'utf8').catch(() => '')
   const concepts = parseProgressTable(progressText)
   const mastery = Object.fromEntries(concepts.map(c => [c.conceptId, c.mastery]))
-  const today = new Date().toISOString().slice(0, 10)
+  // F-13：本地日界（UTC 会在 UTC+8 的凌晨整体早一天）。
+  const nowDate = new Date()
+  const today = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`
   const dueIds = concepts
     .filter(c => c.nextReviewAt !== null && c.nextReviewAt.slice(0, 10) <= today)
     .map(c => c.conceptId)
@@ -513,8 +521,7 @@ export async function handlerWriteNote(ctx: ToolContext, args: Record<string, un
   const prefix = conceptId === undefined ? '' : `[${conceptId}] `
   const line = `- ${noteLineTs()} ${prefix}${normalized}\n`
   const path = join(ctx.courseDir, 'notes.md')
-  await courseLock(ctx.courseDir)
-  try {
+  await withCourseLock(ctx.courseDir, async () => {
     let old = ''
     const existing = await stat(path).catch(() => null)
     if (existing !== null) {
@@ -524,9 +531,7 @@ export async function handlerWriteNote(ctx: ToolContext, args: Record<string, un
       if (old !== '' && !old.endsWith('\n')) old += '\n'
     }
     await writeFile(path, old + line, 'utf8')
-  } finally {
-    courseLocks.delete(ctx.courseDir)
-  }
+  })
   return ['已记录', { file: 'notes.md', appended: normalized.length, lines: 1 }]
 }
 

@@ -90,7 +90,6 @@ function ProviderEditorCard({
   provider,
   entry,
   creating,
-  baseUrlRequired,
   onSave,
   onCancel,
   draftCache,
@@ -100,8 +99,6 @@ function ProviderEditorCard({
   /** 创建来源的目录条目（预填 + placeholder）；自定义声明为 null。 */
   entry: ProviderCatalogEntry | null;
   creating: boolean;
-  /** 创建时是否强制 Base URL（自定义声明必填；目录条目已预填则不强制）。 */
-  baseUrlRequired: boolean;
   onSave: (profile: EditorProfile, apiKey: string) => Promise<void>;
   onCancel: () => void;
   /** 添加卡草稿缓存：按目录条目 id 保存/恢复，切换条目不丢草稿（X4）。 */
@@ -154,10 +151,13 @@ function ProviderEditorCard({
   const capacitiesValid = parsedRows.every(
     (r) => r.context !== "invalid" && r.max !== "invalid",
   );
+  // 写入即校验（DSH write-time refusal）：默认模型与 Base URL 是激活/构建
+  // 的硬前提，两处都空着保存只会产出「保存了却不可用」的配置。
   const canSave =
     idValid &&
     id.length > 0 &&
-    (!baseUrlRequired || baseUrl.trim().length > 0) &&
+    baseUrl.trim().length > 0 &&
+    model.trim().length > 0 &&
     rowIdsValid &&
     capacitiesValid;
 
@@ -325,7 +325,7 @@ function ProviderEditorCard({
         </summary>
         <div className="flex flex-col gap-3 px-3 pb-3 pt-1">
           <label className="flex flex-col gap-1.5 text-xs text-text-secondary">
-            Base URL{baseUrlRequired ? "（必填）" : "（可选）"}
+            Base URL（必填）
             <input
               value={baseUrl}
               name={`${uid}_endpoint_value`}
@@ -335,8 +335,8 @@ function ProviderEditorCard({
               autoComplete={fieldAutoComplete}
               {...autofillGuardProps}
             />
-            {baseUrlRequired && baseUrl.trim().length === 0 ? (
-              <span className="text-[11px] text-accent-warn">自定义网关必须填写 Base URL</span>
+            {baseUrl.trim().length === 0 ? (
+              <span className="text-[11px] text-accent-warn">必填：模型端点的 OpenAI 兼容 Base URL</span>
             ) : null}
           </label>
 
@@ -374,7 +374,7 @@ function ProviderEditorCard({
           </div>
 
           <label className="flex flex-col gap-1.5 text-xs text-text-secondary">
-            默认模型（可选）
+            默认模型（必填：新对话与课程构建使用）
             {modelOptions.length > 0 ? (
               <select
                 value={model}
@@ -382,7 +382,7 @@ function ProviderEditorCard({
                 className={selectClass}
                 aria-label="默认模型"
               >
-                <option value="">未选择（聊天时再选择）</option>
+                <option value="" disabled>请选择默认模型</option>
                 {modelOptions.map((option) => (
                   <option key={option} value={option}>{option}</option>
                 ))}
@@ -398,6 +398,9 @@ function ProviderEditorCard({
                 {...autofillGuardProps}
               />
             )}
+            {model.trim().length === 0 ? (
+              <span className="text-[11px] text-accent-warn">未选择默认模型：会话内仍可临时切换，但课程构建（/build）不可用</span>
+            ) : null}
             {model === "deepseek-chat" || model === "deepseek-reasoner" ? (
               <span className="text-[11px] text-accent-warn">该模型已废弃，请重新选择或从端点获取。</span>
             ) : null}
@@ -682,6 +685,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   }
 
   async function handleSave(profile: EditorProfile, apiKey: string) {
+    const wasActive = payload?.activeProviderId ?? "";
     let saved = await api.saveProvider(profile);
     if (apiKey) {
       saved = await api.setProviderCredential(profile.id, apiKey);
@@ -690,7 +694,12 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     // 保存后不再对该行重开 setup 姿态（即使仍未贴 Key）。
     setDismissedSetup((current) => new Set([...current, profile.id]));
     closeAllCards();
-    flashStatusBanner(`模型配置已保存（${profile.name || profile.id}）`);
+    const label = profile.name || profile.id;
+    flashStatusBanner(
+      saved.activeProviderId === profile.id && wasActive !== profile.id
+        ? `已保存并激活 ${label}（新对话与课程构建将使用它）`
+        : `模型配置已保存（${label}）`,
+    );
   }
 
   /** X5：保存时若目标 id 已存在且未带 overwrite，后端返回 409；弹确认框。 */
@@ -788,7 +797,10 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
                   {provider.id}
                 </span>
                 {provider.id === activeId ? (
-                  <span className="rounded bg-accent-focus/10 px-1.5 py-0.5 text-[11px] font-medium leading-4 text-accent-focus">
+                  <span
+                    className="rounded bg-accent-focus/10 px-1.5 py-0.5 text-[11px] font-medium leading-4 text-accent-focus"
+                    title="新对话与课程构建（/build）将使用该供应商"
+                  >
                     使用中
                   </span>
                 ) : null}
@@ -797,6 +809,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
                     type="button"
                     onClick={() => void handleActivate(provider.id)}
                     disabled={provider.id === activeId}
+                    title="激活后新对话与课程构建将使用该供应商"
                     className="rounded-full border border-border-line px-2.5 py-1 text-xs text-text-muted hover:bg-bg-card disabled:opacity-40"
                   >
                     激活
@@ -827,7 +840,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
                     provider={provider}
                     entry={null}
                     creating={false}
-                    baseUrlRequired={false}
                     onSave={handleSaveWithConflict}
                     onCancel={() => {
                       setEditingId(null);
@@ -875,7 +887,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
               provider={null}
               entry={selectedEntry}
               creating
-              baseUrlRequired={false}
               onSave={handleSaveWithConflict}
               onCancel={() => setAdding(false)}
               draftCache={addDraftsRef.current}
@@ -889,7 +900,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           provider={null}
           entry={null}
           creating
-          baseUrlRequired
           onSave={handleSaveWithConflict}
           onCancel={() => setDeclaring(false)}
         />

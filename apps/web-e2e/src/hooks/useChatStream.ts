@@ -54,6 +54,7 @@ export function useChatStream() {
   const setActiveSession = useAppStore((s) => s.setActiveSession);
   const setLastTurnId = useAppStore((s) => s.setLastTurnId);
   const setSessions = useAppStore((s) => s.setSessions);
+  const setActiveSessionTitle = useAppStore((s) => s.setActiveSessionTitle);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const { refresh: refreshPanel } = usePanelData();
 
@@ -76,16 +77,21 @@ export function useChatStream() {
   );
 
   const refreshSessions = useCallback(
-    async (courseId: string) => {
+    async (courseId: string, sessionId?: string) => {
       try {
         const { sessions } = await api.sessions(courseId);
         setSessions(sessions);
         useAppStore.getState().setCourseSessions(courseId, sessions);
+        // 同步激活对话标题：发送时落盘的 session/title 让面包屑脱离「新会话」。
+        if (sessionId) {
+          const current = sessions.find((session) => session.sessionId === sessionId);
+          if (current && current.title) setActiveSessionTitle(current.title);
+        }
       } catch {
         /* 静默：左栏下次装载再修正 */
       }
     },
-    [setSessions],
+    [setActiveSessionTitle, setSessions],
   );
 
   const flush = useCallback(() => {
@@ -183,6 +189,19 @@ export function useChatStream() {
             ...(thinkingStartRef.current !== null ? { thinkingMs: elapsed } : {}),
           });
           setSyncState("synced");
+          // 完成即刷新左栏：turns 与标题（发送时已落盘的 session/title）立即可见；
+          // LLM 智能标题稍后落盘，延迟再静默刷一次（无推送通道，不改 SSE 协议）。
+          {
+            const state = useAppStore.getState();
+            const courseId = state.activeCourseId;
+            if (courseId) {
+              const sessionId = state.activeSessionId;
+              void refreshSessions(courseId, sessionId || undefined);
+              window.setTimeout(() => {
+                void refreshSessions(useAppStore.getState().activeCourseId ?? courseId, useAppStore.getState().activeSessionId || undefined);
+              }, 3000);
+            }
+          }
           break;
         }
         case "error": {

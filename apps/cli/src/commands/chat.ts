@@ -205,7 +205,7 @@ function summarize(value: unknown): string {
 
 function translateError(message: string): string {
   if (message.includes('LLM_NOT_CONFIGURED') || message.includes('未配置模型')) {
-    return '未配置模型端点：请在 Web 设置或 .studyclaw/config.yaml 中配置 provider 与模型'
+    return `${message}（可在 Web 设置中保存并激活供应商，或编辑 .studyclaw/config.yaml 的 providers + active_provider）`
   }
   return message
 }

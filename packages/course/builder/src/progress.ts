@@ -20,6 +20,9 @@ export interface ProgressRecord {
   readonly misattribution: string
 }
 
+/** Mutable variant for when `name`/`chapter` must be refreshed from the latest syllabus. */
+export type ProgressRecordMutable = { -readonly [K in keyof ProgressRecord]: ProgressRecord[K] }
+
 export interface ProgressBoard {
   readonly overallMastery: number
   readonly dueCount: number

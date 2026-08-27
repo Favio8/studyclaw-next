@@ -321,13 +321,17 @@ export async function heatmap(workspaceRoot: string, weeks = 12): Promise<Heatma
         }
         const date = rowDate(row)
         if (date === null) continue
+        // 兼容 legacy 顶层行与 events 信封行：信封数据落在 row.payload 内。
+        const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
         if (row['type'] === 'chat' && row['role'] === 'user') ensure(date).chatTurns += 1
-        const isEval = row['type'] === 'eval' || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
+        const isEval = row['type'] === 'eval'
+          || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
+          || (typeof payload['task_id'] === 'string' && payload['misconceptions'] !== undefined)
         if (isEval) {
           const day = ensure(date)
           day.tasks += 1
-          const key = String(row['concept_id'] ?? '')
-          const passed = Boolean(row['passed'])
+          const key = String(row['concept_id'] ?? payload['concept_id'] ?? '')
+          const passed = Boolean(row['passed'] ?? payload['passed'])
           if (passed && lastFailed.get(key) === true) day.weakSpotsCleared += 1
           lastFailed.set(key, !passed)
         }
@@ -390,16 +394,20 @@ export async function heatmapDay(workspaceRoot: string, date: string): Promise<H
           continue
         }
         if (rowDate(row) !== date) continue
+        // 兼容 legacy 顶层行与 events 信封行：信封数据落在 row.payload 内。
+        const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
         if (row['type'] === 'sync' && row['target'] === 'progress.md') {
           changelog.push(String(row['summary'] ?? ''))
         }
-        const isEval = row['type'] === 'eval' || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
+        const isEval = row['type'] === 'eval'
+          || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
+          || (typeof payload['task_id'] === 'string' && payload['misconceptions'] !== undefined)
         if (isEval) {
           events.push({
             ts: typeof row['ts'] === 'string' ? row['ts'] : null,
             type: String(row['type'] ?? 'eval'),
-            taskId: typeof row['task_id'] === 'string' ? row['task_id'] : null,
-            passed: Boolean(row['passed']),
+            taskId: typeof row['task_id'] === 'string' ? row['task_id'] : (typeof payload['task_id'] === 'string' ? payload['task_id'] : null),
+            passed: Boolean(row['passed'] ?? payload['passed']),
           })
         }
       }

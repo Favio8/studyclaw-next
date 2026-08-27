@@ -19,7 +19,6 @@ import SettingsDialog from "@/src/components/settings/SettingsDialog";
 import { useKeyboardShortcuts } from "@/src/hooks/useKeyboardShortcuts";
 import { usePanelData } from "@/src/hooks/usePanelData";
 import { api } from "@/src/lib/api";
-import { adoptWorkspace, readLastWorkspace } from "@/src/lib/workspaceActions";
 import { useAppStore } from "@/src/store/useAppStore";
 
 /** DSH columns.ts：SIDEBAR_MIN/MAX/DEFAULT 与 DETAILS_MIN/MAX/DEFAULT。 */
@@ -79,17 +78,14 @@ export default function Console() {
     void api.settings().then((payload) => setMode(payload.ui.defaultMode)).catch(() => {
       // The controls remain usable when an older backend has no settings route.
     });
+    // 服务端注册表是唯一事实源（dsh 语义）：无 current 即空态首启，不再用
+    // localStorage 旧路径做幽灵恢复——那会把 e2e/历史路径变成"占位项目"。
     void api.workspaces().then((payload) => {
       if (payload.current) {
         useAppStore.getState().setWorkspacePath(payload.current);
-      } else {
-        // 服务端注册表为空/未配置：用"最近打开的项目"启动恢复（VSCode 式兜底）。
-        const last = readLastWorkspace();
-        if (last) void adoptWorkspace(last);
       }
     }).catch(() => {
-      const last = readLastWorkspace();
-      if (last) void adoptWorkspace(last);
+      /* 后端不可达：保持空态，左栏错误横幅自会提示 */
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setMode]);
@@ -99,9 +95,21 @@ export default function Console() {
   const workspacePath = useAppStore((s) => s.workspacePath);
   useEffect(() => {
     if (!workspacePath) return;
-    void loadCourses().then((list) => {
+    void loadCourses().then(async (list) => {
       if (list && list.length > 0) {
         setActiveCourse(list[0].id); // 默认激活第一个项目
+        return;
+      }
+      // 骨架自愈（DSH：工作区随时可开聊）：课程记录缺失（如清场后）时补空
+      // 骨架——不触发 LLM——然后重拉列表，恢复「新对话」可用。
+      const courseId = workspacePath.split(/[\/]/).pop() ?? "";
+      if (!courseId) return;
+      try {
+        await api.ensureCourse(courseId);
+        const again = await loadCourses();
+        if (again && again.length > 0) setActiveCourse(again[0].id);
+      } catch {
+        /* 后端不可达/课程不允许：保持空态，由用户手动打开项目 */
       }
     });
   }, [workspacePath, loadCourses, setActiveCourse]);

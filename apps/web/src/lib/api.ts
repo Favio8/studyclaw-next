@@ -336,6 +336,10 @@ export const api = {
       }>;
     }>("courses.files", { courseId }),
 
+  /** 空骨架自愈（无 LLM）：课程记录缺失时就地补一份，随后新对话即可用。 */
+  ensureCourse: (courseId: string) =>
+    rpc<{ ensured: boolean }>("courses.ensure", { courseId }),
+
   sync: (courseId: string, sessionId?: string | null) =>
     rpc<SyncResponse>("courses.sync", { courseId, sessionId }),
 
@@ -372,6 +376,13 @@ export const api = {
 
   /** 宿主系统目录选择框（Windows: PowerShell FolderBrowserDialog）。 */
   pickWorkspaceDirectory: () => rpc<{ path: string | null }>("host.pickDirectory"),
+
+  /** 服务端目录浏览（DSH browse 后端）：一次一页的快速 RPC，无原生对话框依赖。 */
+  browseDirectory: (path: string | null) =>
+    rpc<{ path: string; parent: string | null; entries: Array<{ name: string; path: string }> }>(
+      "host.browseDirectory",
+      { path },
+    ),
 
   /** 幂等接管一个本地项目（同路径重复打开返回已有记录，created=false）。 */
   openWorkspace: (path: string) =>

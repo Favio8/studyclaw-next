@@ -42,6 +42,8 @@ export interface SessionEventMap {
   'session/model': { provider: string; model: string; effort?: string; cleared?: boolean }
   'session/fork': { parentSessionId: string; forkSeq: number }
   'session/rename': { title: string }
+  /** Automatic title with provenance (DSH session-title parity); a user rename supersedes it. */
+  'session/title': { title: string; provenance: 'fallback' | 'llm'; provider?: string; model?: string }
   'agent/runtime': Record<string, unknown>
   'agent/config': Record<string, unknown>
   'agent/context': Record<string, unknown>
@@ -110,6 +112,7 @@ const knownPayloadSchemas: Partial<Record<SessionEventName, z.ZodTypeAny>> = {
   'session/model': z.object({ provider: z.string().min(1), model: z.string().min(1), effort: z.string().min(1).optional(), cleared: z.boolean().optional() }).passthrough(),
   'session/fork': z.object({ parentSessionId: z.string().min(1), forkSeq: z.number().int().nonnegative() }).passthrough(),
   'session/rename': z.object({ title: z.string().min(1) }).passthrough(),
+  'session/title': z.object({ title: z.string().min(1), provenance: z.enum(['fallback', 'llm']), provider: z.string().min(1).optional(), model: z.string().min(1).optional() }).passthrough(),
   'turn/end': z.object({ reason: turnEndReasonSchema.optional() }).passthrough(),
   'turn/error': z.object({ message: z.string().min(1) }).passthrough(),
   'turn/cancelled': z.object({ reason: z.string().min(1) }).passthrough(),
@@ -499,8 +502,8 @@ export class SessionEventStore {
         const agentId = typeof payload['childAgentId'] === 'string' ? payload['childAgentId'] : ''
         const sessionId = typeof payload['childSessionId'] === 'string' ? payload['childSessionId'] : ''
         if (agentId !== '' && sessionId !== '' && !children.some(child => child.agentId === agentId)) children.push({ agentId, sessionId, seq: row.seq })
-      } else if (row.type === 'session/rename') {
-        // SessionStore derives the visible title from this append-only event.
+      } else if (row.type === 'session/rename' || row.type === 'session/title') {
+        // SessionStore derives the visible title from these append-only events.
         continue
       } else if (row.type === 'ask/pending') {
         pendingAsk = String(payload['question'] ?? '')

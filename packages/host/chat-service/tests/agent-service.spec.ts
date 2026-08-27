@@ -18,12 +18,12 @@ async function waitFor<T>(read: () => Promise<T>, done: (value: T) => boolean): 
 describe('LearningAgentService durable runtime state', () => {
   it('persists inbox sends and exposes the original turn stream by turnId', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-inbox-service-'))
-    await mkdir(join(root, 'history'), { recursive: true })
+    await mkdir(join(root, '.studyclaw', 'history'), { recursive: true })
     const service = new LearningAgentService(new AgentRegistry())
     const created = await service.create(root, basename(root), 'socratic', 'inbox test')
     const queued = await service.send(root, basename(root), created.sessionId, 'socratic', 'queued message')
     expect(String(queued.turnId)).not.toBe('')
-    const eventStore = new SessionEventStore(join(root, 'history'))
+    const eventStore = new SessionEventStore(join(root, '.studyclaw', 'history'))
     const rows = await waitFor(
       () => eventStore.load(created.sessionId),
       value => value.some(row => row.type === 'inbox/queued' && row.payload['turnId'] === queued.turnId),
@@ -32,7 +32,7 @@ describe('LearningAgentService durable runtime state', () => {
     const events: string[] = []
     await expect((async () => {
       for await (const event of service.queuedEvents(String(queued.agentId), String(queued.turnId))) events.push(event.type)
-    })()).rejects.toThrow('请先在模型配置中选择可用模型')
+    })()).rejects.toThrow('未配置模型供应商')
     expect(events).toContain('turn/error')
     await service.dispose(created.agentId)
     await rm(root, { recursive: true, force: true })
@@ -40,7 +40,7 @@ describe('LearningAgentService durable runtime state', () => {
 
   it('persists maintenance jobs and keeps an Agent runtime snapshot stable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-service-'))
-    await mkdir(join(root, 'history'), { recursive: true })
+    await mkdir(join(root, '.studyclaw', 'history'), { recursive: true })
     await updateSettings(root, { agentPreset: 'general', permissionPreset: 'read-only', plugins: { learning: false, sandbox: true } })
 
     const registry = new AgentRegistry()

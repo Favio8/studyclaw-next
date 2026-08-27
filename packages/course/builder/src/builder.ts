@@ -9,12 +9,13 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { MarkdownIngestor } from './ingestor.ts'
 import { extractSourceText } from './extract.ts'
 import { graphAdjacency, projectChapterDependencies, type DependencyInferrerLike } from './dep-infer.ts'
 import { applySyllabusQualityGuard } from './quality-guard.ts'
 import { harnessTask, syllabus, type Chapter, type HarnessTask, type IngestArtifact, type Syllabus } from './models.ts'
+import type { ProgressRecordMutable } from './progress.ts'
 
 export const DEFAULT_SOURCE_EXTENSIONS = ['.md', '.txt', '.pdf', '.docx', '.xlsx', '.html', '.htm']
 
@@ -26,6 +27,40 @@ export const COURSE_STATE_FILES = new Set([
   '.checksums',
   '.source-root.json',
 ])
+
+/**
+ * 所有应用自有产物（大纲/题池/进度/会话/校验和）都收在
+ * `<workspaceRoot>/.studyclaw/` 下；用户资料留在原地只读。
+ */
+export function stateDirOf(workspaceRoot: string): string {
+  return join(workspaceRoot, '.studyclaw')
+}
+
+const LEGACY_LAYOUT_MARKER = '.layout-v2'
+const LEGACY_LAYOUT_ARTIFACTS = ['syllabus.json', 'progress.md', 'notes.md', 'tasks', 'history', 'sources', 'courses', '.checksums', '.source-root.json']
+
+/**
+ * One-shot layout migration: moves pre-v2 root-level artifacts into
+ * `.studyclaw/`. Idempotent and marker-guarded; existing files inside the
+ * state directory always win over the legacy copy.
+ */
+export async function migrateLegacyLayout(workspaceRoot: string): Promise<void> {
+  const stateDir = stateDirOf(workspaceRoot)
+  const marker = join(stateDir, LEGACY_LAYOUT_MARKER)
+  if ((await stat(marker).catch(() => null)) !== null) return
+  const found: string[] = []
+  for (const name of LEGACY_LAYOUT_ARTIFACTS) {
+    if ((await stat(join(workspaceRoot, name)).catch(() => null)) !== null) found.push(name)
+  }
+  await mkdir(stateDir, { recursive: true })
+  for (const name of found) {
+    const to = join(stateDir, name)
+    if ((await stat(to).catch(() => null)) !== null) continue
+    await rename(join(workspaceRoot, name), to).catch(() => undefined)
+  }
+  if (found.length > 0) console.log(`[studyclaw] 布局迁移: ${found.join(', ')} -> .studyclaw/`)
+  await atomicWrite(marker, 'v2' + String.fromCharCode(10))
+}
 
 export class BuildError extends Error {
   constructor(message: string) {
@@ -86,6 +121,8 @@ export async function computeChecksums(
 }
 
 async function atomicWrite(path: string, content: string): Promise<void> {
+  // v2 布局：产物在 .studyclaw/ 下，首次写入前目录可能还不存在。
+  await mkdir(dirname(path), { recursive: true })
   const tmp = path + '.tmp'
   await writeFile(tmp, content, 'utf8')
   await rename(tmp, path)
@@ -102,7 +139,7 @@ async function loadJson<T>(path: string): Promise<T | null> {
 }
 
 export async function loadSyllabus(courseDir: string): Promise<Syllabus> {
-  const path = join(courseDir, 'syllabus.json')
+  const path = join(stateDirOf(courseDir), 'syllabus.json')
   const parsed = await loadJson<unknown>(path)
   if (parsed !== null) {
     try {
@@ -115,7 +152,7 @@ export async function loadSyllabus(courseDir: string): Promise<Syllabus> {
 }
 
 export async function loadTaskPool(courseDir: string): Promise<HarnessTask[]> {
-  const tasksDir = join(courseDir, 'tasks')
+  const tasksDir = join(stateDirOf(courseDir), 'tasks')
   if (!(await stat(tasksDir).catch(() => null))?.isDirectory()) return []
   const pool: HarnessTask[] = []
   for (const name of (await readdir(tasksDir)).sort()) {
@@ -133,7 +170,7 @@ export async function loadTaskPool(courseDir: string): Promise<HarnessTask[]> {
 }
 
 export async function writeTaskPool(courseDir: string, pool: HarnessTask[]): Promise<void> {
-  const tasksDir = join(courseDir, 'tasks')
+  const tasksDir = join(stateDirOf(courseDir), 'tasks')
   await mkdir(tasksDir, { recursive: true })
   const written = new Set<string>()
   for (let index = 0; index < pool.length; index += 1) {
@@ -201,7 +238,7 @@ export class CourseBuilder {
     const report = emptyReport()
     // 首建判定：既有指纹但无题卡池也无大纲 → 视为全量首建（Python parity）。
     if (Object.keys(stored).length > 0 && (await loadTaskPool(this.courseDir)).length === 0) {
-      const hasSyllabus = (await stat(join(this.courseDir, 'syllabus.json')).catch(() => null)) !== null
+      const hasSyllabus = (await stat(join(stateDirOf(this.courseDir), 'syllabus.json')).catch(() => null)) !== null
       if (!hasSyllabus) {
         Object.keys(stored).forEach(key => { delete stored[key] })
       }
@@ -218,6 +255,12 @@ export class CourseBuilder {
     if (!changed) {
       const existing = await loadSyllabus(this.courseDir)
       report.version = existing.version
+      // Even when nothing changed, reconcile progress rows with the current
+      // syllabus. This catches: (a) stale progress.md from earlier broken
+      // builds (e.g. orphaned Response/Anthropic rows before ingestor fix),
+      // (b) a deleted/empty progress.md that needs re-seeding, (c) chapter
+      // titles that were refreshed without any source file changing.
+      report.conceptsSeeded = await this.seedProgress()
       return report
     }
 
@@ -295,7 +338,7 @@ export class CourseBuilder {
     await this.saveChecksums(current)
     const existing = await loadSyllabus(this.courseDir)
     if (existing.granularity !== granularity) {
-      await atomicWrite(join(this.courseDir, 'syllabus.json'), JSON.stringify({ ...existing, granularity }, null, 2) + '\n')
+      await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify({ ...existing, granularity }, null, 2) + '\n')
       report.version = existing.version
     }
     return report
@@ -340,7 +383,7 @@ export class CourseBuilder {
   }
 
   private async mergeSyllabus(artifacts: IngestArtifact[], report: BuildReport): Promise<void> {
-    const path = join(this.courseDir, 'syllabus.json')
+    const path = join(stateDirOf(this.courseDir), 'syllabus.json')
     const existing = await loadSyllabus(this.courseDir)
     const byId = new Map(existing.chapters.map((chapter, index) => [chapter.id, index]))
     const merged: Chapter[] = [...existing.chapters]
@@ -426,42 +469,73 @@ export class CourseBuilder {
       })),
       adjacency: graphAdjacency(chapters),
     }
-    await atomicWrite(join(this.courseDir, 'syllabus.json'), JSON.stringify(updated, null, 2) + '\n')
+    await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify(updated, null, 2) + '\n')
     report.version = updated.version
   }
 
-  /** Seed progress rows for new concepts; existing mastery data never regresses. */
+  /**
+   * Seed progress rows for new concepts and drop rows whose concept no
+   * longer exists in the current syllabus. Preserves mastery/eval history
+   * for concepts that survived the rebuild (by conceptId) and also
+   * refreshes `name`/`chapter` fields so renamed chapters or split/merged
+   * concepts always display the syllabus's current truth instead of stale
+   * strings left over from earlier builds.
+   */
   private async seedProgress(): Promise<number> {
-    const syllabusPath = join(this.courseDir, 'syllabus.json')
+    const syllabusPath = join(stateDirOf(this.courseDir), 'syllabus.json')
     if ((await stat(syllabusPath).catch(() => null)) === null) return 0
     const existingSyllabus = await loadSyllabus(this.courseDir)
-    const { loadProgressBoard, saveProgressBoard, upsertProgressRecord } = await import('./progress.ts')
-    let board = await loadProgressBoard(join(this.courseDir, 'progress.md'))
-    const known = new Set(board.concepts.map(record => record.conceptId))
-    let seeded = 0
+    const { loadProgressBoard, saveProgressBoard } = await import('./progress.ts')
+    const stateDir = stateDirOf(this.courseDir)
+    let board = await loadProgressBoard(join(stateDir, 'progress.md'))
+
+    // Build id → { name, chapter } map from current syllabus (truth source).
+    const current = new Map<string, { name: string; chapter: string }>()
     for (const chapter of existingSyllabus.chapters) {
       for (const concept of chapter.concepts) {
-        if (known.has(concept.id)) continue
-        board = upsertProgressRecord(board, {
-          conceptId: concept.id, name: concept.name, chapter: chapter.title, mastery: 0, evals: 0,
-          passRate: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
-        })
-        known.add(concept.id)
-        seeded += 1
+        current.set(concept.id, { name: concept.name, chapter: chapter.title })
       }
     }
-    if (seeded > 0) await saveProgressBoard(join(this.courseDir, 'progress.md'), board)
+
+    // Drop rows whose conceptId is no longer in the syllabus (orphaned by
+    // an earlier build's structure). Also refresh stale name/chapter fields
+    // for rows that still exist (e.g. chapter renamed after ingestor fix).
+    const existingById = new Map(board.concepts.map(r => [r.conceptId, r]))
+    let changed = board.concepts.length !== current.size
+    const refreshed = []
+    for (const [conceptId, meta] of current) {
+      const prior = existingById.get(conceptId)
+      if (prior === undefined) {
+        refreshed.push({
+          conceptId, name: meta.name, chapter: meta.chapter,
+          mastery: 0, evals: 0, passRate: 0, ef: 2.5,
+          nextReviewAt: null, misattribution: 'none',
+        })
+        changed = true
+      } else {
+        const merged = { ...prior }
+        if (merged.name !== meta.name) { (merged as ProgressRecordMutable).name = meta.name; changed = true }
+        if (merged.chapter !== meta.chapter) { (merged as ProgressRecordMutable).chapter = meta.chapter; changed = true }
+        refreshed.push(merged)
+      }
+    }
+
+    let seeded = refreshed.length - (board.concepts.length - (board.concepts.length - refreshed.filter(r => existingById.has(r.conceptId)).length))
+    seeded = Math.max(0, current.size - existingById.size)
+    board = { ...board, concepts: refreshed }
+
+    if (changed) await saveProgressBoard(join(stateDir, 'progress.md'), board)
     return seeded
   }
 
   private async loadChecksums(): Promise<Record<string, string>> {
-    const dir = this.checksumsDir ?? this.sourcesDir()
+    const dir = this.checksumsDir ?? stateDirOf(this.courseDir)
     const parsed = await loadJson<Record<string, string>>(join(dir, '.checksums'))
     return parsed ?? {}
   }
 
   private async saveChecksums(table: Record<string, string>): Promise<void> {
-    const dir = this.checksumsDir ?? this.sourcesDir()
+    const dir = this.checksumsDir ?? stateDirOf(this.courseDir)
     await mkdir(dir, { recursive: true })
     await atomicWrite(join(dir, '.checksums'), JSON.stringify(table, null, 2) + '\n')
   }

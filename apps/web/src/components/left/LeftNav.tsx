@@ -241,6 +241,8 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     }
   }
 
+  const [confirmForget, setConfirmForget] = useState<WorkspaceItem | null>(null);
+
   async function forgetWorkspace(item: WorkspaceItem) {
     try {
       const payload = await api.removeWorkspace(item.id);
@@ -497,6 +499,11 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     };
   }, [searchQuery, searching]);
 
+  /** 品牌行显示当前项目名（DSH SidebarRoot 语义），不再用带引号的占位符。 */
+  const currentProjectLabel = courses.find((course) => course.id === activeCourseId)?.title
+    ?? wsItems.find((item) => item.path === workspacePath)?.title
+    ?? "StudyClaw";
+
   const sessionsByCourse = useMemo(() => {
     const next: Record<string, SessionSummary[]> = { ...courseSessions };
     if (activeCourseId && !next[activeCourseId]) next[activeCourseId] = activeSessions;
@@ -589,7 +596,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       : sessions.slice(0, SESSION_LIMIT);
 
     return (
-      <div className="ml-[22px] mt-0.5">
+      // DSH indent step: the workspace group wrapper already applies the single
+      // 22px indent — do not nest a second margin here.
+      <div className="mt-0.5">
         {shown.map((session) => {
           const active = session.sessionId === activeSessionId;
           const blank = session.turns === 0;
@@ -789,7 +798,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
               className="hidden h-5 w-5 shrink-0 items-center justify-center rounded text-text-faint hover:bg-bg-card hover:text-text-primary group-hover:flex"
               onClick={(event) => {
                 event.stopPropagation();
-                void forgetWorkspace(item);
+                setConfirmForget(item);
               }}
             >
               <X size={13} strokeWidth={1.8} aria-hidden />
@@ -820,7 +829,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       <div key={item.id} className="mb-0.5" role="treeitem" aria-expanded={expanded} aria-selected={active}>
         {renderWorkspaceHeader(item)}
         {expanded && !missing ? (
-          <div className="ml-[22px] mt-0.5 space-y-0.5">
+          <div className="ml-[14px] mt-0.5 space-y-0.5">
             {course === null ? (
               <p className="px-2 py-1 text-[12px] leading-5 text-text-faint">还没有学习项目</p>
             ) : (
@@ -950,7 +959,38 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         >
           <Settings2 {...iconProps} aria-hidden />
         </button>
-        {wizardOpen ? <NewProjectWizard /> : null}
+        {confirmForget ? (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmForget(null);
+          }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+            <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
+            <p className="mt-3 text-[13px] leading-6 text-text-secondary">
+              将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-text-faint">磁盘上的数据不会被删除；再次打开同一文件夹即可恢复项目与学习记录。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmForget(null)} className="h-9 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card">取消</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmForget;
+                  setConfirmForget(null);
+                  if (target) void forgetWorkspace(target);
+                }}
+                className="h-9 rounded-lg bg-accent-fail/90 px-3 text-[13px] font-medium text-white hover:bg-accent-fail"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {wizardOpen ? <NewProjectWizard /> : null}
         {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
       </div>
     );
@@ -1010,7 +1050,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
                       className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded text-text-faint transition-colors hover:bg-bg-card hover:text-text-primary group-hover:flex"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void forgetWorkspace(item);
+                        setConfirmForget(item);
                       }}
                     >
                       <X size={13} strokeWidth={1.8} aria-hidden />
@@ -1085,7 +1125,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       </button>
 
       <div ref={searchAreaRef} className="mb-1 flex h-9 shrink-0 items-center justify-end gap-1 overflow-visible rounded-xl px-1 text-text-muted">
-        <span className={`mr-auto min-w-0 truncate text-[13px] transition-all ${searchOpen ? "max-w-0 -translate-x-1 opacity-0" : "max-w-[45%] opacity-100"}`}>"项目"</span>
+        <span className={`mr-auto min-w-0 truncate text-[13px] transition-all ${searchOpen ? "max-w-0 -translate-x-1 opacity-0" : "max-w-[45%] opacity-100"}`} title={currentProjectLabel}>{currentProjectLabel}</span>
         <div className={`flex min-w-0 items-center transition-all ${searchOpen ? "max-w-full flex-1" : "max-w-7"}`}>
           <div className={`flex h-7 min-w-0 flex-1 items-center overflow-hidden transition-all ${searchOpen ? "rounded-[10px] border border-border-line pr-1" : "rounded-full"}`}>
             <button
@@ -1180,6 +1220,37 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </button>
       </div>
 
+      {confirmForget ? (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmForget(null);
+          }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+            <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
+            <p className="mt-3 text-[13px] leading-6 text-text-secondary">
+              将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-text-faint">磁盘上的数据不会被删除；再次打开同一文件夹即可恢复项目与学习记录。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmForget(null)} className="h-9 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card">取消</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmForget;
+                  setConfirmForget(null);
+                  if (target) void forgetWorkspace(target);
+                }}
+                className="h-9 rounded-lg bg-accent-fail/90 px-3 text-[13px] font-medium text-white hover:bg-accent-fail"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {wizardOpen ? <NewProjectWizard /> : null}
       {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
       {sessionRenameTarget ? (

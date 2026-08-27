@@ -13,6 +13,14 @@ export {
 } from './store.ts'
 export type { SessionSummary } from './store.ts'
 export {
+  normalizeSessionTitle,
+  fallbackSessionTitle,
+  truncateTitleUtf8,
+  studyclawFallbackTitle,
+  FALLBACK_TITLE_MAX_WORDS,
+  FALLBACK_TITLE_MAX_BYTES,
+} from './title.ts'
+export {
   streamSplit,
   extractSync,
   parseFull,

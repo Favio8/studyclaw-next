@@ -62,7 +62,9 @@ export async function runCommand(command: string): Promise<CommandResult> {
           : "SYNC // 正在扫描课程资料…",
       );
       try {
-        const res = await api.sync(courseId);
+        // 带上当前会话：让构建沿用会话内已选的 provider/model（模型座位显示
+        // 的那条路由），而不是退回激活供应商的默认模型。
+        const res = await api.sync(courseId, store.activeSessionId);
         const done = res.buildJobId ? await pollJob(res.buildJobId) : "ok";
         await Promise.all([refreshPanelData(), refreshCourseList()]);
         return {

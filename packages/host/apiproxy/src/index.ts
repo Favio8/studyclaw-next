@@ -75,6 +75,15 @@ export type RpcResponse<R> =
   | { readonly ok: true; readonly result: R }
   | { readonly ok: false; readonly error: RpcError }
 
+/** One directory listing page for the browse picker. */
+export interface DirectoryBrowseResult {
+  /** Canonical listed directory; `''` marks the roots page (drives / `/`). */
+  readonly path: string
+  /** Parent directory; `null` means the roots page is one level up. */
+  readonly parent: string | null
+  readonly entries: ReadonlyArray<{ readonly name: string; readonly path: string }>
+}
+
 /** The domain seam handlers run against. */
 export interface HostServices {
   readonly registry: {
@@ -90,6 +99,12 @@ export interface HostServices {
   readonly courseSummary: (root: string) => Promise<{ courses: CourseSummary[]; missing: boolean }>
   /** Native directory chooser; resolves `null` when the user cancels. */
   readonly pickDirectory: () => Promise<string | null>
+  /**
+   * Server-side directory browse (DSH browse-backend pattern): one fast RPC
+   * per folder listing, no native dialog and no long-blocking request —
+   * safe behind any proxy. `path: null` lists the roots (drives on Windows).
+   */
+  readonly browseDirectory: (path: string | null) => Promise<DirectoryBrowseResult>
   /** Session store operations over one course of the active workspace. */
   readonly sessionService: {
     list(courseId: string): Promise<SessionSummaryView[]>
@@ -146,6 +161,7 @@ export interface HostServices {
     files(courseId: string): Promise<Record<string, unknown>>
     workspaceFiles(): Promise<Record<string, unknown>>
     sync(courseId: string, sessionId?: string | null): Promise<Record<string, unknown>>
+    ensureCourse(courseId: string): Promise<{ ensured: boolean }>
     ingestUrl(courseId: string, url: string, title: string | null): Promise<Record<string, unknown>>
     createCards(courseId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>
     dynamicCards(courseId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>
@@ -262,6 +278,12 @@ const handlers = {
     payload: null,
     async run(_payload: void, services: HostServices): Promise<RpcResponse<{ path: string | null }>> {
       return ok({ path: await services.pickDirectory() })
+    },
+  },
+  'host.browseDirectory': {
+    payload: z.object({ path: z.string().nullable().optional() }),
+    async run(payload: { path?: string | null }, services: HostServices): Promise<RpcResponse<DirectoryBrowseResult>> {
+      return ok(await services.browseDirectory(payload.path ?? null))
     },
   },
   'sessions.list': {
@@ -587,6 +609,12 @@ const handlers = {
     payload: z.object({ courseId: z.string().min(1), sessionId: z.string().nullish() }),
     async run(payload: { courseId: string; sessionId?: string | null }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.courseService.sync(payload.courseId, payload.sessionId ?? null))
+    },
+  },
+  'courses.ensure': {
+    payload: z.object({ courseId: z.string().min(1) }),
+    async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<{ ensured: boolean }>> {
+      return ok(await services.courseService.ensureCourse(payload.courseId))
     },
   },
   'courses.ingestUrl': {

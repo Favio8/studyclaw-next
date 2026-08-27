@@ -20,7 +20,6 @@ import {
   loadProgressBoard,
   saveProgressBoard,
   upsertProgressRecord,
-  type BuildReport,
   type Syllabus,
   type TaskGenerator,
   reviewSchedule,
@@ -38,6 +37,7 @@ import {
 import { createDeepSeekToolClient } from './adapter.ts'
 import { buildDefaultSpecs } from '@studyclaw/course-builder'
 import { buildGenericSpecs, INPLACE_SOURCE_EXCLUDED_DIRS } from '@studyclaw/tools'
+import { stateDirOf } from '@studyclaw/course-builder'
 import type { ResolvedChatConfig } from './config.ts'
 import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionEventStore, SessionStore, utcTs } from '@studyclaw/session'
@@ -68,7 +68,8 @@ async function requireCourse(workspaceRoot: string, courseId: string): Promise<s
 
 /** 项目即课程的项目构建器：资料/校验文件都在项目根（就地扫描，排除状态目录）。 */
 function projectBuilder(dir: string, generator: TaskGenerator, depInferrer: DependencyInferrer | null): CourseBuilder {
-  return new CourseBuilder(dir, generator, depInferrer, null, 'fine', DEFAULT_SOURCE_EXTENSIONS, dir, dir, INPLACE_SOURCE_EXCLUDED_DIRS, true)
+  // 状态目录收拢：校验和写 .studyclaw（sourceRoot 仍为项目根，就地只读扫描）。
+  return new CourseBuilder(dir, generator, depInferrer, null, 'fine', DEFAULT_SOURCE_EXTENSIONS, dir, stateDirOf(dir), INPLACE_SOURCE_EXCLUDED_DIRS, true)
 }
 
 interface BuildContext {
@@ -78,7 +79,7 @@ interface BuildContext {
 
 export async function configForSession(workspaceRoot: string, courseId: string, sessionId: string | null | undefined, fallback: ResolvedChatConfig | null): Promise<ResolvedChatConfig | null> {
   if (sessionId === null || sessionId === undefined || sessionId === '') return fallback
-  const historyDir = join(courseDirOf(workspaceRoot, courseId), 'history')
+  const historyDir = join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history')
   // Event logs are authoritative for migrated/live Agent sessions. The
   // legacy SessionStore remains the fallback for sessions not yet migrated.
   const events = new SessionEventStore(historyDir)
@@ -96,17 +97,46 @@ export async function configForSession(workspaceRoot: string, courseId: string, 
   return loadChatConfig(workspaceRoot, { providerId: selected.provider, model: selected.model })
 }
 
-function generatorOf(ctx: BuildContext, _courseDir: string): LlmTaskGenerator | null {
-  if (ctx.config === null || ctx.config.model === '' || ctx.config.baseUrl === '') return null
-  return new LlmTaskGenerator(createDeepSeekToolClient(ctx.config), {
-    model: ctx.config.model,
-    provider: ctx.config.providerId || 'studyclaw',
-    temperature: ctx.config.temperature,
+/** Missing-configuration diagnosis; names the exact field to fix (DSH posture). */
+export function configProblem(config: ResolvedChatConfig | null): string {
+  if (config === null || config.providerId === '') {
+    return '未配置模型供应商：请打开 设置 → 模型配置，保存并激活一个供应商（Base URL + 默认模型 + API Key）'
+  }
+  if (config.baseUrl === '') {
+    return `激活供应商 ${config.providerId} 缺少 Base URL：请在 设置 → 模型配置 补全后重试`
+  }
+  if (config.model === '') {
+    return `激活供应商 ${config.providerId} 未设置默认模型：课程构建不走会话内选模，请先在 设置 → 模型配置 选择默认模型`
+  }
+  return ''
+}
+
+function newGenerator(config: ResolvedChatConfig): LlmTaskGenerator {
+  return new LlmTaskGenerator(createDeepSeekToolClient(config), {
+    model: config.model,
+    provider: config.providerId || 'studyclaw',
+    temperature: config.temperature,
   })
 }
 
+function generatorOf(ctx: BuildContext, _courseDir: string): LlmTaskGenerator | null {
+  if (ctx.config === null || configProblem(ctx.config) !== '') return null
+  return newGenerator(ctx.config)
+}
+
+/** Soft checks stay soft; explicit requests throw with the actionable diagnosis. */
+function requireConfig(config: ResolvedChatConfig | null): ResolvedChatConfig {
+  const problem = configProblem(config)
+  if (problem !== '') throw new Error(problem)
+  return config as ResolvedChatConfig
+}
+
+function requireGenerator(ctx: BuildContext): LlmTaskGenerator {
+  return newGenerator(requireConfig(ctx.config))
+}
+
 function inferrerOf(ctx: BuildContext): DependencyInferrer | null {
-  if (ctx.config === null || ctx.config.model === '' || ctx.config.baseUrl === '') return null
+  if (ctx.config === null || configProblem(ctx.config) !== '') return null
   return new DependencyInferrer(createDeepSeekToolClient(ctx.config), {
     model: ctx.config.model,
     provider: ctx.config.providerId || 'studyclaw',
@@ -145,9 +175,8 @@ export class JobManager {
     const job = this.jobs.get(jobId)!
     job.status = 'running'
     try {
-      const generator = generatorOf(ctx, courseDir)
-      if (generator === null) throw new Error('未配置模型端点（.studyclaw/config.yaml 缺少 llm 配置）')
-      const builder = new CourseBuilder(courseDir, generator, inferrerOf(ctx))
+      const generator = requireGenerator(ctx)
+      const builder = projectBuilder(courseDir, generator, inferrerOf(ctx))
       const report = await builder.build(2, (finished, total, currentFile) => {
         job.progress = { total, finished, currentFile: currentFile || null }
       })
@@ -185,6 +214,8 @@ export interface CourseService {
   heatmapDay(workspaceRoot: string, date: string): Promise<Record<string, unknown>>
   buildJob(workspaceRoot: string, courseId: string): string | null
   createCourse(workspaceRoot: string, courseName: string, importPaths: string[]): Promise<Record<string, unknown>>
+  /** Write an empty course skeleton when none exists (no LLM, idempotent). */
+  ensureCourse(workspaceRoot: string, courseId: string): Promise<{ ensured: boolean }>
 }
 
 /** Assemble the course service for the active workspace. */
@@ -198,15 +229,14 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     async setGranularity(workspaceRoot, courseId, granularity) {
       const dir = await requireCourse(workspaceRoot, courseId)
       const config = await getConfig()
-      const generator = generatorOf({ workspaceRoot, config }, dir)
-      if (generator === null) throw new Error('未配置模型端点')
+      const generator = requireGenerator({ workspaceRoot, config })
       const builder = new CourseBuilder(dir, generator, inferrerOf({ workspaceRoot, config }))
       await builder.regenerateSyllabus(granularity)
       return loadSyllabus(dir)
     },
     async progress(workspaceRoot, courseId) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const board = await loadProgressBoard(join(dir, 'progress.md'))
+      const board = await loadProgressBoard(join(stateDirOf(dir), 'progress.md'))
       return {
         overallMastery: board.overallMastery,
         dueCount: board.dueCount,
@@ -226,7 +256,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     async mastery(workspaceRoot, courseId) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const [board, currentSyllabus] = await Promise.all([loadProgressBoard(join(dir, 'progress.md')), loadSyllabus(dir)])
+      const [board, currentSyllabus] = await Promise.all([loadProgressBoard(join(stateDirOf(dir), 'progress.md')), loadSyllabus(dir)])
       const masteryByConcept = new Map(board.concepts.map(record => [record.conceptId, record.mastery]))
       const chapters = currentSyllabus.chapters.map(chapter => ({
         id: chapter.id,
@@ -288,21 +318,23 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     async sync(workspaceRoot, courseId, sessionId = null) {
       const dir = await requireCourse(workspaceRoot, courseId)
       const config = await configForSession(workspaceRoot, courseId, sessionId, await getConfig())
-      const generator = generatorOf({ workspaceRoot, config }, dir)
-      if (generator === null) throw new Error('未配置模型端点（.studyclaw/config.yaml 缺少 llm 配置）')
-      const builder = projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config }))
+      // Validate config upfront so misconfiguration surfaces immediately
+      // instead of silently failing inside the async job.
+      requireGenerator({ workspaceRoot, config })
       const before = await loadTaskPool(dir)
-      const report: BuildReport = await builder.build(2)
-      const after = await loadTaskPool(dir)
+      // Offload to async job so the HTTP request never times out — LLM
+      // multi-call generation can take minutes. The job internally checks
+      // checksums and returns immediately when nothing changed.
+      const buildJobId = jobs.start(dir, courseId, { workspaceRoot, config })
       return {
-        added: report.added,
-        changed: report.modified,
-        skipped: report.unchanged.length,
-        buildJobId: null,
-        tasksGenerated: report.tasksGenerated,
-        conceptsSeeded: report.conceptsSeeded,
-        degraded: report.degraded,
-        poolDelta: after.length - before.length,
+        added: [],
+        changed: [],
+        skipped: 0,
+        buildJobId,
+        tasksGenerated: 0,
+        conceptsSeeded: 0,
+        degraded: [],
+        poolDelta: (await loadTaskPool(dir)).length - before.length,
       }
     },
     async ingestUrl(workspaceRoot, courseId, url, title) {
@@ -315,7 +347,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const titleText = (title ?? stripTags(heading)).trim() || url
       const text = stripTags(html).replace(/\n{3,}/g, '\n\n').slice(0, 200_000)
       const slugBase = createHash('md5').update(url, 'utf8').digest('hex').slice(0, 8)
-      const sourcesDir = join(dir, 'sources')
+      const sourcesDir = join(stateDirOf(dir), 'sources')
       await mkdir(sourcesDir, { recursive: true })
       const path = join(sourcesDir, `web_${slugBase}.md`)
       await writeFile(path, `# ${titleText}\n\n> 来源：${url}\n\n${text}\n`, 'utf8')
@@ -330,9 +362,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     async createCards(workspaceRoot, courseId, payload) {
       const dir = await requireCourse(workspaceRoot, courseId)
       const config = await configForSession(workspaceRoot, courseId, payload.sessionId, await getConfig())
-      if (config === null) throw new Error('未配置模型端点')
-      const generator = generatorOf({ workspaceRoot, config }, dir)
-      if (generator === null) throw new Error('未配置模型端点')
+      const generator = requireGenerator({ workspaceRoot, config })
       const title = payload.title ?? payload.content.slice(0, 30)
       const conceptId = payload.conceptId ?? slugId(title)
       const chunk = {
@@ -350,8 +380,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     async dynamicCards(workspaceRoot, courseId, payload) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const config = await configForSession(workspaceRoot, courseId, payload.sessionId, await getConfig())
-      if (config === null) throw new Error('未配置模型端点')
+      const config = requireConfig(await configForSession(workspaceRoot, courseId, payload.sessionId, await getConfig()))
       const pool = await loadTaskPool(dir)
       const source = pool.find(task => task.task_id === payload.taskId)
       if (source === undefined) throw new Error(`题卡不存在: ${payload.taskId}`)
@@ -368,8 +397,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const config = await configForSession(workspaceRoot, courseId, sessionId, await getConfig())
-      if (config === null) throw new Error('未配置模型端点')
+      const config = requireConfig(await configForSession(workspaceRoot, courseId, sessionId, await getConfig()))
       const pool = await loadTaskPool(dir)
       const task = pool.find(candidate => candidate.task_id === taskId)
       if (task === undefined) throw new Error(`题卡不存在: ${taskId}`)
@@ -383,7 +411,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         yield { event: 'rubric', data: { index: 0, criterion, hit } }
       }
       // Update the task history + progress board (SM-2).
-      const board = await loadProgressBoard(join(dir, 'progress.md'))
+      const board = await loadProgressBoard(join(stateDirOf(dir), 'progress.md'))
       const record = board.concepts.find(candidate => candidate.conceptId === task.concept_id)
       const attempts = (record?.evals ?? 0) + 1
       const passRate = record !== undefined
@@ -402,22 +430,38 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         nextReviewAt,
         misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
       })
-      await saveProgressBoard(join(dir, 'progress.md'), updated)
-      // Append the eval audit line into the latest session history (Python
-      // parity): heatmap metrics are computed from these rows.
-      const store = new SessionStore(join(dir, 'history'))
-      let auditSessionId = sessionId ?? await store.latestSessionId()
-      if (auditSessionId === null) auditSessionId = (await store.newSession('socratic')).sessionId
-      await store.append(auditSessionId, {
-        type: 'eval',
-        ts: utcTs(),
-        task_id: taskId,
-        concept_id: task.concept_id,
-        score: result.score,
-        passed: result.passed,
-        rubric_hits: result.rubricHits,
-        misconceptions: result.misconceptions,
-      } as never)
+      await saveProgressBoard(join(stateDirOf(dir), 'progress.md'), updated)
+      // 追加评测审计事件到会话事件流。旧实现误用 SessionStore.append 写
+      // legacy session_<id>.jsonl，而 chat/stream 会话 persistLegacy:false 只
+      // 落 session_<id>.events.jsonl → stat 落空 → 抛「会话不存在」断流。
+      // 改走 SessionEventStore（与 chat 同一命名 session_<id>.events.jsonl，
+      // 统一读写路径）。评分结果已落 progress.md，审计仅历史留痕：写盘前
+      // 校验会话存在，追加失败降级 warn，不阻断 result/sm2/done 帧，避免
+      // 「服务端记分、客户端只收 error」的状态分裂。
+      const historyDir = join(dir, 'history')
+      const auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
+      if (auditSessionId !== null) {
+        const eventStore = new SessionEventStore(historyDir)
+        if (await eventStore.exists(auditSessionId)) {
+          try {
+            await eventStore.append(auditSessionId, {
+              ts: utcTs(),
+              type: 'eval',
+              payload: {
+                task_id: taskId,
+                concept_id: task.concept_id,
+                score: result.score,
+                passed: result.passed,
+                rubric_hits: result.rubricHits,
+                misconceptions: result.misconceptions,
+              },
+            })
+          } catch (error) {
+            // 评分结果已落盘，审计写入失败不影响 result/sm2/done 下发。
+            console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      }
       yield { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } }
       yield { event: 'sm2', data: { ef: next.ef, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } }
       yield { event: 'done', data: { taskId } }
@@ -468,8 +512,9 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const generator = generatorOf({ workspaceRoot, config }, dir) ?? { generateTasks: async () => [] }
       // 空项目/未初始化项目：build 无变更不会产出 syllabus，先落骨架保证
       // "打开即初始化"（列表判定以 syllabus.json 存在为准）。
-      const syllabusPath = join(dir, 'syllabus.json')
+      const syllabusPath = join(stateDirOf(dir), 'syllabus.json')
       if ((await stat(syllabusPath).catch(() => null)) === null) {
+        await mkdir(stateDirOf(dir), { recursive: true })
         await writeFile(syllabusPath, JSON.stringify({
           course_id: basename(workspaceRoot), title: _courseName || basename(workspaceRoot), version: '1.0.0',
           granularity: 'fine', chapters: [], adjacency: {},
@@ -477,6 +522,19 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       }
       await projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config })).build(2)
       return { workspace: workspaceRoot, course: basename(workspaceRoot), ingestedFiles: ingested, buildJobId: null }
+    },
+
+    /** DSH 语义（工作区随时可开聊）：无课程记录时就地补空骨架，不触发 LLM。 */
+    async ensureCourse(workspaceRoot, courseId) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      const syllabusPath = join(stateDirOf(dir), 'syllabus.json')
+      if ((await stat(syllabusPath).catch(() => null)) !== null) return { ensured: false }
+      await mkdir(stateDirOf(dir), { recursive: true })
+      await writeFile(syllabusPath, JSON.stringify({
+        course_id: courseId, title: courseId, version: '1.0.0',
+        granularity: 'fine', chapters: [], adjacency: {},
+      }, null, 2) + '\n', 'utf8')
+      return { ensured: true }
     },
   }
 }

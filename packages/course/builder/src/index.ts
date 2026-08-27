@@ -5,7 +5,7 @@
  */
 
 export { MarkdownIngestor, slug, conceptTypeOf, IngestError, DEFAULT_MAX_CHUNK_CHARS } from './ingestor.ts'
-export { CourseBuilder, computeChecksums, loadSyllabus, loadTaskPool, writeTaskPool, BuildError, DEFAULT_SOURCE_EXTENSIONS, COURSE_STATE_FILES } from './builder.ts'
+export { CourseBuilder, computeChecksums, loadSyllabus, loadTaskPool, writeTaskPool, BuildError, DEFAULT_SOURCE_EXTENSIONS, COURSE_STATE_FILES, stateDirOf, migrateLegacyLayout } from './builder.ts'
 export type { BuildReport } from './builder.ts'
 export { extractSourceText, extractTextToMarkdown, ExtractionError, EXTRACTED_EXTENSIONS } from './extract.ts'
 export { LlmTaskGenerator, TaskGenerationError, DEFAULT_MAX_RETRIES } from './task-gen.ts'

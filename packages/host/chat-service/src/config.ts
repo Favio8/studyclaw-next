@@ -20,6 +20,8 @@ export interface ResolvedChatConfig {
   readonly apiKey: string | null
   readonly temperature: number
   readonly maxConcurrency: number
+  /** Per-request output cap（config.yaml `max_tokens`）；null=适配器默认。 */
+  readonly maxTokens?: number | null
   readonly defaultMode: 'socratic' | 'quick' | 'feynman' | 'debug'
   readonly agentPreset?: string
   readonly permissionPreset?: 'read-only' | 'workspace-write' | 'danger-full-access'
@@ -27,7 +29,7 @@ export interface ResolvedChatConfig {
 }
 
 interface ConfigYaml {
-  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number }
+  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number; max_tokens?: number | null }
   readonly active_provider?: string
   readonly providers?: Record<string, {
     readonly base_url?: string | null
@@ -35,6 +37,7 @@ interface ConfigYaml {
     readonly api_key_env?: string | null
     readonly temperature?: number
     readonly max_concurrency?: number
+    readonly max_tokens?: number | null
   }>
   readonly ui?: { default_mode?: string }
   readonly agent?: { preset?: string }
@@ -49,6 +52,7 @@ export function providerFacts(config: ConfigYaml, providerId: string): {
   apiKeyEnv: string | null
   temperature: number | null
   maxConcurrency: number | null
+  maxTokens: number | null
 } {
   const entry = config.providers?.[providerId]
   return {
@@ -57,7 +61,27 @@ export function providerFacts(config: ConfigYaml, providerId: string): {
     apiKeyEnv: entry?.api_key_env ?? null,
     temperature: entry?.temperature ?? null,
     maxConcurrency: entry?.max_concurrency ?? null,
+    maxTokens: entry?.max_tokens ?? null,
   }
+}
+
+/**
+ * DSH live-default posture: an empty or dangling active pointer falls back to
+ * the first declared provider, so a workspace whose `active_provider` was lost
+ * (or never written) still resolves a usable route at read time. A workspace
+ * with no `providers` map keeps the legacy `llm`-segment id as-is.
+ */
+function resolveActiveProvider(config: ConfigYaml): string {
+  const declared = config.active_provider ?? config.llm?.provider ?? ''
+  const providerIds = Object.keys(config.providers ?? {})
+  if (providerIds.length === 0) return declared
+  if (declared !== '' && providerIds.includes(declared)) return declared
+  return providerIds[0] ?? ''
+}
+
+/** Trim whitespace and trailing slashes so `{base}/chat/completions` joins cleanly. */
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '')
 }
 
 /**
@@ -79,6 +103,7 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
       apiKey: null,
       temperature: 0.3,
       maxConcurrency: 4,
+      maxTokens: null,
       defaultMode: 'socratic',
       agentPreset: 'studyclaw-learning',
       permissionPreset: 'workspace-write',
@@ -86,14 +111,15 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
     }
   }
   const config = yaml.load(raw) as ConfigYaml
-  const providerId = selection?.providerId ?? config.active_provider ?? config.llm?.provider ?? ''
+  const providerId = selection?.providerId ?? resolveActiveProvider(config)
   const direct = providerFacts(config, providerId)
-  const baseUrl = direct.baseUrl ?? config.llm?.api_base ?? ''
+  const baseUrl = normalizeBaseUrl(direct.baseUrl ?? config.llm?.api_base ?? '')
   const model = selection?.model ?? direct.model ?? config.llm?.model ?? ''
   const apiKeyEnv = direct.apiKeyEnv ?? config.llm?.api_key_env ?? null
   const apiKey = await resolveCredential(workspaceRoot, providerId, apiKeyEnv)
   const temperature = direct.temperature ?? config.llm?.temperature ?? 0.3
   const maxConcurrency = direct.maxConcurrency ?? config.llm?.max_concurrency ?? 4
+  const maxTokens = direct.maxTokens ?? config.llm?.max_tokens ?? null
   const defaultMode = config.ui?.default_mode === 'quick' || config.ui?.default_mode === 'feynman' || config.ui?.default_mode === 'debug'
     ? config.ui.default_mode
     : 'socratic'
@@ -111,6 +137,7 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
     apiKey,
     temperature,
     maxConcurrency,
+    maxTokens,
     defaultMode,
     agentPreset: config.agent?.preset === 'general' ? 'general' : 'studyclaw-learning',
     permissionPreset,

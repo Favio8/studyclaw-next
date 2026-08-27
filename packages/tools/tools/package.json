@@ -1,16 +1,18 @@
-{
-  "name": "@studyclaw/tools",
-  "version": "0.1.0",
-  "description": "StudyClaw agent tool registry: specs, JSON-schema argument validation, mode-based policy filtering, and file-course handlers (ported from Python agent_tools.py)",
-  "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./src/*": "./src/*",
-    "./package.json": "./package.json"
-  },
-  "dependencies": {}
+﻿{
+    "name":  "@studyclaw/tools",
+    "version":  "0.1.0",
+    "description":  "StudyClaw agent tool registry: specs, JSON-schema argument validation, mode-based policy filtering, and file-course handlers (ported from Python agent_tools.py)",
+    "license":  "MIT",
+    "type":  "module",
+    "exports":  {
+                    ".":  {
+                              "types":  "./lib/types/index.d.ts",
+                              "default":  "./lib/types/index.js"
+                          },
+                    "./src/*":  "./src/*",
+                    "./package.json":  "./package.json"
+                },
+    "dependencies":  {
+
+                     }
 }

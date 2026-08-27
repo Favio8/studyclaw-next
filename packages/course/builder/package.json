@@ -1,31 +1,31 @@
-{
-  "name": "@studyclaw/course-builder",
-  "version": "0.1.0",
-  "description": "StudyClaw course build engine: markdown ingest (two-level outline + semantic chunks), SHA-256 checksum incrementality, syllabus merge, task pool, progress seeding, and structured LLM task generation (ported from Python builder.py/ingestor.py/task_gen.py)",
-  "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./src/*": "./src/*",
-    "./package.json": "./package.json"
-  },
-  "dependencies": {
-    "@deepseek-ai/dsh-llm": "workspace:^",
-    "@studyclaw/tools": "workspace:^",
-    "js-yaml": "^4.1.0",
-    "markitdown-ts": "^0.0.10",
-    "xlsx": "^0.18.5",
-    "zod": "^4.4.3"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "workspace:^"
-  },
-  "devDependencies": {
-    "docx": "^9.7.1",
-    "exceljs": "^4.4.0",
-    "pdf-lib": "^1.17.1"
-  }
+﻿{
+    "name":  "@studyclaw/course-builder",
+    "version":  "0.1.0",
+    "description":  "StudyClaw course build engine: markdown ingest (two-level outline + semantic chunks), SHA-256 checksum incrementality, syllabus merge, task pool, progress seeding, and structured LLM task generation (ported from Python builder.py/ingestor.py/task_gen.py)",
+    "license":  "MIT",
+    "type":  "module",
+    "exports":  {
+                    ".":  {
+                              "types":  "./lib/types/index.d.ts",
+                              "default":  "./lib/types/index.js"
+                          },
+                    "./src/*":  "./src/*",
+                    "./package.json":  "./package.json"
+                },
+    "dependencies":  {
+                         "@deepseek-ai/dsh-llm":  "workspace:^",
+                         "@studyclaw/tools":  "workspace:^",
+                         "js-yaml":  "^4.1.0",
+                         "markitdown-ts":  "^0.0.10",
+                         "xlsx":  "^0.18.5",
+                         "zod":  "^4.4.3"
+                     },
+    "peerDependencies":  {
+                             "@deepseek-ai/cordis":  "workspace:^"
+                         },
+    "devDependencies":  {
+                            "docx":  "^9.7.1",
+                            "exceljs":  "^4.4.0",
+                            "pdf-lib":  "^1.17.1"
+                        }
 }

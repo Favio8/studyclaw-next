@@ -167,6 +167,8 @@ interface AppState {
   setCourseSessions: (courseId: string, sessions: SessionSummary[]) => void;
   setSessions: (sessions: SessionSummary[]) => void;
   setActiveSession: (sessionId: string | null, title?: string) => void;
+  /** 只更新激活对话标题（如 done 后拾取自动命名），不动 id/模型座位。 */
+  setActiveSessionTitle: (title: string) => void;
   setMessages: (messages: ChatMessage[]) => void;
   appendMessage: (message: ChatMessage) => void;
   updateMessage: (messageId: string, patch: Partial<ChatMessage>) => void;
@@ -279,6 +281,7 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveSession: (sessionId, title = "") =>
     // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）
     set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null }),
+  setActiveSessionTitle: (title) => set({ activeSessionTitle: title }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),

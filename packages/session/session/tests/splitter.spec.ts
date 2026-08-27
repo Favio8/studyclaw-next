@@ -72,6 +72,23 @@ describe('streamSplit', () => {
     expect(() => extractSync(bad)).toThrow(SessionError)
   })
 
+  it('accepts the bare top-level payload shape (legacy/model-drift tolerance)', () => {
+    // 历史提示词教的是裸对象；按它输出的模型不能被静默丢弃。
+    const bare = `已确认掌握。${SYNC_MARKER}\n{"concept_updates": [{"id": "c_harness", "score": 0.85}], "changelog": "+ c_harness 掌握度 85%"}`
+    const [visible, payload] = extractSync(bare)
+    expect(visible).toBe('已确认掌握。')
+    expect(payload).toEqual({
+      concept_updates: [{ id: 'c_harness', score: 0.85 }],
+      memory_hints: [],
+      changelog: '+ c_harness 掌握度 85%',
+    })
+
+    // 无任何已知字段的匿名 JSON 依旧静默忽略（不误伤普通代码块）。
+    const anon = `示例：${SYNC_MARKER}\n{"foo": 1}`
+    const [, anonPayload] = extractSync(anon)
+    expect(anonPayload).toBeNull()
+  })
+
   it('sync content after the marker never reaches the visible stream', () => {
     const raw = `前文。${SYNC_MARKER}{"_studyclaw_sync":{"concept_updates":[],"memory_hints":[]}}\n尾巴也屏蔽`
     const events = [...streamSplit([raw])]

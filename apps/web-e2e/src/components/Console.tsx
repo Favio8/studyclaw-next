@@ -91,9 +91,21 @@ export default function Console() {
   const workspacePath = useAppStore((s) => s.workspacePath);
   useEffect(() => {
     if (!workspacePath) return;
-    void loadCourses().then((list) => {
+    void loadCourses().then(async (list) => {
       if (list && list.length > 0) {
         setActiveCourse(list[0].id); // 默认激活第一个项目
+      } else {
+        // 骨架自愈（DSH：工作区随时可开聊）：课程记录缺失时补空骨架（无 LLM）。
+        const courseId = workspacePath.split(/[\/]/).pop() ?? "";
+        if (courseId) {
+          try {
+            await api.ensureCourse(courseId);
+            const again = await loadCourses();
+            if (again && again.length > 0) setActiveCourse(again[0].id);
+          } catch {
+            /* 保持空态 */
+          }
+        }
       }
     });
   }, [workspacePath, loadCourses, setActiveCourse]);

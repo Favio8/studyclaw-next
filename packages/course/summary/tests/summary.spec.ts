@@ -19,22 +19,22 @@ async function projectDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'studyclaw-summary-'))
   tmpRoots.push(root)
   const dir = join(root, 'harness')
-  await mkdir(join(dir, 'history'), { recursive: true })
+  await mkdir(join(dir, '.studyclaw', 'history'), { recursive: true })
   return dir
 }
 
 describe('listCourseSummaries (project = one course)', () => {
   it('已初始化项目：单课程摘要（id=basename、标题/掌握度/到期/lastActive）', async () => {
     const dir = await projectDir()
-    await writeFile(join(dir, 'syllabus.json'), JSON.stringify({ course_id: basename(dir), title: 'Harness 讲义', version: '1.0.0' }), 'utf8')
-    await writeFile(join(dir, 'progress.md'), [
+    await writeFile(join(dir, '.studyclaw', 'syllabus.json'), JSON.stringify({ course_id: basename(dir), title: 'Harness 讲义', version: '1.0.0' }), 'utf8')
+    await writeFile(join(dir, '.studyclaw', 'progress.md'), [
       '# 学习进度', '',
       '- **总体掌握度**：42%', '- **待复习卡片数**：3', '- **最后更新时间**：2026-08-20 10:00', '',
       '| concept_id | name | chapter | mastery | evals | pass_rate | ef | next_review_at | misattribution |',
       '|---|---|---|---|---|---|---|---|---|',
       '| c_1 | 概念 | 章 | 40% | 1 | 50% | 2.5 | 2026-08-25 | none |', '',
     ].join('\n'), 'utf8')
-    await writeFile(join(dir, 'history', 'session_20260901-100000.jsonl'), '{}\n', 'utf8')
+    await writeFile(join(dir, '.studyclaw', 'history', 'session_20260901-100000.jsonl'), '{}\n', 'utf8')
 
     const result = await listCourseSummaries(dir)
     expect(result.missing).toBe(false)

@@ -309,6 +309,8 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     }
   }
 
+  const [confirmForget, setConfirmForget] = useState<WorkspaceItem | null>(null);
+
   async function forgetWorkspace(item: WorkspaceItem) {
     try {
       const payload = await api.removeWorkspace(item.id);
@@ -782,7 +784,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       : sessions.slice(0, SESSION_LIMIT);
 
     return (
-      <div className="ml-[22px] mt-0.5">
+      // DSH indent step: the workspace group wrapper already applies the single
+      // 22px indent — do not nest a second margin here.
+      <div className="mt-0.5">
         {shown.map((session) => {
           const active = session.sessionId === activeSessionId;
           const blank = session.turns === 0;
@@ -1059,7 +1063,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
               className="hidden h-5 w-5 shrink-0 items-center justify-center rounded text-text-faint hover:bg-bg-card hover:text-text-primary group-hover:flex"
               onClick={(event) => {
                 event.stopPropagation();
-                void forgetWorkspace(item);
+                setConfirmForget(item);
               }}
             >
               <X size={13} strokeWidth={1.8} aria-hidden />
@@ -1086,7 +1090,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       return (
         <div key={item.id} className="mb-0.5">
           {renderWorkspaceHeader(item)}
-          <div className="ml-[22px] mt-0.5 space-y-0.5">
+          <div className="ml-[14px] mt-0.5 space-y-0.5">
             {shown.map((course) => (active ? renderCourse(course) : renderLiteCourse(item, course)))}
           </div>
         </div>
@@ -1097,7 +1101,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       <div key={item.id} className="mb-0.5" role="treeitem" aria-expanded={!collapsed} aria-selected={active}>
         {renderWorkspaceHeader(item)}
         {!collapsed ? (
-          <div className="ml-[22px] mt-0.5 space-y-0.5">
+          <div className="ml-[14px] mt-0.5 space-y-0.5">
             {missing ? (
               <p className="px-2 py-1 text-[12px] leading-5 text-text-faint">目录不存在</p>
             ) : list.length === 0 ? (
@@ -1287,7 +1291,38 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         >
           <Settings2 {...iconProps} aria-hidden />
         </button>
-        {wizardOpen ? <NewProjectWizard /> : null}
+        {confirmForget ? (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmForget(null);
+          }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+            <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
+            <p className="mt-3 text-[13px] leading-6 text-text-secondary">
+              将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-text-faint">磁盘上的数据不会被删除；再次打开同一文件夹即可恢复项目与学习记录。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmForget(null)} className="h-9 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card">取消</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmForget;
+                  setConfirmForget(null);
+                  if (target) void forgetWorkspace(target);
+                }}
+                className="h-9 rounded-lg bg-accent-fail/90 px-3 text-[13px] font-medium text-white hover:bg-accent-fail"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {wizardOpen ? <NewProjectWizard /> : null}
         {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
       </div>
     );
@@ -1347,7 +1382,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
                       className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded text-text-faint transition-colors hover:bg-bg-card hover:text-text-primary group-hover:flex"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void forgetWorkspace(item);
+                        setConfirmForget(item);
                       }}
                     >
                       <X size={13} strokeWidth={1.8} aria-hidden />
@@ -1528,6 +1563,37 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </button>
       </div>
 
+      {confirmForget ? (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setConfirmForget(null);
+          }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+            <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
+            <p className="mt-3 text-[13px] leading-6 text-text-secondary">
+              将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-text-faint">磁盘上的数据不会被删除；再次打开同一文件夹即可恢复项目与学习记录。</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmForget(null)} className="h-9 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card">取消</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmForget;
+                  setConfirmForget(null);
+                  if (target) void forgetWorkspace(target);
+                }}
+                className="h-9 rounded-lg bg-accent-fail/90 px-3 text-[13px] font-medium text-white hover:bg-accent-fail"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {wizardOpen ? <NewProjectWizard /> : null}
       {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
       {sessionRenameTarget ? (

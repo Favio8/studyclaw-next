@@ -14,6 +14,7 @@
     "@studyclaw/acp": "workspace:^",
     "@studyclaw/apiproxy": "workspace:^",
     "@studyclaw/course-summary": "workspace:^",
+    "@studyclaw/directory-picker-native": "workspace:^",
     "@studyclaw/workspace": "workspace:^"
   },
   "peerDependencies": {

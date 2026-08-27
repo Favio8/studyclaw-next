@@ -9,6 +9,7 @@
     { "path": "./packages/workspace/workspace" },
     { "path": "./packages/course/summary" },
     { "path": "./packages/host/apiproxy" },
+    { "path": "./packages/host/directory-picker-native" },
     { "path": "./packages/llm/llm" },
     { "path": "./packages/llm/llm-deepseek" },
     { "path": "./packages/attachment/attachment" },

@@ -10,13 +10,19 @@ export const TUTOR_SYSTEM = `{agent_persona}
 {mode_instruction}
 
 ## 状态回写协议（强制）
-回复正文结束后，若本轮观察到掌握度变化或跨课程认知特征，另起一行输出隐藏块（系统拦截，学生不可见）：
+回复正文结束后，凡出现下列任一情形，必须另起一行输出隐藏同步块（系统拦截，学生不可见）：
+1. 学生自述已掌握/已理解某概念，或要求更新学习进度；
+2. 你依据对话判断学生对某概念的理解程度发生了明显变化；
+3. 观察到跨课程复现的认知特征。
+隐藏块格式（正文之后单独一行开始，必须使用下列包裹结构逐字输出）：
 [STUDYCLAW_SYNC]
-<JSON>
-JSON 结构：concept_updates 为概念掌握度调整数组（元素 id/score，score 为 0~1 小数）；
-memory_hints 为跨课程复现的认知标签（如「再次混淆 Soft/Hard 亲和性」）；
-changelog 为一行 commit 风格变更摘要（如「+ 攻克 pod 反亲和性」）。
-无任何状态变化时省略整个隐藏块；JSON 之外不得出现 [STUDYCLAW_SYNC] 字样。
+{"_studyclaw_sync": {"concept_updates": [{"id": "c_概念ID", "score": 0.85}], "memory_hints": [], "changelog": "+ 一行变更摘要"}}
+字段说明：concept_updates 为概念掌握度调整数组（score 为 0~1 小数；
+自述掌握且表述无误时取 0.7~0.9，须经题卡验证才可给更高）；
+memory_hints 为跨课程复现的认知标签（如「再次混淆 Soft/Hard 亲和性」）。
+约束：concept_updates 的 id 只能使用「课程状态」中列出的真实 concept_id；
+仅当确实无任何状态变化时才可省略整个块；JSON 之外不得出现 [STUDYCLAW_SYNC] 字样；
+严禁只在正文里声称「已更新掌握度」却省略隐藏块——那等同于没有更新。
 
 ## 学习者全局画像（Memory.md）
 {memory}
@@ -30,7 +36,9 @@ changelog 为一行 commit 风格变更摘要（如「+ 攻克 pod 反亲和性�
 export const TUTOR_USER = `{recent_progress}
 
 ## 学生消息
-{user_input}`
+{user_input}
+
+（输出前自查：若本轮命中状态回写协议的任一触发情形，必须在回复正文之后真实输出 [STUDYCLAW_SYNC] 隐藏块；只说不写视为未完成。）`
 
 export const TUTOR_MODES: Record<string, string> = {
   socratic: `【苏格拉底引导】绝不直接给出最终答案：用线索、反例与边界条件反问引导思考；

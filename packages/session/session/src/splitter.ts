@@ -28,16 +28,30 @@ export function extractSync(text: string): [string, SyncBlock | null] {
   } catch {
     return [visible, null]
   }
-  if (typeof data !== 'object' || data === null || !(SYNC_KEY in (data as Record<string, unknown>))) {
-    return [visible, null]
+  if (typeof data !== 'object' || data === null) return [visible, null]
+  const record = data as Record<string, unknown>
+  // 正规包裹形态：{"_studyclaw_sync": {...}}（prompts.ts 教的标准格式）。
+  if (SYNC_KEY in record) {
+    try {
+      return [visible, syncBlock.parse(record[SYNC_KEY])]
+    } catch {
+      // Schema violation: contract first (Python raises SessionError).
+      throw new SessionError('[STUDYCLAW_SYNC] 载荷 Schema 非法')
+    }
   }
-  const payload = (data as Record<string, unknown>)[SYNC_KEY]
-  try {
-    return [visible, syncBlock.parse(payload)]
-  } catch {
-    // Schema violation: contract first (Python raises SessionError).
-    throw new SessionError('[STUDYCLAW_SYNC] 载荷 Schema 非法')
+  // 兼容形态：历史上/部分模型会按裸对象直接给字段。带任一已知字段的才按
+  // 裸载荷校验——两不匹配的匿名对象依旧静默忽略，保持既有容错语义。
+  const looksBare = Array.isArray(record['concept_updates'])
+    || Array.isArray(record['memory_hints'])
+    || typeof record['changelog'] === 'string'
+  if (looksBare) {
+    try {
+      return [visible, syncBlock.parse(record)]
+    } catch {
+      throw new SessionError('[STUDYCLAW_SYNC] 载荷 Schema 非法')
+    }
   }
+  return [visible, null]
 }
 
 function syncJsonText(text: string, start: number): string | null {

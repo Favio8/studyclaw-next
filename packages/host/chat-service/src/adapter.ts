@@ -47,7 +47,10 @@ function createDeepSeekAdapter(config: ResolvedChatConfig): DeepSeekAdapter {
         ? { reasoningEffort: config.reasoningEffort }
         : {}),
     },
-    maxTokens: 8192,
+    // 8192 会把推理型模型的思维链算进输出预算，正文常被截断、隐藏
+    // [STUDYCLAW_SYNC] 块无法送达（聊天掌握度回写因此失效）。config.yaml
+    // 的 provider.max_tokens 可按路由覆写；缺省给推理+回复留足余量。
+    maxTokens: config.maxTokens ?? 16_384,
     defaultContextWindow: 128_000,
     models: [],
     streamIdleTimeoutMs: 300_000,
@@ -113,7 +116,9 @@ class DeepSeekToolClient implements ToolLlmClient {
       if (chunk.type === 'text-delta') {
         yield { kind: 'text', delta: chunk.text }
       } else if (chunk.type === 'reasoning-delta') {
-        yield { kind: 'text', delta: chunk.text }
+        // 思维链必须以显式 <think> 包裹下发：下游 session.splitter 只认标签，
+        // 裸转发会把推理当正文渲染给学生，且干扰隐藏同步块的提取。
+        yield { kind: 'text', delta: `<think>${chunk.text}</think>` }
       } else if (chunk.type === 'tool-call-delta') {
         const existing = callsByIndex.get(chunk.index) ?? { id: '', name: '', argumentsDelta: '' }
         if (chunk.id !== undefined) existing.id = String(chunk.id)

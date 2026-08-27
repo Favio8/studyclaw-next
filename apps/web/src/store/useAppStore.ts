@@ -142,6 +142,8 @@ interface AppState {
   activeTab: PanelTab;
   badges: Record<PanelTab, boolean>;
   progress: ProgressPayload | null;
+  /** 进度链路加载失败信息；null=正常。失败时 ProgressTab 渲染错误态+重试而非永久骨架。 */
+  progressError: string | null;
   mastery: MasteryPayload | null;
   heatmap: HeatmapPayload | null;
   quiz: QuizState;
@@ -167,6 +169,8 @@ interface AppState {
   setCourseSessions: (courseId: string, sessions: SessionSummary[]) => void;
   setSessions: (sessions: SessionSummary[]) => void;
   setActiveSession: (sessionId: string | null, title?: string) => void;
+  /** 只更新激活对话标题（如 done 后拾取自动命名），不动 id/模型座位。 */
+  setActiveSessionTitle: (title: string) => void;
   setMessages: (messages: ChatMessage[]) => void;
   appendMessage: (message: ChatMessage) => void;
   updateMessage: (messageId: string, patch: Partial<ChatMessage>) => void;
@@ -188,7 +192,7 @@ interface AppState {
   setComposerDraft: (key: string, draft: string) => void;
   setActiveTab: (tab: PanelTab) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
-  setPanelData: (patch: Partial<Pick<AppState, "progress" | "mastery" | "heatmap">>) => void;
+  setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
   setSyllabusSearch: (search: string) => void;
   setSyllabusView: (view: SyllabusView) => void;
@@ -234,6 +238,7 @@ export const useAppStore = create<AppState>((set) => ({
   activeTab: "progress",
   badges: { progress: false, syllabus: false, heatmap: false, quiz: false },
   progress: null,
+  progressError: null,
   mastery: null,
   heatmap: null,
   quiz: { ...initialQuiz },
@@ -257,6 +262,7 @@ export const useAppStore = create<AppState>((set) => ({
       activeModel: null,
       messages: [],
       progress: null,
+      progressError: null,
       mastery: null,
       heatmap: null,
       quiz: { ...initialQuiz },
@@ -279,6 +285,7 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveSession: (sessionId, title = "") =>
     // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）
     set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null }),
+  setActiveSessionTitle: (title) => set({ activeSessionTitle: title }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
@@ -365,6 +372,7 @@ export const useAppStore = create<AppState>((set) => ({
   pendingAsk: null,
       messages: [],
       progress: null,
+      progressError: null,
       mastery: null,
       heatmap: null,
       quiz: { ...initialQuiz },

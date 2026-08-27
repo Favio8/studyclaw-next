@@ -16,12 +16,13 @@ import {
   type ToolHandlerResult,
   type ToolProviders,
 } from '@studyclaw/tools'
-import { SessionEventStore, SessionStore, SessionError, TutorSession, utcTs, sessionModelLine, publicToolArgs, type ChatEvent, type LearningMode, type SessionProjection } from '@studyclaw/session'
+import { SessionEventStore, SessionStore, SessionError, TutorSession, utcTs, sessionModelLine, publicToolArgs, studyclawFallbackTitle, normalizeSessionTitle, type ChatEvent, type LearningMode, type SessionProjection } from '@studyclaw/session'
 import type { ResolvedChatConfig } from './config.ts'
 import { createDeepSeekToolClient, reasoningEffortsForConfig } from './adapter.ts'
-import { createCourseService, type CourseService } from './course.ts'
+import { configProblem, createCourseService, type CourseService } from './course.ts'
 import { loadChatConfig } from './config.ts'
-import { discoverModels, settingsPayload } from './settings.ts'
+import { discoverModels, settingsPayload, saveProvider } from './settings.ts'
+import { stateDirOf } from '@studyclaw/course-builder'
 
 export interface SessionSummaryView {
   readonly sessionId: string
@@ -119,7 +120,7 @@ function deprecatedModel(model: string): boolean {
 }
 
 async function ensureSessionModel(workspaceRoot: string, courseId: string, sessionId: string): Promise<SessionModelSelection | null> {
-  const historyDir = join(courseDirOf(workspaceRoot, courseId), 'history')
+  const historyDir = join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history')
   const eventStore = new SessionEventStore(historyDir)
   const eventModel = (await eventStore.load(sessionId).catch(() => []))
     .reverse()
@@ -165,7 +166,9 @@ export async function sessionModels(workspaceRoot: string, courseId: string, ses
   for (const { provider, models: discoveredModels } of discovered) {
     const models = provider.models.filter(model => model.id !== '' && !deprecatedModel(model.id)).map(model => ({ id: model.id, name: model.name || model.id }))
     const selected = models.length > 0 ? models : discoveredModels.length > 0 ? discoveredModels : provider.model !== '' && !deprecatedModel(provider.model) ? [{ id: provider.model, name: provider.model }] : []
-    if (selected.length > 0) {
+    // 只展示「可用」路由：未配 Key 的供应商（如残留的 mock）不该出现在
+    // 选模目录里诱导用户选中死路由；配置入口在设置页。
+    if (selected.length > 0 && provider.apiKeyConfigured) {
       const config = await loadChatConfig(workspaceRoot, { providerId: provider.id }).catch(() => null)
       const enriched = await Promise.all(selected.map(async model => {
         if (config === null) return model
@@ -193,9 +196,21 @@ export async function selectSessionModel(workspaceRoot: string, courseId: string
     throw new SessionError(`思考强度不可用: ${selection.provider}/${selection.model}/${selection.effort}`)
   }
   const payload = await settingsPayload(workspaceRoot)
-  if (payload.providers.find(item => item.id === selection.provider)?.apiKeyConfigured !== true) throw new SessionError(`Provider 未配置凭据: ${selection.provider}`)
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
-  const events = new SessionEventStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const target = payload.providers.find(item => item.id === selection.provider)
+  if (target?.apiKeyConfigured !== true) throw new SessionError(`Provider 未配置凭据: ${selection.provider}`)
+  // 首次选择即成为默认模型：会话内选过模型却让 /build 一直读到「未设置默认
+  // 模型」是最常见的配置落差（合并语义保留其余字段，失败静默不影响选模）。
+  if (target !== undefined && target.model === '') {
+    await saveProvider(workspaceRoot, {
+      id: target.id,
+      name: target.name,
+      model: selection.model,
+      baseUrl: target.baseUrl,
+      overwrite: true,
+    }).catch(() => undefined)
+  }
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
+  const events = new SessionEventStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   if (await events.exists(sessionId)) {
     await events.append(sessionId, { ts: utcTs(), type: 'session/model', payload: { provider: selection.provider, model: selection.model, ...(selection.effort === undefined || selection.effort === null ? {} : { effort: selection.effort }) } })
   } else {
@@ -205,13 +220,13 @@ export async function selectSessionModel(workspaceRoot: string, courseId: string
 }
 
 export async function sessionEvents(workspaceRoot: string, courseId: string, sessionId: string, afterSeq = 0): Promise<{ events: SessionEventView[]; lastSeq: number }> {
-  const events = new SessionEventStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const events = new SessionEventStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   const rows = await events.loadAfter(sessionId, afterSeq)
   return { events: rows, lastSeq: rows.at(-1)?.seq ?? afterSeq }
 }
 
 export async function sessionProjection(workspaceRoot: string, courseId: string, sessionId: string): Promise<SessionProjection> {
-  return new SessionEventStore(join(courseDirOf(workspaceRoot, courseId), 'history')).project(sessionId)
+  return new SessionEventStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history')).project(sessionId)
 }
 
 export interface LearningAgentOptions {
@@ -270,7 +285,7 @@ async function ensureAgentRuntimeConfig(events: SessionEventStore, sessionId: st
 /** Build one live learning Agent. All callers (Host, Web, CLI and ACP) use this adapter. */
 export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
   const courseDir = courseDirOf(options.workspaceRoot, options.courseId)
-  const events = new SessionEventStore(join(courseDir, 'history'))
+  const events = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
   const providers: ToolProviders = {
     ...localToolProviders,
     ...(options.agentRegistry === undefined ? {} : {
@@ -351,8 +366,12 @@ export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
         ...(options.runtimeConfig === undefined ? selectedConfig : { ...selectedConfig, ...options.runtimeConfig }),
         reasoningEffort: effort,
       }
-      if (config.model === '' || config.baseUrl === '' || config.apiKey === null) {
-        throw new SessionError(selection === null ? '请先在模型配置中选择可用模型' : '未配置模型端点或 API Key')
+      {
+        const problem = configProblem(config)
+        if (problem !== '') throw new SessionError(problem)
+      }
+      if (config.apiKey === null) {
+        throw new SessionError(`供应商 ${config.providerId || '（未配置）'} 的 API Key 未配置：请在 设置 → 模型配置 中填入`)
       }
       await events.append(options.sessionId, { ts: utcTs(), type: 'request/header', payload: { provider: config.providerId, model: config.model, mode, ...(effort === null ? {} : { effort }), ...(requestId === null ? {} : { requestId }) } })
       yield { type: 'session/meta', payload: { sessionId: options.sessionId, provider: config.providerId, model: config.model, mode, ...(effort === null ? {} : { effort }), ...(requestId === null ? {} : { requestId }) } }
@@ -489,7 +508,7 @@ export class LearningAgentService {
     if (workspaceRoot.trim() === '') return []
     const recovered: Array<Record<string, unknown>> = []
     // 项目即课程：会话历史直接位于项目根 history/。
-    const historyDir = join(workspaceRoot, 'history')
+    const historyDir = join(stateDirOf(workspaceRoot), 'history')
     const projectId = basename(workspaceRoot)
     const files = await readdir(historyDir, { withFileTypes: true }).catch(() => [])
     for (const file of files) {
@@ -539,7 +558,7 @@ export class LearningAgentService {
     const existing = this.registry.get(agentId)
     let runtimeConfig: AgentRuntimeConfig | undefined
     if (existing === undefined) {
-      const historyDir = join(courseDirOf(workspaceRoot, courseId), 'history')
+      const historyDir = join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history')
       const events = new SessionEventStore(historyDir)
       if (!(await events.exists(sessionId))) {
         const meta = await new SessionStore(historyDir).readMeta(sessionId)
@@ -779,8 +798,8 @@ function toView(summary: Awaited<ReturnType<SessionStore['listSessions']>>[numbe
 
 /** List a course's sessions (mtime desc), with chat-line turn counts. */
 export async function listSessions(workspaceRoot: string, courseId: string): Promise<SessionSummaryView[]> {
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
-  const eventStore = new SessionEventStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
+  const eventStore = new SessionEventStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   const summaries = await store.listSessions()
   const views: SessionSummaryView[] = []
   for (const summary of summaries) {
@@ -811,8 +830,8 @@ export async function searchSessions(
 ): Promise<SessionSearchView[]> {
   const normalized = query.trim().toLowerCase()
   if (normalized === '') return []
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
-  const eventStore = new SessionEventStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
+  const eventStore = new SessionEventStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   const matches: SessionSearchView[] = []
   for (const summary of await store.listSessions()) {
     const chats = await store.loadChat(summary.id).catch(() => [])
@@ -844,7 +863,7 @@ export async function createSession(
   title: string | null,
 ): Promise<{ sessionId: string; file: string }> {
   const courseDir = courseDirOf(workspaceRoot, courseId)
-  const store = new SessionStore(join(courseDir, 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDir), 'history'))
   const { sessionId, path } = await store.newSession(mode, title)
   const config = await loadChatConfig(workspaceRoot)
   if (config.providerId !== '' && config.model !== '' && !deprecatedModel(config.model)) {
@@ -860,7 +879,7 @@ export async function renameSession(
   sessionId: string,
   title: string,
 ): Promise<{ sessionId: string; title: string }> {
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   const normalized = title.trim()
   if (normalized === '') throw new SessionError('会话标题不能为空')
   await store.renameSession(sessionId, normalized)
@@ -874,8 +893,8 @@ export async function forkSession(
   sessionId: string,
   chatIndex?: number,
 ): Promise<{ sessionId: string; file: string }> {
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
-  const historyDir = join(courseDirOf(workspaceRoot, courseId), 'history')
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
+  const historyDir = join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history')
   const events = new SessionEventStore(historyDir)
   if (await events.exists(sessionId)) {
     const { stat } = await import('node:fs/promises')
@@ -904,7 +923,7 @@ export async function archiveSession(
   courseId: string,
   sessionId: string,
 ): Promise<{ sessionId: string; archived: true }> {
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   await store.archiveSession(sessionId)
   return { sessionId, archived: true }
 }
@@ -916,7 +935,7 @@ export async function reorderSession(
   sessionId: string,
   beforeId?: string,
 ): Promise<{ sessions: SessionSummaryView[] }> {
-  const store = new SessionStore(join(courseDirOf(workspaceRoot, courseId), 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDirOf(workspaceRoot, courseId)), 'history'))
   await store.insertSessionBefore(sessionId, beforeId)
   return { sessions: await listSessions(workspaceRoot, courseId) }
 }
@@ -928,8 +947,8 @@ export async function restoreSession(
   sessionId: string,
 ): Promise<RestoredSessionView> {
   const courseDir = courseDirOf(workspaceRoot, courseId)
-  const store = new SessionStore(join(courseDir, 'history'))
-  const eventStore = new SessionEventStore(join(courseDir, 'history'))
+  const store = new SessionStore(join(stateDirOf(courseDir), 'history'))
+  const eventStore = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
   const legacyChats = await store.loadChat(sessionId).catch(() => [])
   const projection = await eventStore.exists(sessionId) ? await eventStore.project(sessionId) : null
   const eventRows = projection === null ? [] : await eventStore.load(sessionId)
@@ -939,9 +958,18 @@ export async function restoreSession(
   const meta = await store.readMeta(sessionId)
   let title = meta?.title ?? ''
   let mode = meta?.mode ?? 'socratic'
+  let userNamed = (meta?.title ?? '') !== ''
   if (projection !== null) {
     for (const row of eventRows) {
-      if ((row.type === 'session/meta' || row.type === 'session/create' || row.type === 'session/rename') && typeof row.payload['title'] === 'string' && row.payload['title'].trim() !== '') title = row.payload['title'].trim()
+      if ((row.type === 'session/meta' || row.type === 'session/create' || row.type === 'session/rename') && typeof row.payload['title'] === 'string' && row.payload['title'].trim() !== '') {
+        title = row.payload['title'].trim()
+        if (row.type === 'session/rename') userNamed = true
+      }
+      // Automatic titles apply only when no user rename has pinned the title
+      // (same priority as the SessionStore list derivation).
+      if (row.type === 'session/title' && !userNamed && typeof row.payload['title'] === 'string' && row.payload['title'].trim() !== '') {
+        title = row.payload['title'].trim()
+      }
       if ((row.type === 'session/meta' || row.type === 'session/create') && (row.payload['mode'] === 'quick' || row.payload['mode'] === 'feynman' || row.payload['mode'] === 'debug' || row.payload['mode'] === 'socratic')) mode = row.payload['mode']
     }
   }
@@ -1112,6 +1140,28 @@ export function createToolActions(courseService: CourseService): ToolActions {
 }
 
 /**
+ * DSH session-title policy (first-prompt cadence, lightweight rewrite): one
+ * tiny completion over the active route names the conversation in ~5 words.
+ * The first message travels as a JSON array so its content cannot break the
+ * instruction; failures are silent — the synchronous fallback title already
+ * covers the sidebar.
+ */
+async function generateLlmSessionTitle(config: ResolvedChatConfig, firstMessage: string): Promise<string> {
+  const system = 'You name chat sessions. Reply with ONLY the session title: about 5 words (at most 10 CJK characters), plain text, no quotes, no trailing punctuation, no markdown.'
+  const user = `Name the session opened by this first user message: ${JSON.stringify([firstMessage.slice(0, 4000)])}`
+  let raw = ''
+  for await (const chunk of createDeepSeekToolClient(config).request(
+    system,
+    [{ role: 'user', content: user }],
+    null,
+    AbortSignal.timeout(60_000),
+  )) {
+    if (chunk.kind === 'text') raw += chunk.delta
+  }
+  return normalizeSessionTitle(raw.replace(/["'「『」』]/g, ''), 80)
+}
+
+/**
  * Run one chat turn over a course: resumes/creates the session as needed,
  * wires the tool registry and the config-backed LLM client, and streams the
  * events. `config` may be null (host without a configured provider) — the
@@ -1139,15 +1189,24 @@ export async function* chatStream(
     sessionId: input.sessionId ?? null,
     mode: input.mode ?? 'socratic',
     persistLegacy: false,
-    eventStore: new SessionEventStore(join(courseDir, 'history')),
+    eventStore: new SessionEventStore(join(stateDirOf(courseDir), 'history')),
   })
   await session.init()
-  const eventStore = new SessionEventStore(join(courseDir, 'history'))
+  const eventStore = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
   if (!(await eventStore.exists(session.sessionId))) {
     await eventStore.append(session.sessionId, { ts: utcTs(), type: 'session/create', payload: { mode: input.mode ?? 'socratic', agentId: `study-${session.sessionId}` } })
   }
   const runtimeConfig = await ensureAgentRuntimeConfig(eventStore, session.sessionId, inputConfig ?? await loadChatConfig(workspaceRoot))
   const modelSelection = await ensureSessionModel(workspaceRoot, courseId, session.sessionId)
+  // DSH ensureFallback: the deterministic first-prompt title lands at send
+  // time (independent of turn outcome) so the sidebar drops the blank
+  // "新对话" placeholder as soon as the first message exists.
+  const historyStore = new SessionStore(join(stateDirOf(courseDir), 'history'))
+  let firstPrompt = false
+  const fallbackTitle = studyclawFallbackTitle(input.message)
+  if (fallbackTitle !== '') {
+    firstPrompt = await historyStore.applyAutoTitle(session.sessionId, fallbackTitle, 'fallback').catch(() => false)
+  }
   const agent = agentRegistry?.get(`study-${session.sessionId}`) ?? createLearningAgent({
     workspaceRoot,
     courseId,
@@ -1192,6 +1251,20 @@ export async function* chatStream(
       else if (event.type === 'ask/pending') yield { kind: 'ask', question: String(payload['question'] ?? '') }
       else if (event.type === 'sync/applied') yield { kind: 'sync', payload }
       else if (event.type === 'turn/error') yield { kind: 'error', code: 'AGENT_TURN_FAILED', message: String(payload['message'] ?? 'Agent turn failed') }
+    }
+    if (firstPrompt) {
+      // DSH first-prompt cadence: the LLM rename runs after the stream so the
+      // done frame is not delayed; it only upgrades the fallback written at
+      // send time and never overrides a user rename (pin check in store).
+      void (async () => {
+        const config = modelSelection !== null
+          ? await loadChatConfig(workspaceRoot, { providerId: modelSelection.provider, model: modelSelection.model })
+          : inputConfig ?? await loadChatConfig(workspaceRoot)
+        const title = await generateLlmSessionTitle(config, input.message)
+        if (title !== '') {
+          await historyStore.applyAutoTitle(session.sessionId, title, 'llm', { provider: config.providerId, model: config.model })
+        }
+      })().catch(() => undefined)
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

@@ -61,7 +61,9 @@ export async function listCourseSummaries(
   if (rootStat === null || !rootStat.isDirectory()) return { courses: [], missing: true }
 
   const id = basename(root)
-  const syllabus = await readFile(join(root, 'syllabus.json'), 'utf8').catch(() => null)
+  // 应用产物自 v2 起收在 .studyclaw/ 下（与 builder/chat-service 同一约定）。
+  const stateDir = join(root, '.studyclaw')
+  const syllabus = await readFile(join(stateDir, 'syllabus.json'), 'utf8').catch(() => null)
   if (syllabus === null) return { courses: [], missing: false }
 
   let title = id
@@ -73,13 +75,13 @@ export async function listCourseSummaries(
 
   let overallMastery = 0
   let dueToday = 0
-  const progress = await readFile(join(root, 'progress.md'), 'utf8').catch(() => null)
+  const progress = await readFile(join(stateDir, 'progress.md'), 'utf8').catch(() => null)
   if (progress !== null) {
     ({ overallMastery, dueToday } = parseProgressMeta(progress))
   }
 
   let lastActiveAt: string | null = null
-  const historyDir = join(root, 'history')
+  const historyDir = join(stateDir, 'history')
   const history = await stat(historyDir).catch(() => null)
   if (history?.isDirectory()) {
     let newest = 0

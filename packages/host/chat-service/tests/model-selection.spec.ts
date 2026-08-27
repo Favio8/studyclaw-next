@@ -10,7 +10,7 @@ import { activateProvider, saveProvider, setCredential } from '../src/settings.t
 
 async function setup(): Promise<{ root: string; sessionId: string }> {
   const root = await mkdtemp(join(tmpdir(), 'studyclaw-model-selection-'))
-  await mkdir(join(root, 'history'), { recursive: true })
+  await mkdir(join(root, '.studyclaw', 'history'), { recursive: true })
   await writeFile(join(root, '.studyclaw-placeholder'), '', 'utf8')
   const saved = await saveProvider(root, {
     id: 'acme', name: 'Acme', model: 'acme-small', baseUrl: 'https://acme.example/v1',
@@ -39,7 +39,7 @@ describe('session model directory', () => {
     await selectSessionModel(root, basename(root), sessionId, { provider: 'acme', model: 'acme-large', effort: 'high' })
     const next = await sessionModels(root, basename(root), sessionId)
     expect(next.current).toEqual({ provider: 'acme', model: 'acme-large', effort: 'high' })
-    const history = await readFile(join(root, 'history', `session_${sessionId}.jsonl`), 'utf8')
+    const history = await readFile(join(root, '.studyclaw', 'history', `session_${sessionId}.jsonl`), 'utf8')
     expect(history).toContain('"type":"session_model"')
     expect(history).toContain('"effort":"high"')
     await rm(root, { recursive: true, force: true })
@@ -57,7 +57,7 @@ describe('session model directory', () => {
 
   it('does not expose obsolete DeepSeek defaults and reports an unroutable empty setup', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-model-empty-'))
-    await mkdir(join(root, 'history'), { recursive: true })
+    await mkdir(join(root, '.studyclaw', 'history'), { recursive: true })
     const created = await createSession(root, basename(root), 'socratic', null)
     const directory = await sessionModels(root, basename(root), created.sessionId)
     expect(directory.current).toBeNull()
@@ -80,12 +80,12 @@ describe('session model directory', () => {
 
   it('resolves learning actions from the event-log model selection', async () => {
     const { root, sessionId } = await setup()
-    const events = new SessionEventStore(join(root, 'history'))
+    const events = new SessionEventStore(join(root, '.studyclaw', 'history'))
     await events.append(sessionId,
       { ts: utcTs(), type: 'session/create', payload: { mode: 'socratic' } },
       { ts: utcTs(), type: 'session/model', payload: { provider: 'acme', model: 'acme-large' } },
     )
-    await new SessionStore(join(root, 'history')).append(sessionId,
+    await new SessionStore(join(root, '.studyclaw', 'history')).append(sessionId,
       sessionModelLine.parse({ type: 'session_model', ts: utcTs(), provider: 'acme', model: 'acme-small' }),
     )
     const directory = await sessionModels(root, basename(root), sessionId)

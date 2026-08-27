@@ -19,19 +19,19 @@ import { dispatch, type HostServices } from '../src/index.ts'
 async function seedWorkspace(root: string, name: string): Promise<string> {
   // 项目即课程：项目根即课程根（syllabus/progress/history 就地）。
   const dir = join(root, name)
-  await mkdir(dir, { recursive: true })
+  await mkdir(join(dir, '.studyclaw'), { recursive: true })
   await writeFile(
-    join(dir, 'syllabus.json'),
+    join(dir, '.studyclaw', 'syllabus.json'),
     JSON.stringify({ course_id: name, title: `标题-${name}`, version: '1.0.0' }),
     'utf8',
   )
   await writeFile(
-    join(dir, 'progress.md'),
+    join(dir, '.studyclaw', 'progress.md'),
     `# 进度\n\n- **总体掌握度**：42%\n- **待复习卡片数**：3\n- **最后更新时间**：2026-08-20 10:00\n\n| 概念 | 掌握度 |\n|---|---|\n| 概念1 | 0.4 |\n`,
     'utf8',
   )
-  await mkdir(join(dir, 'history'), { recursive: true })
-  await writeFile(join(dir, 'history', 'session_20260820-100000.jsonl'), '{}' + '\n', 'utf8')
+  await mkdir(join(dir, '.studyclaw', 'history'), { recursive: true })
+  await writeFile(join(dir, '.studyclaw', 'history', 'session_20260820-100000.jsonl'), '{}' + '\n', 'utf8')
   return dir
 }
 interface Harness {

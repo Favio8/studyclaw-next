@@ -59,9 +59,22 @@ export async function courseSourceRoot(courseDir: string): Promise<string> {
   return courseDir
 }
 
-/** Whether the course uses its original project directory as the material root. */
+/**
+ * Whether the course uses its original project directory as the material root.
+ */
 export async function isInplaceCourse(courseDir: string): Promise<boolean> {
   return (await stat(join(courseDir, SOURCE_ROOT_BINDING_NAME)).catch(() => null))?.isFile() ?? false
+}
+
+/**
+ * 状态文件路径（v2 布局优先）：新布局下 syllabus.json / progress.md 等
+ * 收在 `<root>/.studyclaw/` 内；仅当 v2 文件不存在而旧布局根目录文件存在时
+ * 才回退到根目录，保证历史工作区仍可读。
+ */
+export async function resolveStateFile(courseDir: string, name: string): Promise<string> {
+  const v2 = join(courseDir, '.studyclaw', name)
+  if ((await stat(v2).catch(() => null))?.isFile()) return v2
+  return join(courseDir, name)
 }
 
 /**

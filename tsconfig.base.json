@@ -58,6 +58,7 @@
       "@studyclaw/workspace": ["./packages/workspace/workspace/src"],
       "@studyclaw/course-summary": ["./packages/course/summary/src"],
       "@studyclaw/apiproxy": ["./packages/host/apiproxy/src"],
+      "@studyclaw/directory-picker-native": ["./packages/host/directory-picker-native/src"],
       "@studyclaw/tools": ["./packages/tools/tools/src"],
       "@studyclaw/session": ["./packages/session/session/src"],
       "@studyclaw/chat-service": ["./packages/host/chat-service/src"],

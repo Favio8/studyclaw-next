@@ -21,8 +21,19 @@ export interface CourseState {
   readonly concepts: Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; passRate: number }>
 }
 
+/**
+ * 状态文件路径（v2 布局优先）：v2 把 syllabus.json / progress.md 收进
+ * `<root>/.studyclaw/`；仅当 v2 文件不存在而根目录旧文件存在时回退，
+ * 保证历史工作区可读。
+ */
+async function resolveStateFile(courseDir: string, name: string): Promise<string> {
+  const v2 = join(courseDir, '.studyclaw', name)
+  if ((await stat(v2).catch(() => null))?.isFile()) return v2
+  return join(courseDir, name)
+}
+
 export async function loadCourseState(courseDir: string): Promise<CourseState> {
-  const syllabusPath = join(courseDir, 'syllabus.json')
+  const syllabusPath = await resolveStateFile(courseDir, 'syllabus.json')
   let title = courseDir.split(/[\\/]/).pop() ?? courseDir
   let version = ''
   const chapters: CourseState['chapters'] = []
@@ -44,7 +55,7 @@ export async function loadCourseState(courseDir: string): Promise<CourseState> {
     }
   }
   const concepts: CourseState['concepts'] = []
-  const progressText = await readFile(join(courseDir, 'progress.md'), 'utf8').catch(() => '')
+  const progressText = await readFile(await resolveStateFile(courseDir, 'progress.md'), 'utf8').catch(() => '')
   const lines = progressText.split(/\r?\n/)
   let inTable = false
   for (const line of lines) {

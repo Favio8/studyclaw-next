@@ -8,8 +8,9 @@
  */
 
 import { createServer } from 'node:http'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -17,7 +18,9 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import WorkspaceRegistry from '@studyclaw/workspace'
 import { AcpProtocolError, AcpRouter, parseAcpRequest, type AcpHost, type AcpNotification, type AcpRequest, type AcpUpdate } from '@studyclaw/acp'
 import { listCourseSummaries } from '@studyclaw/course-summary'
+import { migrateLegacyLayout } from '@studyclaw/course-builder'
 import { dispatch, type HostServices, type SessionSearchResultView } from '@studyclaw/apiproxy'
+import { pickNativeDirectory } from '@studyclaw/directory-picker-native'
 import {
   activateProvider,
   archiveSession,
@@ -56,30 +59,117 @@ function hostHome(): string {
   return process.env.STUDYCLAW_HOME ?? join(homedir(), '.studyclaw')
 }
 
+interface StartupRegistry {
+  readonly lastOpenedPath: string
+  setLastOpenedPath(path: string): Promise<unknown>
+  resolveByPath(path: string): Promise<unknown>
+  create(path: string, title?: string): Promise<unknown>
+}
+
+interface DirectoryEntry {
+  readonly name: string
+  readonly path: string
+}
+
+interface DirectoryBrowseResult {
+  readonly path: string
+  readonly parent: string | null
+  readonly entries: DirectoryEntry[]
+}
+
+/** Windows system folders that must never surface in the browse picker. */
+const BROWSE_HIDDEN = new Set(['$RECYCLE.BIN', 'System Volume Information', 'Config.Msi', 'Recovery'])
+
 /**
- * Native directory chooser via PowerShell's FolderBrowserDialog (Windows).
- * Non-Windows hosts return `null` (the browser fallback chooser is a M2+
- * concern); a cancel also resolves `null`.
+ * DSH browse-backend pattern: server-side directory listing, one fast RPC per
+ * page. `null` lists the roots (drive letters on Windows, `/` elsewhere).
+ * Unlike the native modal dialog this never blocks a request, so it is safe
+ * behind the dev proxy and needs no interactive desktop.
  */
-async function pickLocalDirectory(): Promise<string | null> {
-  if (process.platform !== 'win32') return null
-  const { execFile } = await import('node:child_process')
-  const { promisify } = await import('node:util')
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms',
-    '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
-    '$d.Description = "选择 StudyClaw 工作区目录"',
-    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $d.SelectedPath }',
-  ].join('; ')
-  const exec = promisify(execFile)
-  // Do not pass PowerShell -WindowStyle Hidden: WinForms owns the dialog from
-  // that window, so hiding it makes the browser request appear to hang.
-  const { stdout } = await exec('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
-    timeout: 120_000,
-    windowsHide: false,
-  })
-  const picked = stdout.trim()
-  return picked === '' ? null : picked
+async function browseLocalDirectory(requested: string | null | undefined): Promise<DirectoryBrowseResult> {
+  const { readdir } = await import('node:fs/promises')
+  if (requested === null || requested === undefined || requested.trim() === '') {
+    if (process.platform !== 'win32') {
+      const entries = (await readdir('/', { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map(entry => ({ name: entry.name, path: join('/', entry.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+      return { path: '', parent: null, entries }
+    }
+    const entries: DirectoryEntry[] = []
+    for (let code = 65; code <= 90; code += 1) {
+      const drive = `${String.fromCharCode(code)}:\\`
+      try {
+        if ((await stat(drive)).isDirectory()) entries.push({ name: drive, path: drive })
+      } catch {
+        // 不存在的盘符跳过。
+      }
+    }
+    return { path: '', parent: null, entries }
+  }
+  const canonical = await realpath(requested.trim())
+  if (!(await stat(canonical)).isDirectory()) throw new Error(`不是目录: ${canonical}`)
+  const children = await readdir(canonical, { withFileTypes: true }).catch(() => [])
+  const entries = children
+    .filter(entry => entry.isDirectory() && !BROWSE_HIDDEN.has(entry.name))
+    .map(entry => ({ name: entry.name, path: join(canonical, entry.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+  const isDriveRoot = /^[A-Za-z]:\\?$/.test(canonical) || canonical === '/'
+  return { path: canonical, parent: isDriveRoot ? null : dirname(canonical), entries }
+}
+
+/**
+ * DSH-style startup hygiene:
+ * 1. Drop a dangling or temp-hosted "current workspace" pointer (e2e harness
+ *    workspaces living under os.tmpdir() are the common culprit) so a fresh
+ *    run boots into the empty first-run state instead of a mock project.
+ * 2. Import legacy `workspaces.json` records (Python-era registry) once, so
+ *    previously opened projects keep appearing in the sidebar without
+ *    re-adoption. Only directories that still exist are imported.
+ */
+async function healStartupRegistry(registry: StartupRegistry): Promise<void> {
+  const last = registry.lastOpenedPath
+  if (last !== '') {
+    let drop = false
+    try {
+      const info = await stat(last)
+      const canonical = await realpath(last)
+      const tmpRoot = await realpath(tmpdir())
+      drop = !info.isDirectory() || canonical.toLowerCase().startsWith(tmpRoot.toLowerCase() + '\\')
+        || canonical.toLowerCase().startsWith(tmpRoot.toLowerCase() + '/')
+    } catch {
+      drop = true
+    }
+    if (drop) {
+      console.warn(`[studyclaw] 启动自愈：lastOpenedPath 指向临时/失效目录（${last}），已清空`)
+      await registry.setLastOpenedPath('')
+    }
+  }
+
+  const legacyPath = join(hostHome(), 'workspaces.json')
+  const raw = await readFile(legacyPath, 'utf8').catch(() => null)
+  if (raw === null) return
+  try {
+    const parsed = JSON.parse(raw) as { items?: Array<{ path?: unknown; name?: unknown }> }
+    const items = Array.isArray(parsed.items) ? parsed.items : []
+    for (const item of items) {
+      const path = typeof item.path === 'string' ? item.path : ''
+      const name = typeof item.name === 'string' ? item.name : undefined
+      if (path === '') continue
+      try {
+        if (await registry.resolveByPath(path) !== undefined) continue
+        await registry.create(path, name)
+        console.log(`[studyclaw] 迁移历史项目记录: ${path}`)
+      } catch {
+        // 目录已不存在的记录跳过（realpath 抛错）。
+      }
+    }
+  } catch {
+    // 损坏的 legacy 文件忽略。
+  }
+  // 一次性导入：完成后改名封存。否则每次重启都会把用户已移除的项目复活。
+  const { rename } = await import('node:fs/promises')
+  await rename(legacyPath, `${legacyPath}.migrated`).catch(() => undefined)
 }
 
 function usage(): void {
@@ -177,12 +267,43 @@ async function serve(port: number): Promise<void> {
   await ctx.plugin(WorkspaceRegistry)
 
   const registry = ctx.workspaceRegistry
+  await healStartupRegistry(registry)
+  if (registry.lastOpenedPath !== '') await migrateLegacyLayout(registry.lastOpenedPath).catch(() => undefined)
   const agentRegistry = new AgentRegistry()
   const agentService = new LearningAgentService(agentRegistry)
   // Rehydrate only durable inbox/interaction work. Idle sessions stay cold
   // until the client explicitly resumes them, matching DSH host startup.
   if (registry.lastOpenedPath !== '') await agentService.recover(registry.lastOpenedPath)
   const acpRequests = new Map<string, AbortController>()
+
+  const configFacts = async (): Promise<import('@studyclaw/chat-service').ResolvedChatConfig | null> =>
+    registry.lastOpenedPath === '' ? null : await loadChatConfig(registry.lastOpenedPath).catch(() => null)
+
+  function wrapCourseService(): HostServices['courseService'] {
+    const activeRoot = (): string => registry.lastOpenedPath
+    const courseService = createCourseService(configFacts)
+    return {
+      syllabus: async courseId => courseService.syllabus(activeRoot(), courseId),
+      setGranularity: async (courseId, granularity) => courseService.setGranularity(activeRoot(), courseId, granularity),
+      progress: async courseId => courseService.progress(activeRoot(), courseId),
+      mastery: async courseId => courseService.mastery(activeRoot(), courseId),
+      quiz: async (courseId, mode, count, conceptId, dueOnly) => courseService.quiz(activeRoot(), courseId, mode, count, conceptId, dueOnly),
+      files: async courseId => courseService.files(activeRoot(), courseId),
+      workspaceFiles: async () => courseService.workspaceFiles(activeRoot()),
+      sync: async (courseId, sessionId) => courseService.sync(activeRoot(), courseId, sessionId),
+      ensureCourse: courseId => courseService.ensureCourse(activeRoot(), courseId),
+      ingestUrl: async (courseId, url, title) => courseService.ingestUrl(activeRoot(), courseId, url, title),
+      createCards: async (courseId, payload) => courseService.createCards(activeRoot(), courseId, payload as { content: string; title?: string | null; conceptId?: string | null; count?: number; sessionId?: string | null }),
+      dynamicCards: async (courseId, payload) => courseService.dynamicCards(activeRoot(), courseId, payload as { taskId: string; misconception: string; content?: string | null; targetId?: string | null; count?: number; sessionId?: string | null }),
+      evalSubmit: (courseId, taskId, answer, sessionId) => courseService.evalSubmit(activeRoot(), courseId, taskId, answer, sessionId),
+      job: jobId => courseService.job(jobId) as Record<string, unknown> | undefined,
+      tools: providerStatus => courseService.tools(providerStatus),
+      heatmap: async weeks => courseService.heatmap(activeRoot(), weeks),
+      heatmapDay: async date => courseService.heatmapDay(activeRoot(), date),
+      createCourse: async (courseName, importPaths) => courseService.createCourse(activeRoot(), courseName, importPaths),
+    }
+  }
+
   const services: HostServices = {
     registry: {
       create: (path, title) => registry.create(path, title),
@@ -197,8 +318,19 @@ async function serve(port: number): Promise<void> {
       },
       getLastOpenedPath: () => registry.lastOpenedPath,
     },
-    courseSummary: root => listCourseSummaries(root),
-    pickDirectory: () => pickLocalDirectory(),
+    courseSummary: async root => {
+      // v2 布局收拢：旧根目录产物一次性搬进 .studyclaw/（marker 守卫，幂等）。
+      await migrateLegacyLayout(root).catch(() => undefined)
+      return listCourseSummaries(root)
+    },
+    // Native OS folder picker. On Windows this spawns a child process that
+    // opens the modern IFileOpenDialog via koffi (the dialog is the child's
+    // first window, so Windows foregrounds it — the PowerShell
+    // FolderBrowserDialog spawned from this background host never surfaced;
+    // see @studyclaw/directory-picker-native). Non-Windows resolves null and
+    // the client falls back to the browse backend.
+    pickDirectory: () => pickNativeDirectory(),
+    browseDirectory: path => browseLocalDirectory(path),
     sessionService: {
       list: courseId => listSessions(registry.lastOpenedPath, courseId),
       search: async (query, limit) => {
@@ -311,32 +443,6 @@ async function serve(port: number): Promise<void> {
       subagent: { available: true, reason: null, installAction: null },
       lsp: { available: false, reason: '当前工作区未启用语言服务器', installAction: '配置 LSP Provider' },
     }),
-  }
-
-  const configFacts = async (): Promise<import('@studyclaw/chat-service').ResolvedChatConfig | null> =>
-    registry.lastOpenedPath === '' ? null : await loadChatConfig(registry.lastOpenedPath).catch(() => null)
-
-  function wrapCourseService(): HostServices['courseService'] {
-    const activeRoot = (): string => registry.lastOpenedPath
-    return {
-      syllabus: async courseId => createCourseService(configFacts).syllabus(activeRoot(), courseId),
-      setGranularity: async (courseId, granularity) => createCourseService(configFacts).setGranularity(activeRoot(), courseId, granularity),
-      progress: async courseId => createCourseService(configFacts).progress(activeRoot(), courseId),
-      mastery: async courseId => createCourseService(configFacts).mastery(activeRoot(), courseId),
-      quiz: async (courseId, mode, count, conceptId, dueOnly) => createCourseService(configFacts).quiz(activeRoot(), courseId, mode, count, conceptId, dueOnly),
-      files: async courseId => createCourseService(configFacts).files(activeRoot(), courseId),
-      workspaceFiles: async () => createCourseService(configFacts).workspaceFiles(activeRoot()),
-      sync: async (courseId, sessionId) => createCourseService(configFacts).sync(activeRoot(), courseId, sessionId),
-      ingestUrl: async (courseId, url, title) => createCourseService(configFacts).ingestUrl(activeRoot(), courseId, url, title),
-      createCards: async (courseId, payload) => createCourseService(configFacts).createCards(activeRoot(), courseId, payload as { content: string; title?: string | null; conceptId?: string | null; count?: number; sessionId?: string | null }),
-      dynamicCards: async (courseId, payload) => createCourseService(configFacts).dynamicCards(activeRoot(), courseId, payload as { taskId: string; misconception: string; content?: string | null; targetId?: string | null; count?: number; sessionId?: string | null }),
-      evalSubmit: (courseId, taskId, answer, sessionId) => createCourseService(configFacts).evalSubmit(activeRoot(), courseId, taskId, answer, sessionId),
-      job: jobId => createCourseService(configFacts).job(jobId) as Record<string, unknown> | undefined,
-      tools: providerStatus => createCourseService(configFacts).tools(providerStatus),
-      heatmap: async weeks => createCourseService(configFacts).heatmap(activeRoot(), weeks),
-      heatmapDay: async date => createCourseService(configFacts).heatmapDay(activeRoot(), date),
-      createCourse: async (courseName, importPaths) => createCourseService(configFacts).createCourse(activeRoot(), courseName, importPaths),
-    }
   }
 
   async function acpCall(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -541,6 +647,7 @@ async function serve(port: number): Promise<void> {
           // Every request must receive a JSON envelope. A native picker or a
           // newly added service can reject outside dispatch; without this
           // boundary catch Next reports a misleading HTTP 500/socket hangup.
+          console.error(`[studyclaw] rpc ${method} 失败:`, error)
           if (response.writableEnded || response.destroyed) return
           const message = error instanceof Error ? error.message : String(error)
           response.writeHead(500)

@@ -82,7 +82,6 @@ function ProviderEditorCard({
   provider,
   entry,
   creating,
-  baseUrlRequired,
   onSave,
   onCancel,
 }: {
@@ -91,8 +90,6 @@ function ProviderEditorCard({
   /** 创建来源的目录条目（预填 + placeholder）；自定义声明为 null。 */
   entry: ProviderCatalogEntry | null;
   creating: boolean;
-  /** 创建时是否强制 Base URL（自定义声明必填；目录条目已预填则不强制）。 */
-  baseUrlRequired: boolean;
   onSave: (profile: EditorProfile, apiKey: string) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -123,11 +120,13 @@ function ProviderEditorCard({
   const capacitiesValid = parsedRows.every(
     (r) => r.context !== "invalid" && r.max !== "invalid",
   );
+  // 写入即校验（DSH write-time refusal）：默认模型与 Base URL 是激活/构建
+  // 的硬前提，两处都空着保存只会产出「保存了却不可用」的配置。
   const canSave =
     idValid &&
     id.length > 0 &&
     model.trim().length > 0 &&
-    (!baseUrlRequired || baseUrl.trim().length > 0) &&
+    baseUrl.trim().length > 0 &&
     rowIdsValid &&
     capacitiesValid;
 
@@ -292,7 +291,7 @@ function ProviderEditorCard({
         </summary>
         <div className="flex flex-col gap-3 px-3 pb-3 pt-1">
           <label className="flex flex-col gap-1.5 text-xs text-text-secondary">
-            Base URL{baseUrlRequired ? "（必填）" : "（可选）"}
+            Base URL（必填）
             <input
               value={baseUrl}
               name={`${uid}_endpoint_value`}
@@ -302,8 +301,8 @@ function ProviderEditorCard({
               autoComplete={fieldAutoComplete}
               {...autofillGuardProps}
             />
-            {baseUrlRequired && baseUrl.trim().length === 0 ? (
-              <span className="text-[11px] text-accent-warn">自定义网关必须填写 Base URL</span>
+            {baseUrl.trim().length === 0 ? (
+              <span className="text-[11px] text-accent-warn">必填：模型端点的 OpenAI 兼容 Base URL</span>
             ) : null}
           </label>
 
@@ -598,6 +597,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   }
 
   async function handleSave(profile: EditorProfile, apiKey: string) {
+    const wasActive = payload?.activeProviderId ?? "";
     let saved = await api.saveProvider(profile);
     if (apiKey) {
       saved = await api.setProviderCredential(profile.id, apiKey);
@@ -606,7 +606,12 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     // 保存后不再对该行重开 setup 姿态（即使仍未贴 Key）。
     setDismissedSetup((current) => new Set([...current, profile.id]));
     closeAllCards();
-    flashStatusBanner(`模型配置已保存（${profile.name || profile.id}）`);
+    const label = profile.name || profile.id;
+    flashStatusBanner(
+      saved.activeProviderId === profile.id && wasActive !== profile.id
+        ? `已保存并激活 ${label}（新对话与课程构建将使用它）`
+        : `模型配置已保存（${label}）`,
+    );
   }
 
   async function handleDelete(id: string) {
@@ -708,7 +713,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
                     provider={provider}
                     entry={null}
                     creating={false}
-                    baseUrlRequired={false}
                     onSave={handleSave}
                     onCancel={() => {
                       setEditingId(null);
@@ -756,7 +760,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
               provider={null}
               entry={selectedEntry}
               creating
-              baseUrlRequired={false}
               onSave={handleSave}
               onCancel={() => setAdding(false)}
             />
@@ -769,7 +772,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           provider={null}
           entry={null}
           creating
-          baseUrlRequired
           onSave={handleSave}
           onCancel={() => setDeclaring(false)}
         />

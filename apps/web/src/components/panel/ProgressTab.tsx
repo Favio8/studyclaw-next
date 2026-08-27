@@ -1,11 +1,13 @@
 "use client";
 
-import { BarChart3, CalendarClock, CircleHelp, ListChecks } from "lucide-react";
+import { BarChart3, CalendarClock, CircleHelp, ListChecks, RefreshCw } from "lucide-react";
 import { masteryTone, pct, relativeTime } from "@/src/lib/format";
 import { useAppStore } from "@/src/store/useAppStore";
+import { refreshPanelData } from "@/src/lib/panelData";
 import {
   LinearProgress,
   PanelEmptyState,
+  PanelErrorState,
   PanelSection,
   PanelSkeleton,
   StatusPill,
@@ -26,6 +28,27 @@ function progressTone(value: number): "neutral" | "focus" | "pass" | "warn" | "f
 
 export default function ProgressTab() {
   const progress = useAppStore((s) => s.progress);
+  const progressError = useAppStore((s) => s.progressError);
+
+  // 与大纲 Tab 的错误态对齐：加载失败给出可重试的错误卡，而不是无限骨架屏。
+  if (!progress && progressError) {
+    return (
+      <PanelErrorState
+        title="学习进度加载失败"
+        description={progressError}
+        action={
+          <button
+            type="button"
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-accent-fail/30 px-2 text-[11px] text-accent-fail transition-colors hover:bg-accent-fail/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+            onClick={() => void refreshPanelData()}
+          >
+            <RefreshCw size={12} strokeWidth={1.8} aria-hidden />
+            重试
+          </button>
+        }
+      />
+    );
+  }
 
   if (!progress) return <PanelSkeleton lines={4} />;
 

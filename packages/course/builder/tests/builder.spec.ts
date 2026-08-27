@@ -53,7 +53,7 @@ describe('CourseBuilder', () => {
     expect(pool.length).toBeGreaterThan(0)
     const syllabus = await loadSyllabus(courseDir)
     expect(syllabus.chapters.length).toBeGreaterThan(0)
-    const progress = await readFile(join(courseDir, 'progress.md'), 'utf8')
+    const progress = await readFile(join(courseDir, '.studyclaw', 'progress.md'), 'utf8')
     expect(progress).toContain('concept_id')
     expect(progress).toContain('重载与覆写')
     await rm(root, { recursive: true, force: true })

@@ -46,11 +46,13 @@ export class SessionStore {
   constructor(readonly historyDir: string) {}
 
   /** Read title/mode metadata emitted by the event-log runtime. */
-  private async eventSummary(sessionId: string): Promise<{ title: string; mode: LearningMode; createdAt: string; archived: boolean } | null> {
+  private async eventSummary(sessionId: string): Promise<{ title: string; mode: LearningMode; createdAt: string; archived: boolean; userNamed: boolean; autoProvenance: 'fallback' | 'llm' | '' } | null> {
     const path = join(this.historyDir, `session_${sessionId}.events.jsonl`)
     const text = await readFile(path, 'utf8').catch(() => null)
     if (text === null) return null
     let title = ''
+    let userNamed = false
+    let autoProvenance: 'fallback' | 'llm' | '' = ''
     let mode: LearningMode = 'socratic'
     let createdAt = ''
     let archived = false
@@ -65,7 +67,16 @@ export class SessionStore {
           if (typeof payload['createdAt'] === 'string' && payload['createdAt'] !== '') createdAt = payload['createdAt']
           if (typeof row.ts === 'string' && row.ts !== '') createdAt = row.ts
         }
-        if (row.type === 'session/rename' && typeof payload['title'] === 'string') title = payload['title'].trim()
+        if (row.type === 'session/rename' && typeof payload['title'] === 'string') {
+          title = payload['title'].trim()
+          userNamed = true
+          autoProvenance = ''
+        }
+        // Automatic titles never override a user rename (DSH pin semantics).
+        if (row.type === 'session/title' && !userNamed && typeof payload['title'] === 'string' && payload['title'].trim() !== '') {
+          title = payload['title'].trim()
+          autoProvenance = payload['provenance'] === 'llm' ? 'llm' : 'fallback'
+        }
         if (row.type === 'session/archive') archived = true
         if (row.type === 'user/input' && title === '') {
           const content = typeof payload['content'] === 'string' ? payload['content'] : ''
@@ -75,7 +86,7 @@ export class SessionStore {
         // A malformed event is ignored here; SessionEventStore validates on replay.
       }
     }
-    return { title, mode, createdAt, archived }
+    return { title, mode, createdAt, archived, userNamed, autoProvenance }
   }
 
   private archivePath(): string {
@@ -188,6 +199,7 @@ export class SessionStore {
       }
       const event = eventSummary ?? await this.eventSummary(id)
       let title = event?.title ?? ''
+      let userNamed = false
       let mode: LearningMode = event?.mode ?? 'socratic'
       let createdAt = info.mtimeMs > 0 ? new Date(info.mtimeMs).toISOString() : ''
       const text = await readFile(join(this.historyDir, name), 'utf8').catch(() => '')
@@ -199,6 +211,13 @@ export class SessionStore {
             mode = row.payload?.['mode'] === 'quick' || row.payload?.['mode'] === 'feynman' || row.payload?.['mode'] === 'debug' ? row.payload['mode'] : 'socratic'
             title = typeof row.payload?.['title'] === 'string' && row.payload['title'] !== '' ? row.payload['title'] : title
             createdAt = row.ts ?? createdAt
+          }
+          if (row.type === 'session/rename' && typeof row.payload?.['title'] === 'string') {
+            title = String(row.payload['title'])
+            userNamed = true
+          }
+          if (row.type === 'session/title' && !userNamed && typeof row.payload?.['title'] === 'string' && row.payload['title'] !== '') {
+            title = String(row.payload['title'])
           }
           if (row.type === 'user/input' && title === '') title = String(row.payload?.['content'] ?? '').slice(0, 20)
         } catch { /* corrupt event rows are validated by SessionEventStore */ }
@@ -360,6 +379,34 @@ export class SessionStore {
     const tmp = path + '.tmp'
     await writeFile(tmp, rows.join('\n'), 'utf8')
     await rename(tmp, path)
+  }
+
+  /**
+   * Append an automatic `session/title` event under DSH semantics: a user
+   * rename (or explicit creation title) pins the title; a `fallback` write
+   * happens at most once; an `llm` write only upgrades an earlier fallback.
+   * Returns whether the event was written.
+   */
+  async applyAutoTitle(sessionId: string, title: string, provenance: 'fallback' | 'llm', route?: { provider: string; model: string }): Promise<boolean> {
+    const trimmed = title.trim()
+    if (trimmed === '') return false
+    const eventsPath = join(this.historyDir, `session_${sessionId}.events.jsonl`)
+    if ((await stat(eventsPath).catch(() => null)) === null) return false
+    const meta = await this.readMeta(sessionId).catch(() => null)
+    if ((meta?.title ?? '') !== '') return false
+    const summary = await this.eventSummary(sessionId).catch(() => null)
+    if (summary !== null) {
+      if (summary.userNamed) return false
+      if (provenance === 'fallback' && summary.title !== '') return false
+      if (provenance === 'llm' && summary.autoProvenance !== 'fallback') return false
+    }
+    const { SessionEventStore } = await import('./events.ts')
+    await new SessionEventStore(this.historyDir).append(sessionId, {
+      ts: utcTs(),
+      type: 'session/title',
+      payload: { title: trimmed, provenance, ...(route === undefined ? {} : { provider: route.provider, model: route.model }) },
+    })
+    return true
   }
 
   /**

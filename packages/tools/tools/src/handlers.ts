@@ -6,7 +6,7 @@
 
 import { mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
-import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef } from './paths.ts'
+import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
 import { ToolRejected } from './result.ts'
 import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
 
@@ -346,10 +346,14 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   const inplace = await isInplaceCourse(ctx.courseDir)
   const matches: Array<{ file: string; line: number; text: string }> = []
   let filesScanned = 0
+  let skippedOversize = 0
+  // 二进制/富文档无法按行 utf8 grep，静默读会产生乱码匹配；显式跳过并上报。
+  const BINARY_SOURCE_RE = /\.(pdf|docx?|pptx?|xlsx?|rtf|odt)$/i
   for await (const path of iterSourceFiles(root)) {
     const parts = relative(root, path).split(/[\\/]/)
     if (inplace && parts.some(part => INPLACE_SOURCE_EXCLUDED_DIRS.has(part))) continue
-    if ((await stat(path)).size > MAX_FILE_BYTES) continue
+    if ((await stat(path)).size > MAX_FILE_BYTES) { skippedOversize += 1; continue }
+    if (BINARY_SOURCE_RE.test(path)) { skippedOversize += 1; continue }
     let text: string
     try {
       text = await readFile(path, 'utf8')
@@ -367,7 +371,8 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   }
   const truncated = matches.length >= maxResults
   const total = matches.length
-  return [`关键词 ${query}：${total} 处匹配（扫描 ${filesScanned} 个文件）`, { matches, filesScanned, totalMatches: total, truncated }]
+  const skippedNote = skippedOversize > 0 ? `；另有 ${skippedOversize} 个 PDF/超大文件未纳入检索` : ''
+  return [`关键词 ${query}：${total} 处匹配（扫描 ${filesScanned} 个文件${skippedNote}）`, { matches, filesScanned, totalMatches: total, truncated, skippedOversize }]
 }
 
 /** progress.md concept rows: `| id | name | chapter | mastery | ... |`. */
@@ -403,7 +408,7 @@ function parseProgressTable(text: string): Array<{ conceptId: string; name: stri
 
 /** `get_course_state`: syllabus + mastery board + due/weak summary. */
 export async function handlerGetCourseState(ctx: ToolContext, _args: Record<string, unknown>): Promise<[string, Record<string, unknown>]> {
-  const syllabusPath = join(ctx.courseDir, 'syllabus.json')
+  const syllabusPath = await resolveStateFile(ctx.courseDir, 'syllabus.json')
   let title = ctx.courseDir.split(/[\\/]/).pop() ?? ctx.courseDir
   let version = ''
   const chapters: Array<{ id: string; title: string; concepts: Array<{ id: string; name: string }> }> = []
@@ -420,7 +425,7 @@ export async function handlerGetCourseState(ctx: ToolContext, _args: Record<stri
       // Corrupt syllabus: title falls back to the directory name.
     }
   }
-  const progressText = await readFile(join(ctx.courseDir, 'progress.md'), 'utf8').catch(() => '')
+  const progressText = await readFile(await resolveStateFile(ctx.courseDir, 'progress.md'), 'utf8').catch(() => '')
   const concepts = parseProgressTable(progressText)
   const mastery = Object.fromEntries(concepts.map(c => [c.conceptId, c.mastery]))
   const today = new Date().toISOString().slice(0, 10)

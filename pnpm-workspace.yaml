@@ -4,4 +4,5 @@ packages:
   - apps/*
 allowBuilds:
   esbuild: true
+  koffi: set this to true or false
 linkWorkspacePackages: true

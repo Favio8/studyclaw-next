@@ -1,22 +1,22 @@
-{
-  "name": "@studyclaw/session",
-  "version": "0.1.0",
-  "description": "StudyClaw session domain: JSONL store, stream splitters, context assembly, and the four-mode tutor chat loop (ported from Python core/session.py)",
-  "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./src/*": "./src/*",
-    "./package.json": "./package.json"
-  },
-  "dependencies": {
-    "@studyclaw/tools": "workspace:^",
-    "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@studyclaw/tools": "workspace:^"
-  }
+﻿{
+    "name":  "@studyclaw/session",
+    "version":  "0.1.0",
+    "description":  "StudyClaw session domain: JSONL store, stream splitters, context assembly, and the four-mode tutor chat loop (ported from Python core/session.py)",
+    "license":  "MIT",
+    "type":  "module",
+    "exports":  {
+                    ".":  {
+                              "types":  "./lib/types/index.d.ts",
+                              "default":  "./lib/types/index.js"
+                          },
+                    "./src/*":  "./src/*",
+                    "./package.json":  "./package.json"
+                },
+    "dependencies":  {
+                         "@studyclaw/tools":  "workspace:^",
+                         "zod":  "^4.4.3"
+                     },
+    "devDependencies":  {
+                            "@studyclaw/tools":  "workspace:^"
+                        }
 }

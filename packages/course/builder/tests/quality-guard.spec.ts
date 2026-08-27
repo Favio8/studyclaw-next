@@ -53,6 +53,14 @@ describe('checkSyllabusQuality', () => {
     expect(codes).toContain('duplicate-name')
   })
 
+  it('does not flag legitimate English concept names (label rejection needs fence context)', () => {
+    const syllabus = makeSyllabus({
+      concepts: [{ id: 'c1', name: 'Response', type: 'mechanism', prerequisites: [], masteryScore: 0 }],
+    })
+    const codes = checkSyllabusQuality(syllabus).map((issue) => issue.code)
+    expect(codes).not.toContain('latin-label-name')
+  })
+
   it('flags empty chapters and oversized syllabus shape', () => {
     const many = Array.from({ length: 11 }, (_, i) => ({ id: `ch-${i}`, title: `章 ${i}`, description: '', dependencies: [] }))
     const syllabus: Syllabus = {

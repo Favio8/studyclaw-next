@@ -199,7 +199,7 @@ describe('CourseBuilder dependency inference integration', () => {
     const builder = new CourseBuilder(courseDir, new FakeGenerator(), inferrer)
     const report = await builder.build(1)
     expect(report.degraded).toContain('dependencies')
-    const raw = await readFile(join(courseDir, 'syllabus.json'), 'utf8')
+    const raw = await readFile(join(courseDir, '.studyclaw', 'syllabus.json'), 'utf8')
     expect(raw).toContain('"prerequisites": []')
     await rm(root, { recursive: true, force: true })
   })

@@ -100,12 +100,12 @@ describe('settings domain', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it('deleteProvider removes the record, credential, and falls back the active pointer', async () => {
+  it('deleteProvider removes the record, credential, and clears the active pointer (no phantom route)', async () => {
     const { root, ws } = await setup()
     await setCredential(ws, 'mock', 'sk-test-123')
     const payload = await deleteProvider(ws, 'mock')
     expect(payload.providers).toHaveLength(0)
-    expect(payload.activeProviderId).toBe('deepseek')
+    expect(payload.activeProviderId).toBe('')
     const creds = JSON.parse(await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')) as Record<string, string>
     expect(creds['MOCK_API_KEY']).toBeUndefined()
     await rm(root, { recursive: true, force: true })

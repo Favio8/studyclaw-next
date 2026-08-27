@@ -12,13 +12,13 @@
   },
   "sideEffects": false,
   "type": "module",
-  "main": "lib/index.js",
+  "main": "lib/types/index.js",
   "types": "lib/types/index.d.ts",
   "bin": "bin.js",
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
+      "default": "./lib/types/index.js"
     },
     "./src/*": "./src/*",
     "./package.json": "./package.json"

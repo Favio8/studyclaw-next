@@ -302,9 +302,15 @@ export async function discoverModels(input: { baseUrl: string; apiKey?: string |
   }
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (apiKey !== null && apiKey !== '') headers['Authorization'] = `Bearer ${apiKey}`
-  const response = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(5000) })
+  let response: Response
+  try {
+    response = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(5000) })
+  } catch {
+    throw new Error(`无法连接 ${base}/models（请检查 Base URL 与网络）`)
+  }
   if (!response.ok) {
-    throw new Error(`端点返回 HTTP ${response.status}`)
+    const hint = response.status === 401 || response.status === 403 ? '，请检查 API Key 是否正确' : ''
+    throw new Error(`端点返回 HTTP ${response.status}${hint}`)
   }
   return parseModelsPayload(await response.json())
 }
@@ -369,7 +375,16 @@ export async function saveProvider(workspaceRoot: string, input: {
       })),
     } : {}),
   }
-  await writeConfig(workspaceRoot, { ...config, providers })
+  let nextConfig: ConfigYaml = { ...config, providers }
+  // DSH write-time posture: a saved provider the reader can never resolve is
+  // the top misconfiguration, so the first serviceable save auto-activates
+  // (the reader only consults `active_provider` / `llm.provider`).
+  const active = activeProviderId(nextConfig)
+  const saved = providers[id]
+  if ((active === '' || providers[active] === undefined) && saved.model !== '' && (saved.base_url ?? '') !== '') {
+    nextConfig = { ...nextConfig, active_provider: id, llm: { ...nextConfig.llm, provider: id } }
+  }
+  await writeConfig(workspaceRoot, nextConfig)
   return settingsPayload(workspaceRoot)
 }
 
@@ -385,14 +400,14 @@ export async function deleteProvider(workspaceRoot: string, providerId: string):
   }
   const providers = { ...(config.providers ?? {}) }
   delete providers[providerId]
-  // The active pointer may be the explicit field or the llm-segment synthesis
-  // (Python parity: removing the active provider falls back to the first
-  // remaining provider, or to the legacy 'deepseek' route when none remain).
+  // The active pointer may be the explicit field or the llm-segment synthesis.
+  // Removing the active provider falls back to the first remaining provider;
+  // an empty pointer keeps the reader's first-entry fallback meaningful (no
+  // phantom 'deepseek' route that no profile backs).
   const active = config.active_provider ?? config.llm?.provider ?? ''
   if (active === providerId) {
-    const remaining = Object.keys(providers)
-    const fallback = remaining[0] ?? 'deepseek'
-    const nextConfig: ConfigYaml = { ...config, providers, active_provider: fallback }
+    const fallback = Object.keys(providers)[0] ?? ''
+    const nextConfig: ConfigYaml = { ...config, providers, active_provider: fallback, llm: { ...config.llm, provider: fallback } }
     await writeConfig(workspaceRoot, nextConfig)
     return settingsPayload(workspaceRoot)
   }
@@ -405,7 +420,12 @@ export async function activateProvider(workspaceRoot: string, providerId: string
   const config = await readConfig(workspaceRoot)
   const provider = config.providers?.[providerId]
   if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
-  await writeConfig(workspaceRoot, { ...config, active_provider: providerId })
+  // DSH write-time refusal: activation is what makes build/default chat use
+  // the profile, so refuse unserviceable ones with the missing field named.
+  const label = provider.name ?? providerId
+  if ((provider.model ?? '') === '') throw new Error(`供应商 ${label} 未设置默认模型，激活前请在编辑器中选择`)
+  if ((provider.base_url ?? '') === '') throw new Error(`供应商 ${label} 缺少 Base URL，激活前请在编辑器中补全`)
+  await writeConfig(workspaceRoot, { ...config, active_provider: providerId, llm: { ...config.llm, provider: providerId } })
   return settingsPayload(workspaceRoot)
 }
 

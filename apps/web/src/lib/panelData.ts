@@ -22,8 +22,17 @@ export async function refreshPanelData(): Promise<void> {
     api.mastery(activeCourseId),
     api.heatmap(12),
   ]);
+  // 进度一路失败必须显式落错（否则 ProgressTab 只有骨架屏可渲染，
+  // 出现「大纲正常、进度永远转圈」的割裂画面）。
+  const progressError =
+    progress.status === "fulfilled"
+      ? null
+      : progress.reason instanceof Error
+        ? progress.reason.message
+        : String(progress.reason);
   useAppStore.getState().setPanelData({
     progress: progress.status === "fulfilled" ? progress.value : null,
+    progressError,
     mastery: mastery.status === "fulfilled" ? mastery.value : null,
     heatmap: heatmap.status === "fulfilled" ? heatmap.value : null,
   });

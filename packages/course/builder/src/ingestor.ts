@@ -477,6 +477,14 @@ export class MarkdownIngestor {
 
     for (const para of paragraphs) {
       const paraLen = para[2].length
+      // F-17：超长单段硬拆——PDF 表格转出的数万字单段此前原样入块直灌 prompt。
+      if (paraLen > this.maxChunkChars) {
+        if (bufParts.length > 0) flush()
+        const [subChunks, nextSeq] = splitOversizedParagraph(para, section, sourceName, conceptId, chapterId, chunkSeq, this.maxChunkChars)
+        chunks.push(...subChunks)
+        chunkSeq = nextSeq
+        continue
+      }
       if (bufParts.length > 0 && bufLen + paraLen > this.maxChunkChars) {
         flush()
         bufParts = []
@@ -488,6 +496,53 @@ export class MarkdownIngestor {
     flush()
     return [chunks, chunkSeq]
   }
+}
+
+/** F-17：把超长段落按标点/换行就近切成 ≤maxChars 的伪段并各自成块。 */
+function splitOversizedParagraph(
+  para: [number, number, string],
+  section: SectionDraft,
+  sourceName: string,
+  conceptId: string,
+  chapterId: string,
+  seqStart: number,
+  maxChars: number,
+): [ConceptChunk[], number] {
+  const text = para[2]
+  const breakAfter = new Set(['。', '！', '？', '；', '\n', '.', '!', '?', ';'])
+  const pieces: Array<{ start: number; end: number; text: string }> = []
+  let cursor = 0
+  let localCut = 0
+  while (cursor < text.length) {
+    let end = Math.min(cursor + maxChars, text.length)
+    if (end < text.length) {
+      // 在窗口后半段找最近的句读点回退切分，避免概念句被拦腰截断。
+      const window = text.slice(cursor, end)
+      for (let back = window.length - 1; back >= Math.floor(window.length / 2); back -= 1) {
+        if (breakAfter.has(window[back]!)) { localCut = back + 1; break }
+      }
+      if (localCut > 0 && cursor + localCut < text.length) end = cursor + localCut
+    }
+    const pieceText = text.slice(cursor, end)
+    if (pieceText.trim() !== '') pieces.push({ start: cursor, end, text: pieceText })
+    cursor = end
+    localCut = 0
+  }
+
+  const chunks: ConceptChunk[] = []
+  let chunkSeq = seqStart
+  for (const piece of pieces) {
+    chunkSeq += 1
+    chunks.push(conceptChunk.parse({
+      chunk_id: `chunk_${String(chunkSeq).padStart(3, '0')}`,
+      chapter_id: chapterId,
+      concept_id: conceptId,
+      title: section.title,
+      content: piece.text,
+      source_ref: { file: sourceName, chunk_id: `chunk_${String(chunkSeq).padStart(3, '0')}`, line_range: [para[0], para[1]] },
+    }))
+  }
+  return [chunks, chunkSeq]
 }
 
 function firstH1(headings: Heading[]): string | null {

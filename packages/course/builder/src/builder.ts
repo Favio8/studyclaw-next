@@ -201,6 +201,23 @@ function bumpPatch(version: string): string {
   return parts.join('.')
 }
 
+/** PERF-1：有界并发池——按 limit 起固定数量的 worker 顺序认领队列项，
+ * 结果按下标回填，顺序与输入一致；失败向上冒泡（与旧串行行为一致）。 */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const width = Math.max(1, Math.min(Math.floor(limit), items.length))
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.max(width, items.length === 0 ? 0 : 1) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await worker(items[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 /**
  * One course's incremental build orchestrator. `generator` is injected so
  * tests can run offline; the host wires the LLM-backed generator.
@@ -224,7 +241,7 @@ export class CourseBuilder {
     return this.sourceRoot ?? join(this.courseDir, 'sources')
   }
 
-  async build(tasksPerChunk = 2, onProgress?: (finished: number, total: number, currentFile: string) => void, granularity?: 'fine' | 'coarse'): Promise<BuildReport> {
+  async build(tasksPerChunk = 2, onProgress?: (finished: number, total: number, currentFile: string) => void, granularity?: 'fine' | 'coarse', maxConcurrency = 4): Promise<BuildReport> {
     if (granularity !== undefined && granularity !== this.granularity) {
       // Granularity override is handled by callers (regenerateSyllabus); the
       // build path keeps the constructor default, matching Python's F7 scope.
@@ -267,6 +284,11 @@ export class CourseBuilder {
     await this.updateTaskPool([...report.added, ...report.modified], report)
     const artifacts: IngestArtifact[] = []
     const changedFiles = [...report.added, ...report.modified]
+    // PERF-1 重构：摄取（本地解析，快）保持按文件串行；LLM 生成（慢）
+    // 扁平化为 chunk 粒度的任务队列后按 max_concurrency 有界并行消费——
+    // 旧实现双层全串行，56 chunk × ~10s 就是分钟级空白等待。
+    interface GenerateUnit { readonly file: string; readonly chunk: IngestArtifact['chunks'][number] }
+    const generatePlan: GenerateUnit[] = []
     for (let index = 0; index < changedFiles.length; index += 1) {
       const name = changedFiles[index]!
       if (onProgress !== undefined) onProgress(index, changedFiles.length, name)
@@ -292,9 +314,24 @@ export class CourseBuilder {
         source_file: name,
         chunks: artifact.chunks.map(chunk => ({ ...chunk, source_ref: { ...chunk.source_ref, file: name } })),
       }
+      // F-17：空/纯文本文档零章节不再静默成功——标入 degraded 显式告警。
+      if (normalized.chunks.length === 0) {
+        report.degraded.push(`${name}（未解析出任何概念块）`)
+        continue
+      }
       artifacts.push(normalized)
-      report.tasksGenerated += await this.generateFor(normalized, tasksPerChunk)
+      for (const chunk of normalized.chunks) {
+        if (chunk.concept_id !== '') generatePlan.push({ file: name, chunk })
+      }
     }
+    const generatedAll: HarnessTask[] = []
+    let finished = 0
+    await mapWithConcurrency(generatePlan, maxConcurrency, async unit => {
+      generatedAll.push(...await this.generator.generateTasks(unit.chunk, tasksPerChunk))
+      finished += 1
+      if (onProgress !== undefined) onProgress(finished, generatePlan.length, `${unit.file} · ${unit.chunk.title}`)
+    })
+    report.tasksGenerated = await this.mergeTasks(generatedAll)
     if (onProgress !== undefined) onProgress(changedFiles.length, changedFiles.length, '')
 
     await this.mergeSyllabus(artifacts, report)
@@ -342,16 +379,6 @@ export class CourseBuilder {
       report.version = existing.version
     }
     return report
-  }
-
-  private async generateFor(artifact: IngestArtifact, tasksPerChunk: number): Promise<number> {
-    const chunks = artifact.chunks.filter(chunk => chunk.concept_id !== '')
-    if (chunks.length === 0) return 0
-    const generated: HarnessTask[] = []
-    for (const chunk of chunks) {
-      generated.push(...await this.generator.generateTasks(chunk, tasksPerChunk))
-    }
-    return this.mergeTasks(generated)
   }
 
   private async mergeTasks(generated: HarnessTask[]): Promise<number> {

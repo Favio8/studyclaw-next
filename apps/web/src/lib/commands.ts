@@ -65,7 +65,11 @@ export async function runCommand(command: string): Promise<CommandResult> {
         // 带上当前会话：让构建沿用会话内已选的 provider/model（模型座位显示
         // 的那条路由），而不是退回激活供应商的默认模型。
         const res = await api.sync(courseId, store.activeSessionId);
-        const done = res.buildJobId ? await pollJob(res.buildJobId) : "ok";
+        const done = res.buildJobId
+          ? await pollJob(res.buildJobId, (msg) => {
+              useAppStore.getState().flashStatusBanner(`BUILD // ${msg}`);
+            })
+          : "ok";
         await Promise.all([refreshPanelData(), refreshCourseList()]);
         return {
           handled: true,
@@ -122,13 +126,27 @@ export async function runCommand(command: string): Promise<CommandResult> {
   }
 }
 
-async function pollJob(jobId: string): Promise<string> {
+async function pollJob(
+  jobId: string,
+  onProgress?: (msg: string) => void,
+): Promise<string> {
   // 真实课程的 build 要跑多轮 LLM 出题（分钟级），60 秒的旧上限会在后端
   // 仍在正常推进时误报「build 超时」；与新建向导对齐放宽到 30 分钟。
+  // F-7/PERF-8：消费后端 job.progress，前端不再只看到"正在构建…"黑盒。
+  let lastProgress = "";
   for (let i = 0; i < 4500; i += 1) {
     const job = await api.job(jobId);
     if (job.status === "done") return `${job.result?.tasksGenerated ?? 0} 张新卡`;
     if (job.status === "failed") throw new Error(job.error ?? "build 失败");
+    const p = job.progress;
+    if (onProgress !== undefined && p !== undefined && p.total > 0 && p.finished < p.total) {
+      const file = p.currentFile ? `（${p.currentFile}）` : "";
+      const msg = `正在生成概念卡 ${p.finished}/${p.total}${file}`;
+      if (msg !== lastProgress) {
+        lastProgress = msg;
+        onProgress(msg);
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
   throw new Error("build 超时（30 分钟仍未完成）");

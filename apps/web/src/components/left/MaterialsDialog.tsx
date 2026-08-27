@@ -42,6 +42,8 @@ async function awaitBuild(
   report: (msg: string) => void,
 ): Promise<void> {
   try {
+    // F-7/PERF-8：消费 job.progress 展示"N/M 当前文件"，30 分钟不再黑盒。
+    let lastProgress = "";
     for (let attempt = 0; attempt < 3600; attempt += 1) {
       const job = await api.job(jobId);
       if (job.status === "done") {
@@ -51,6 +53,15 @@ async function awaitBuild(
       if (job.status === "failed") {
         report(`✗ 构建失败：${job.error ?? "未知错误"}`);
         return;
+      }
+      const p = job.progress;
+      if (p !== undefined && p.total > 0 && p.finished < p.total) {
+        const file = p.currentFile ? `（${p.currentFile}）` : "";
+        const msg = `构建中… ${p.finished}/${p.total}${file}`;
+        if (msg !== lastProgress) {
+          lastProgress = msg;
+          report(msg);
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }

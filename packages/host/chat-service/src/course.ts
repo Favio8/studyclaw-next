@@ -196,9 +196,12 @@ export class JobManager {
     try {
       const generator = requireGenerator(ctx)
       const builder = projectBuilder(courseDir, generator, inferrerOf(ctx))
+      // PERF-1：config.yaml 的 max_concurrency 终于被真正消费——旧链路解析
+      // 后无任何并行消费点，builder 双层串行。
+      const concurrency = Math.max(1, Math.min(8, ctx.config?.maxConcurrency ?? 4))
       const report = await builder.build(2, (finished, total, currentFile) => {
         job.progress = { total, finished, currentFile: currentFile || null }
-      })
+      }, undefined, concurrency)
       job.progress = { total: report.added.length + report.modified.length, finished: report.added.length + report.modified.length, currentFile: null }
       job.result = { syllabusVersion: report.version, tasksGenerated: report.tasksGenerated }
       job.status = 'done'

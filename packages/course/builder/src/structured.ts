@@ -17,6 +17,16 @@ export interface StructuredCallClient {
 
 const EMIT_TOOL = '_emit_structured'
 
+/** PERF-2：重试退避参数——失败后立即打回去只会加剧 429/限流。 */
+const RETRY_INITIAL_DELAY_MS = 500
+const RETRY_MAX_DELAY_MS = 8_000
+
+async function retryBackoffDelay(attempt: number): Promise<void> {
+  const exponential = Math.min(RETRY_MAX_DELAY_MS, RETRY_INITIAL_DELAY_MS * 2 ** attempt)
+  const jitter = Math.round(exponential * (0.8 + Math.random() * 0.4))
+  await new Promise(resolve => setTimeout(resolve, jitter))
+}
+
 /** Extract a JSON object from model text (fenced or bare, Python parity). */
 export function extractJsonObject(text: string): unknown {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/g.exec(text)
@@ -62,6 +72,7 @@ export async function structuredCall<S extends z.ZodType>(
   const tools = [...(options.tools ?? []), toolSchema]
   let feedback = ''
   for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    if (attempt > 0) await retryBackoffDelay(attempt - 1)
     const system = `${options.system ?? ''}\n\n只允许调用 ${EMIT_TOOL} 工具输出结果，不要输出解释文字。${feedback !== '' ? `\n\n上一次失败原因：${feedback}` : ''}`
     try {
       const raw = await callOnce(client, { ...options, system, tools })

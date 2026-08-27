@@ -10,10 +10,33 @@ export const TASK_GENERATOR_SYSTEM = `你是 StudyClaw 的 Harness 出题引擎�
 2. evaluation_criteria.rubric 必须给出 2~4 条**互斥**的采分点，每条是一个可独立二元判定（Hit/Miss）的逻辑要点，禁止互相蕴含或重复；
 3. evaluation_criteria.keywords 提供判题辅助关键词与典型反例线索；
 4. difficulty 为 1~5 整数，与题卡思维层级匹配；
-5. 题干必须锚定切片内容，禁止虚构切片之外的事实；选择题必须给出 options（2~6 个选项，不含答案标记）；
-6. 只输出符合给定 Schema 的结构化 JSON，不输出任何解释文字。`
+5. 题干必须锚定切片内容，禁止虚构切片之外的事实；
+6. 选择题必须给出恰好 4 个 options，并标注 answer_index（正确选项下标，0 起始）；选项硬性要求：
+   - 每个选项 ≤60 字、单句陈述；最长与最短选项的字数差不超过 1.5 倍（禁止"正确项最长"）；
+   - 干扰项与正确项同构同域，仅在**一个**关键限定/方向/边界上不同（单点错误），禁止明显荒谬的凑数项；
+   - answer_index 在同一批内轮换位置，禁止连续落在同一位；
+7. 只输出符合给定 Schema 的结构化 JSON，不输出任何解释文字。`
 
-export function taskGeneratorUser(title: string, content: string, count: number, feedback = ''): string {
+export interface TaskGenerationTarget {
+  type: 'concept' | 'scenario' | 'debug_edge'
+  difficulty: number
+  answerPosition: number
+}
+
+export function taskGeneratorUser(
+  title: string,
+  content: string,
+  count: number,
+  feedback = '',
+  targets?: TaskGenerationTarget[],
+): string {
+  const targetLines = targets === undefined || targets.length === 0
+    ? [`请基于上述切片生成 ${count} 张验证题卡，尽量覆盖不同的 type 层级与难度梯度。`]
+    : [
+      `请基于上述切片生成 ${count} 张验证题卡，逐张按以下规格生成（type/difficulty/answer_index 必须严格采用指定值）：`,
+      ...targets.map((target, index) =>
+        `- 第 ${index + 1} 张：type=${target.type}，difficulty=${target.difficulty}，answer_index=${target.answerPosition}`),
+    ]
   return [
     '## 知识切片',
     `- 标题：${title}`,
@@ -21,7 +44,7 @@ export function taskGeneratorUser(title: string, content: string, count: number,
     content,
     '',
     '## 任务',
-    `请基于上述切片生成 ${count} 张验证题卡，尽量覆盖不同的 type 层级与难度梯度。`,
+    ...targetLines,
     feedback === '' ? '' : feedback,
   ].join('\n')
 }

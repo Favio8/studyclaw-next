@@ -451,23 +451,51 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null) {
       const dir = await requireCourse(workspaceRoot, courseId)
-      const config = requireConfig(await configForSession(workspaceRoot, courseId, sessionId, await getConfig()))
       const pool = await loadTaskPool(dir)
       const task = pool.find(candidate => candidate.task_id === taskId)
       if (task === undefined) throw new Error(`题卡不存在: ${taskId}`)
       yield { event: 'scan', data: { phase: 'rubric' } }
-      // A 档提速：判题走独立路由——专用模型（缺省跟随主模型）、思考缺省
-      // 关闭（判题是二元命中判定，思维链是纯等待）、输出预算收紧。用户可
-      // 用 config.yaml 的 llm.judge_model / llm.judge_reasoning_effort 覆写。
-      const judgeModel = config.judgeModel ?? config.model
-      const judgeEffort = config.judgeEffort ?? 'off'
-      const judgeClient = createDeepSeekToolClient({ ...config, model: judgeModel, reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096 })
-      const evaluator = new RubricEvaluator(judgeClient, {
-        model: judgeModel, provider: config.providerId || 'studyclaw', temperature: config.temperature,
-        reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096,
-      })
-      const memory = await readGlobalMemory(workspaceRoot)
-      const result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
+      // MCQ 快速判分（答案键全有全无，零 LLM）：带 answer_index 的选择题在
+      // 本地毫秒级判完；旧卡与开放题回落 LLM rubric 判分（A 档提速路径）。
+      const answerKeyActive = Array.isArray(task.options)
+        && task.options.length > 0
+        && task.answer_index !== null && task.answer_index !== undefined
+      let result: { score: number; passed: boolean; rubricHits: Record<string, boolean>; feedback: string; misconceptions: string[] }
+      let gradedBy: 'answer_key' | 'rubric'
+      if (answerKeyActive) {
+        const options = task.options ?? []
+        const correctText = options[task.answer_index!] ?? ''
+        const correct = answer === correctText
+        const rationale = task.answer_rationale ?? ''
+        result = {
+          score: correct ? 1 : 0,
+          passed: correct,
+          rubricHits: Object.fromEntries((task.evaluation_criteria.rubric).map(criterion => [criterion, correct])),
+          feedback: correct
+            ? (rationale !== '' ? `回答正确。${rationale}` : '回答正确：四个采分点全部命中。')
+            : (rationale !== ''
+                ? `正确答案：${correctText}。${rationale}`
+                : `正确答案：${correctText}。请对照评分要点，把闭环缺失的环节补进你的理解。`),
+          misconceptions: [],
+        }
+        gradedBy = 'answer_key'
+      } else {
+        // A 档提速：判题走独立路由——专用模型（缺省跟随主模型）、思考缺省
+        // 关闭（判题是二元命中判定，思维链是纯等待）、输出预算收紧。用户可
+        // 用 config.yaml 的 llm.judge_model / llm.judge_reasoning_effort 覆写。
+        // （答案键路径不依赖任何模型配置，未配置 provider 也能判 MCQ。）
+        const config = requireConfig(await configForSession(workspaceRoot, courseId, sessionId, await getConfig()))
+        const judgeModel = config.judgeModel ?? config.model
+        const judgeEffort = config.judgeEffort ?? 'off'
+        const judgeClient = createDeepSeekToolClient({ ...config, model: judgeModel, reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096 })
+        const evaluator = new RubricEvaluator(judgeClient, {
+          model: judgeModel, provider: config.providerId || 'studyclaw', temperature: config.temperature,
+          reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096,
+        })
+        const memory = await readGlobalMemory(workspaceRoot)
+        result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
+        gradedBy = 'rubric'
+      }
       for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
         yield { event: 'rubric', data: { index, criterion, hit } }
       }
@@ -524,6 +552,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
                 passed: result.passed,
                 rubric_hits: result.rubricHits,
                 misconceptions: result.misconceptions,
+                graded_by: gradedBy,
               },
             })
           } catch (error) {

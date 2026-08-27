@@ -268,6 +268,9 @@ export interface QuizTaskView {
   difficulty: number;
   question: string;
   options: string[] | null;
+  /** MCQ 答案键（0 起始）；旧卡为 null → 服务端 rubric 判分。 */
+  answerIndex: number | null;
+  answerRationale: string | null;
 }
 
 export interface HeatmapDay {

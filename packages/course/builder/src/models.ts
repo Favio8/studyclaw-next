@@ -91,6 +91,10 @@ export const harnessTask = z.object({
   difficulty: z.number().int().min(1).max(5),
   question: z.string(),
   options: z.array(z.string()).nullable().default(null),
+  /** MCQ 标准答案键（0 起始下标）。存量旧卡为 null → 判分回落 rubric 路径。 */
+  answer_index: z.number().int().min(0).nullable().default(null),
+  /** 一句话解析：答错时的讲解兜底（可空）。 */
+  answer_rationale: z.string().nullable().default(null),
   evaluation_criteria: evaluationCriteria,
   history: taskHistory,
   deprecated: z.boolean().default(false),
@@ -105,7 +109,20 @@ export const generatedTask = z.object({
   difficulty: z.number().int().min(1).max(5),
   question: z.string(),
   options: z.array(z.string()).nullable().default(null),
+  answer_index: z.number().int().min(0).nullable().default(null),
+  answer_rationale: z.string().nullable().default(null),
   evaluation_criteria: evaluationCriteria,
+}).superRefine((task, ctx) => {
+  // 选择题必须携带合法答案键——缺失/越界在生成期即报错，走语义重试纠偏。
+  if (Array.isArray(task.options) && task.options.length > 0) {
+    if (task.answer_index === null || task.answer_index >= task.options.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `选择题必须给出 answer_index（0~${task.options.length - 1}）`,
+        path: ['answer_index'],
+      })
+    }
+  }
 })
 export type GeneratedTask = z.infer<typeof generatedTask>
 

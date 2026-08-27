@@ -7,12 +7,40 @@
 
 import { z } from 'zod'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { generatedTaskBatch, type HarnessTask, type IngestArtifact } from './models.ts'
+import { generatedTaskBatch, type GeneratedTask, type HarnessTask, type IngestArtifact } from './models.ts'
+import { taskGeneratorUser, TASK_GENERATOR_SYSTEM, type TaskGenerationTarget } from './prompts.ts'
 import { structuredCall, type StructuredCallClient } from './structured.ts'
-import { TASK_GENERATOR_SYSTEM, taskGeneratorUser } from './prompts.ts'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 export const DEFAULT_MAX_RETRIES = 3
+
+/**
+ * 批内显式规格轮换（题卡质量 A 档）：修复"每批两张固定一易一难 → 全池难度
+ * 只有 2/4"与"正确项位置连续同位"两个病灶。计数器按生成进程推进。
+ */
+const TYPE_WHEEL: Array<GeneratedTask['type']> = ['concept', 'scenario', 'debug_edge']
+const DIFFICULTY_WHEEL = [1, 3, 5, 2, 4]
+const ANSWER_POSITION_WHEEL = [0, 2, 1, 3]
+
+let generationCounter = 0
+
+export interface GenerationTarget {
+  type: 'concept' | 'scenario' | 'debug_edge'
+  difficulty: number
+  answerPosition: number
+}
+
+/** 为一批 count 张卡计算显式生成规格。 */
+export function generationTargets(count: number, offset = generationCounter): TaskGenerationTarget[] {
+  return Array.from({ length: count }, (_unused, index) => {
+    const slot = offset + index
+    return {
+      type: TYPE_WHEEL[slot % TYPE_WHEEL.length]!,
+      difficulty: DIFFICULTY_WHEEL[slot % DIFFICULTY_WHEEL.length]!,
+      answerPosition: ANSWER_POSITION_WHEEL[slot % ANSWER_POSITION_WHEEL.length]!,
+    }
+  })
+}
 
 export class TaskGenerationError extends Error {
   constructor(message: string) {
@@ -36,12 +64,14 @@ export class LlmTaskGenerator {
   ) {}
 
   async generateTasks(chunk: IngestArtifact['chunks'][number], count = 2): Promise<HarnessTask[]> {
+    const targets = generationTargets(count)
     const batch = await structuredCall(
       this.client,
       generatedTaskBatch,
-      this.generateOptions(chunk.title, chunk.content, count),
+      this.generateOptions(chunk.title, chunk.content, count, targets),
       this.options.maxRetries ?? DEFAULT_MAX_RETRIES,
     )
+    generationCounter += count
     return batch.tasks.map((task, index) => ({
       ...task,
       // F-14：批内唯一编号（_001/_002…），不再整批共用 _001——否则评测
@@ -56,12 +86,12 @@ export class LlmTaskGenerator {
     }))
   }
 
-  private generateOptions(title: string, content: string, count: number): Omit<GenerateOptions, 'tools'> {
+  private generateOptions(title: string, content: string, count: number, targets?: TaskGenerationTarget[]): Omit<GenerateOptions, 'tools'> {
     return {
       provider: this.options.provider,
       model: this.options.model,
       system: TASK_GENERATOR_SYSTEM,
-      messages: [createUserMessage({ content: [{ type: 'text', text: taskGeneratorUser(title, content, count) }], source: { kind: 'user' } })],
+      messages: [createUserMessage({ content: [{ type: 'text', text: taskGeneratorUser(title, content, count, '', targets) }], source: { kind: 'user' } })],
       ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
     }
   }

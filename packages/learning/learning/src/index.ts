@@ -182,6 +182,10 @@ export function quizView(task: HarnessTask): Record<string, unknown> {
     difficulty: task.difficulty,
     question: task.question,
     options: task.options,
+    // MCQ 答案键：UI 答后高亮正确项与即时判分用。本地单用户应用，
+    // 下发到浏览器内存不构成泄题面（服务端 rubric/keywords 仍不下发）。
+    answerIndex: task.answer_index ?? null,
+    answerRationale: task.answer_rationale ?? null,
   }
 }
 
@@ -195,6 +199,8 @@ const dynamicBatch = z.object({
     difficulty: z.number().int().min(1).max(5),
     question: z.string(),
     options: z.array(z.string()).nullable().default(null),
+    answer_index: z.number().int().min(0).nullable().default(null),
+    answer_rationale: z.string().nullable().default(null),
     evaluation_criteria: z.object({
       rubric: z.array(z.string()).min(2).max(4),
       keywords: z.array(z.string()).default([]),

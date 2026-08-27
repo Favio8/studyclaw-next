@@ -60,6 +60,8 @@ export type {
 } from './models.ts'
 export { TASK_GENERATOR_SYSTEM, EVALUATOR_SYSTEM, DYNAMIC_CARD_SYSTEM, DEP_INFER_SYSTEM, taskGeneratorUser, evaluatorUser, dynamicCardUser, depInferUser } from './prompts.ts'
 export { buildDefaultSpecs } from '@studyclaw/tools'
+export { generationTargets, type GenerationTarget } from './task-gen.ts'
+export { checkTaskQuality, enforceTaskQuality, answerPositionSkewWarning } from './quality.ts'
 export {
   loadProgressBoard,
   saveProgressBoard,

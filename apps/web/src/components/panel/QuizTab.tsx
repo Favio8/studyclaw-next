@@ -118,24 +118,28 @@ export default function QuizTab() {
           <p className="text-[14px] leading-6 text-text-primary">{task.question}</p>
 
           {isChoice ? (
-            <div className="mt-3 space-y-1.5">
+            <div className="mt-3 space-y-2">
               {task.options!.map((option, index) => {
                 const letter = String.fromCharCode(65 + index);
                 const picked = answered && quiz.lastAnswer === option;
-                const statusClass = picked
-                  ? quiz.result?.passed
-                    ? "border-accent-pass/45 bg-accent-pass/8 text-accent-pass"
-                    : "border-accent-fail/45 bg-accent-fail/8 text-accent-fail"
-                  : "border-border-line bg-bg-panel text-text-muted hover:border-accent-focus/35 hover:bg-accent-focus/5 hover:text-text-primary";
+                // 答后高亮正确项（answer key 下发到前端，仅本地单用户场景）
+                const isCorrectOption = answered && task.answerIndex === index;
+                const statusClass = isCorrectOption
+                  ? "border-accent-pass/45 bg-accent-pass/8 text-accent-pass"
+                  : picked
+                    ? quiz.result?.passed
+                      ? "border-accent-pass/45 bg-accent-pass/8 text-accent-pass"
+                      : "border-accent-fail/45 bg-accent-fail/8 text-accent-fail"
+                    : "border-border-line bg-bg-panel text-text-muted hover:border-accent-focus/35 hover:bg-accent-focus/5 hover:text-text-primary";
                 return (
                   <button
                     key={option}
                     type="button"
                     disabled={busy || answered}
                     onClick={() => void quizAnswer(option)}
-                    className={`flex min-h-9 w-full items-center gap-2 rounded-md border px-2.5 text-left text-[12px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus disabled:cursor-not-allowed disabled:opacity-70 ${statusClass}`}
+                    className={`flex min-h-9 w-full items-start gap-2 rounded-md border py-2 px-2.5 text-left text-[12px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus disabled:cursor-not-allowed disabled:opacity-70 ${statusClass}`}
                   >
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-bg-card text-[10px] font-medium text-text-muted">{letter}</span>
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded bg-bg-card text-[10px] font-medium text-text-muted">{letter}</span>
                     <span className="min-w-0 flex-1 [overflow-wrap:anywhere] leading-5">{option}</span>
                     <span className="shrink-0 text-[10px] text-text-faint">Alt+{index + 1}</span>
                   </button>
@@ -205,6 +209,12 @@ export default function QuizTab() {
                 <span className="text-[13px] font-medium text-text-primary">得分 {pct(quiz.result.score)}</span>
                 {quiz.sm2 ? <span className="text-[10px] text-text-muted">记忆系数 {quiz.sm2.ef} → {quiz.sm2.efNew}</span> : null}
               </div>
+              {!quiz.result.passed && task.answerIndex !== null && task.options ? (
+                <p className="mt-2 text-[11px] leading-5 text-accent-pass">
+                  正确答案：{String.fromCharCode(65 + task.answerIndex)}。{task.options[task.answerIndex]}
+                  {task.answerRationale ? `（${task.answerRationale}）` : ""}
+                </p>
+              ) : null}
               {quiz.result.feedback ? <p className="mt-2 text-[11px] leading-5 text-text-muted">导师建议：{quiz.result.feedback}</p> : null}
               {quiz.sm2?.masteryDelta && quiz.sm2.masteryDelta > 0 ? <p className="mt-1 text-[10px] text-accent-pass">掌握度提升 {pct(quiz.sm2.masteryDelta)}</p> : null}
               {quiz.sm2 ? <p className="mt-1 text-[10px] text-text-faint">下次复习：{quiz.sm2.nextReviewAt}</p> : null}

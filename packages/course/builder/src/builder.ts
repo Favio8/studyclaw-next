@@ -14,6 +14,7 @@ import { MarkdownIngestor } from './ingestor.ts'
 import { extractSourceText } from './extract.ts'
 import { graphAdjacency, projectChapterDependencies, type DependencyInferrerLike } from './dep-infer.ts'
 import { applySyllabusQualityGuard } from './quality-guard.ts'
+import { answerPositionSkewWarning, enforceTaskQuality } from './quality.ts'
 import { harnessTask, syllabus, type Chapter, type HarnessTask, type IngestArtifact, type Syllabus } from './models.ts'
 import type { ProgressRecordMutable } from './progress.ts'
 
@@ -331,7 +332,12 @@ export class CourseBuilder {
       finished += 1
       if (onProgress !== undefined) onProgress(finished, generatePlan.length, `${unit.file} · ${unit.chunk.title}`)
     })
-    report.tasksGenerated = await this.mergeTasks(generatedAll)
+    // 题卡质量闸（零 LLM）：去重/长度失衡/答案键越界，不合格卡进 degraded。
+    const gate = enforceTaskQuality(generatedAll)
+    for (const drop of gate.dropped) report.degraded.push(`${drop.taskId}：${drop.reason}`)
+    const skew = answerPositionSkewWarning(gate.answerPositionHistogram)
+    if (skew !== null) console.warn(`[quality-gate] ${skew}`)
+    report.tasksGenerated = await this.mergeTasks(gate.kept)
     if (onProgress !== undefined) onProgress(changedFiles.length, changedFiles.length, '')
 
     await this.mergeSyllabus(artifacts, report)

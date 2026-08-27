@@ -4,42 +4,42 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { quizLoad, quizReset, storeState } = vi.hoisted(() => {
   const quizLoad = vi.fn();
   const quizReset = vi.fn();
-  return {
-    quizLoad,
-    quizReset,
-    storeState: {
-      activeCourseId: "course-1",
-      setQuiz: vi.fn(),
-      quiz: {
-        mode: "review" as const,
-        tasks: [
-          {
-            taskId: "task-1",
-            conceptId: "concept-1",
-            type: "concept",
-            difficulty: 2,
-            question: "什么是调度？",
-            options: ["分配", "删除"],
-            answerIndex: 1,
-            answerRationale: "调度的本质是分配。",
-          },
-        ],
-        index: 0,
-        phase: "idle" as const,
-        rubrics: [],
-        result: null,
-        sm2: null,
-        error: null,
-        loading: false,
-        lastAnswer: null,
-        answerText: "",
-      },
+  // 测试 mock：宽松类型（any），允许各用例按场景改写 quiz 状态而不受
+  // 字面量推断的窄类型约束。
+  const storeState: any = {
+    activeCourseId: "course-1",
+    setQuiz: vi.fn(),
+    quiz: {
+      mode: "review",
+      tasks: [
+        {
+          taskId: "task-1",
+          conceptId: "concept-1",
+          type: "concept",
+          difficulty: 2,
+          question: "什么是调度？",
+          options: ["分配", "删除"],
+          answerIndex: 1,
+          answerRationale: "调度的本质是分配。",
+        },
+      ],
+      index: 0,
+      phase: "idle",
+      rubrics: [],
+      result: null,
+      sm2: null,
+      error: null,
+      loading: false,
+      lastAnswer: null,
+      answerText: "",
     },
   };
+  return { quizLoad, quizReset, storeState };
 });
 
 vi.mock("../src/store/useAppStore", () => ({
-  useAppStore: (selector: (state: typeof storeState) => unknown) => selector(storeState),
+  // 测试 mock：宽松类型，允许各用例按场景改写 quiz 状态
+  useAppStore: (selector: (state: any) => unknown) => selector(storeState),
 }));
 vi.mock("../src/lib/quizFlow", () => ({
   quizLoad,

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ArrowLeft, CalendarDays, Check, Flame, History, MousePointer2, X } from "lucide-react";
 import { api } from "@/src/lib/api";
+import { buildHeatmapGrid } from "@/src/lib/heatmapGrid";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { HeatmapDay, HeatmapDayDetail } from "@/src/types/api";
 import {
@@ -90,14 +91,9 @@ export default function HeatmapTab() {
   }
 
   const hovered = hoverDate ? heatmap.days.find((day) => day.date === hoverDate) : null;
-  const gridDays: Array<Array<HeatmapDay | undefined>> = Array.from(
-    { length: 7 },
-    () => Array.from({ length: heatmap.weeks }, () => undefined as HeatmapDay | undefined),
-  );
-  heatmap.days.forEach((day, index) => {
-    const weekday = new Date(`${day.date}T00:00:00`).getDay();
-    gridDays[weekday][Math.floor(index / 7)] = day;
-  });
+  // 日期驱动的网格：列=周、行=星期几，首格落在首日真实星期位（修复旧
+  // 「每 7 个数据切一列」导致的日期散乱分布），未来日期天然不渲染。
+  const grid = buildHeatmapGrid(heatmap.days);
 
   return (
     <div className="space-y-4 pb-2">
@@ -130,25 +126,41 @@ export default function HeatmapTab() {
       </PanelSection>
 
       <PanelSection title="每日活动" icon={CalendarDays}>
-        <div className={`${panelSurfaceClass} overflow-hidden p-3`}>
-          <div className="overflow-x-auto pb-1">
-            <div className="min-w-[230px]">
-              {WEEKDAY_LABELS.map((label, row) => (
-                <div key={row} className="flex items-center gap-1.5">
-                  <span className="w-3 shrink-0 text-right text-[10px] text-text-faint">{label}</span>
-                  {Array.from({ length: heatmap.weeks }).map((_, column) => {
-                    const day = gridDays[row]?.[column];
-                    if (!day) return <span key={column} className="h-3.5 w-3.5 shrink-0" aria-hidden />;
+        <div className={`${panelSurfaceClass} overflow-x-auto p-3`}>
+          <div className="mx-auto w-fit min-w-[230px]">
+            {/* 月份标签行：与数据列同宽同距 */}
+            <div className="mb-1 flex gap-1 pl-4">
+              {grid.columns.map((column, columnIndex) => (
+                <div key={columnIndex} className="w-3.5 overflow-visible whitespace-nowrap text-left text-[9px] leading-none text-text-faint">
+                  {column.monthLabel ?? ""}
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {/* 星期标签列 */}
+              <div className="flex shrink-0 flex-col gap-1 pr-0.5">
+                {WEEKDAY_LABELS.map((label) => (
+                  <span key={label} className="flex h-3.5 w-3 items-center justify-end text-[9px] leading-none text-text-faint">{label}</span>
+                ))}
+              </div>
+              {/* 数据网格：列=周，行=星期几 */}
+              {grid.columns.map((column, columnIndex) => (
+                <div key={columnIndex} className="flex flex-col gap-1">
+                  {column.cells.map((cell, rowIndex) => {
+                    if (cell === null || cell.day === null) {
+                      return <span key={rowIndex} className="h-3.5 w-3.5 rounded-[3px] opacity-0" aria-hidden />;
+                    }
+                    const day = cell.day;
                     return (
                       <button
-                        key={day.date}
+                        key={cell.date}
                         type="button"
-                        title={`${day.date} · ${day.tasks} 次答题`}
-                        aria-label={`${day.date}，${day.tasks} 次答题`}
+                        title={`${cell.date} · ${day.tasks} 次答题`}
+                        aria-label={`${cell.date}，${day.tasks} 次答题`}
                         onClick={() => void openDay(day.date)}
                         onMouseEnter={() => setHoverDate(day.date)}
                         onMouseLeave={() => setHoverDate(null)}
-                        className={`h-3.5 w-3.5 shrink-0 rounded-[3px] border transition-transform duration-100 hover:scale-125 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus ${LEVEL_CELL_CLASS[day.level] ?? LEVEL_CELL_CLASS[0]}`}
+                        className={`h-3.5 w-3.5 rounded-[3px] border transition-transform duration-100 hover:scale-125 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus ${LEVEL_CELL_CLASS[day.level] ?? LEVEL_CELL_CLASS[0]}`}
                       />
                     );
                   })}

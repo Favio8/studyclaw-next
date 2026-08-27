@@ -1195,7 +1195,10 @@ async function generateLlmSessionTitle(config: ResolvedChatConfig, firstMessage:
   )) {
     if (chunk.kind === 'text') raw += chunk.delta
   }
-  return normalizeSessionTitle(raw.replace(/["'「『」』]/g, ''), 80)
+  // 端到端验证发现：该客户端路径下模型的推理会以 <think>…</think> 内联文本
+  // 返回，直接落成标题就是一串 think 标记。先剥块再归一化。
+  const stripped = raw.replace(/<think>[\s\S]*?<\/think>/gi, '')
+  return normalizeSessionTitle(stripped.replace(/["'「『」』]/g, ''), 80)
 }
 
 /**

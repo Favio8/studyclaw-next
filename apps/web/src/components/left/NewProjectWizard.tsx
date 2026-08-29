@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, Folder, FolderOpen, HardDrive, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
+import { Clawzy } from "@/src/components/mascot";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
 import { useAppStore } from "@/src/store/useAppStore";
 
@@ -219,7 +220,17 @@ function BrowsePicker({ onAdopt, onCancel, onPreferNative, busy }: {
         </div>
 
         <div className="mt-1 min-h-0 flex-1 overflow-y-auto" role="listbox" aria-label="目录列表">
-          {loadError !== null ? (
+          {loading ? (
+            // P1 加载骨架：爪爪 searching 态 + 目录行占位（首屏目录枚举可到秒级）
+            <div className="flex flex-col items-center gap-3 px-2 py-8" aria-label="正在读取目录">
+              <Clawzy size={48} state="searching" ariaLabel="爪爪正在读取目录" />
+              <div className="w-full space-y-2 px-2">
+                {[0, 1, 2, 3, 4].map((i) => (
+                  <div key={i} className="h-9 animate-pulse rounded-lg bg-bg-card" style={{ width: `${92 - i * 9}%` }} />
+                ))}
+              </div>
+            </div>
+          ) : loadError !== null ? (
             <div className="flex flex-col items-start gap-3 px-2 py-6">
               <p role="alert" className="break-words text-[13px] leading-5 text-accent-fail">{loadError}</p>
               <div className="flex gap-2">

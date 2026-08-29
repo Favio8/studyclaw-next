@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { AlertCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Clawzy } from "@/src/components/mascot";
 
 export const panelSurfaceClass =
   "rounded-lg border border-border-line bg-bg-panel shadow-[0_1px_2px_rgba(15,17,21,0.03)]";
@@ -106,14 +107,21 @@ export function PanelEmptyState({
   icon: Icon,
   title,
   description,
+  mascot = true,
 }: {
   icon: LucideIcon;
   title: string;
   description: string;
+  /** 空态陪伴爪爪（P1）：默认开启，替换 lucide 图标位；测试/紧凑场景可关 */
+  mascot?: boolean;
 }) {
   return (
     <div className="flex min-h-32 flex-col items-center justify-center rounded-lg border border-dashed border-border-line bg-bg-root/60 px-5 text-center">
-      <Icon size={20} strokeWidth={1.6} className="mb-2 text-text-faint" aria-hidden />
+      {mascot ? (
+        <Clawzy size={40} state="idle" ariaLabel="爪爪" />
+      ) : (
+        <Icon size={20} strokeWidth={1.6} className="mb-2 text-text-faint" aria-hidden />
+      )}
       <p className="text-[13px] font-medium text-text-muted">{title}</p>
       <p className="mt-1 max-w-[240px] text-[11px] leading-5 text-text-faint">{description}</p>
     </div>

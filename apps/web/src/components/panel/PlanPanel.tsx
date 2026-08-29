@@ -1,6 +1,7 @@
 "use client";
 
 import { Check, ListTodo } from "lucide-react";
+import { Clawzy } from "@/src/components/mascot";
 import type { AgentProjectionView } from "@/src/types/api";
 
 export default function PlanPanel({ steps }: { steps: AgentProjectionView["plan"]["steps"] }) {
@@ -9,7 +10,11 @@ export default function PlanPanel({ steps }: { steps: AgentProjectionView["plan"
     return (
       <section className="mt-2 border-t border-border-faint pt-2" data-plan-panel="">
         <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-text-muted"><ListTodo size={12} aria-hidden />计划</div>
-        <p className="text-[11px] text-text-caption">暂无学习计划；开始一段对话后会自动生成步骤。</p>
+        <div className="flex items-center gap-2">
+          {/* P1 空态陪伴爪爪（24px icon 档） */}
+          <Clawzy size={24} tier="icon" ariaLabel="爪爪" />
+          <p className="text-[11px] text-text-caption">暂无学习计划；开始一段对话后会自动生成步骤。</p>
+        </div>
       </section>
     );
   }

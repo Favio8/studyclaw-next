@@ -12,6 +12,7 @@
 
 import { useCallback, useState } from "react";
 import { submitWakeupAnswer } from "@/src/lib/wakeup";
+import { Clawzy } from "@/src/components/mascot";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { WakeupCard as WakeupCardType } from "@/src/types/api";
 
@@ -25,6 +26,9 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
     text: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // P1 onboarding 轮换：标题猫随交互轮换 idle → 判题 thinking → 结果 celebrate/encourage
+  const mascotState = busy ? "thinking" : feedback === null ? "idle" : feedback.passed ? "celebrate" : "encourage";
 
   const skip = useCallback(() => {
     setWakeupCard(null);
@@ -53,7 +57,11 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
   return (
     <div className="mb-2 rounded-xl border border-accent-focus/30 bg-bg-card/60 p-3">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[13px] font-medium text-accent-focus">唤醒快问快答</span>
+        <span className="flex items-center gap-1.5 text-[13px] font-medium text-accent-focus">
+          {/* P1：爪爪随作答交互轮换姿态（icon 档，24px） */}
+          <Clawzy size={24} tier="icon" state={mascotState} ariaLabel={`爪爪：${mascotState === "idle" ? "唤醒快问快答" : mascotState === "thinking" ? "判题中" : mascotState === "celebrate" ? "答对了" : "再接再厉"}`} />
+          唤醒快问快答
+        </span>
         <button
           type="button"
           onClick={skip}

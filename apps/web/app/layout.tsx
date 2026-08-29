@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import MascotFavicon from "@/src/components/mascot/MascotFavicon";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -40,7 +41,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           />
         ) : null}
       </head>
-      <body className="h-full overflow-hidden">{children}</body>
+      <body className="h-full overflow-hidden">
+        {children}
+        {/* P1-③：动态 favicon（状态角标；客户端组件，SSR 输出为 null 不影响水合） */}
+        <MascotFavicon />
+      </body>
     </html>
   );
 }

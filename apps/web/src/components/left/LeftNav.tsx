@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import MaterialsDialog from "@/src/components/left/MaterialsDialog";
 import NewProjectWizard from "@/src/components/left/NewProjectWizard";
+import { Clawzy } from "@/src/components/mascot";
 import { useSessionActions } from "@/src/hooks/useSessionActions";
 import { api } from "@/src/lib/api";
 import { relativeTime } from "@/src/lib/format";
@@ -1075,14 +1076,13 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             </div>
           ) : null}
         </div>
+        {/* P0-③：●/○ 状态符号替换为爪爪 icon（14px）：synced→idle，同步/构建→thinking */}
         <span
-          className={
+          className={`flex items-center gap-1 text-[12px] ${
             buildStatus === "running" || syncState === "syncing"
-              ? "animate-pulse text-[12px] text-accent-focus"
-              : syncState === "synced"
-              ? "text-[12px] text-accent-pass"
-              : "animate-pulse text-[12px] text-accent-focus"
-          }
+              ? "text-accent-focus"
+              : "text-accent-pass"
+          }`}
           title={
             buildStatus === "running"
               ? "课程知识索引构建中"
@@ -1091,11 +1091,23 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
                 : "同步中"
           }
         >
+          <Clawzy
+            size={14}
+            tier="icon"
+            state={buildStatus === "running" || syncState === "syncing" ? "thinking" : "idle"}
+            ariaLabel={
+              buildStatus === "running"
+                ? "构建中"
+                : syncState === "synced"
+                  ? "已同步"
+                  : "同步中"
+            }
+          />
           {buildStatus === "running"
-            ? "○ 构建中"
+            ? "构建中"
             : syncState === "synced"
-              ? "● 已同步"
-              : "○ 同步中"}
+              ? "已同步"
+              : "同步中"}
         </span>
         <button
           type="button"

@@ -16,6 +16,7 @@ import ToolFold from "@/src/components/chat/ToolFold";
 import AskFold from "@/src/components/chat/AskFold";
 import MarkdownView from "@/src/components/chat/MarkdownView";
 import MessageActions from "@/src/components/chat/MessageActions";
+import { Clawzy } from "@/src/components/mascot";
 import useInstantCard from "@/src/hooks/useInstantCard";
 import type { ChatMessage } from "@/src/store/useAppStore";
 
@@ -79,6 +80,11 @@ export default function MessageCard({ message, onRetry, onBranch, branchUnavaila
 
   return (
     <div data-time-hover-root="" className="group relative flex min-w-0 flex-col gap-2">
+      {/* P0-④：AI 消息署名行——20px 纯图标（拍板决策不带文字），状态自动派生：
+          历史消息 idle，流式中的最后一条跟随 thinking/writing */}
+      <div className="flex items-center">
+        <Clawzy size={20} tier="icon" ariaLabel="StudyClaw" />
+      </div>
       {message.thinking ? (
         <ThinkingFold
           thinking={message.thinking}

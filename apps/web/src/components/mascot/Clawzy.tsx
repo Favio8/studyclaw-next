@@ -9,7 +9,7 @@
  * - 之后引擎每帧只 setAttribute transform，React 不参与帧路径（§6-1）；
  * - tier=icon（<48px 缺省）：不渲染内耳三角/眼高光/嘴线（评审 16px 兜底档）。
  *
- * 颜色：身体用 --mascot-body（PR-1 暂持原型值，PR-2 统一改品牌 token 派生）；
+ * 颜色：身体 = var(--color-accent-focus) 品牌蓝派生（方案 §2.2-2）；
  * 描线/瞳孔固定墨蓝（实心眼+白高光，原「镂空眼」决策已随换猫作废）。
  */
 
@@ -45,8 +45,9 @@ function CatSvg({ size, state, tier, ariaLabel, svgRef, partRefs }: CatSvgProps)
   const style = {
     display: "block",
     overflow: "visible",
-    // PR-1 暂持原型色值；PR-2 统一切换为 --color-accent-focus 派生
-    "--mascot-body": "#3D77F2",
+    // 身体蓝 = 品牌蓝 token 派生（§2.2-2）：不再出现第二种"品牌蓝"；
+    // 深浅阶如后续需要，用 color-mix(var(--color-accent-focus), …) 生成，不新增色板
+    "--mascot-body": "var(--color-accent-focus)",
   } as CSSProperties;
 
   return (

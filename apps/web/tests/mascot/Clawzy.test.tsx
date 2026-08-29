@@ -69,6 +69,12 @@ describe("Clawzy 渲染契约", () => {
     expect(resolveTier(96, "icon")).toBe("icon");
   });
 
+  it("身体蓝 = 品牌 token 派生（§2.2-2，不出现第二种品牌蓝）", () => {
+    const { container } = render(<Clawzy size={64} />);
+    const svg = container.querySelector("svg");
+    expect(svg?.getAttribute("style") ?? "").toMatch(/--mascot-body:\s*var\(--color-accent-focus\)/);
+  });
+
   it("首帧输出确定（两次渲染 innerHTML 一致，SSR 水合安全）", () => {
     const first = render(<Clawzy size={24} />);
     const html = first.container.innerHTML;

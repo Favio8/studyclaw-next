@@ -6,6 +6,7 @@ import {
   STREAM_HYSTERESIS_MS,
   useMascotState,
 } from "../../src/components/mascot/useMascotState";
+import { poseTargets } from "../../src/components/mascot/tables";
 import { initialQuiz, useAppStore, type ChatMessage } from "../../src/store/useAppStore";
 
 const T0 = 1_000_000;
@@ -92,6 +93,27 @@ describe("deriveMascotState 优先级仲裁（§4.2）", () => {
     expect(deriveMascotState({ ...base, pulseAt: T0, quizPhase: "scanning", chatFocus: true }, T0)).toBe("celebrate");
     expect(deriveMascotState({ ...base, quizPhase: "scanning", streamPhase: "writing", streaming: true }, T0)).toBe("thinking");
     expect(deriveMascotState({ ...base, streamPhase: "writing", streaming: true, chatFocus: true }, T0)).toBe("writing");
+  });
+});
+
+describe("六态 pose 关键数值锁定（tables.ts，评审数值）", () => {
+  it("celebrate 举爪 -14（PR-2 微调：原型 -26 盖嘴线，评审 P2 修复）", () => {
+    const pose = poseTargets("celebrate", 10, 1);
+    expect(pose.pawL).toBe(-14);
+    expect(pose.pawR).toBe(-14);
+    expect(pose.mouth).toBe(1.6);
+    expect(pose.lid).toBe(1);
+  });
+
+  it("静态相位（ph=0, dtS=0）下六态均为标准姿态（reduced-motion 依据）", () => {
+    for (const state of ["idle", "listening", "thinking", "writing", "celebrate", "alerting"] as const) {
+      const pose = poseTargets(state, 0, 0);
+      for (const value of Object.values(pose)) {
+        expect(Number.isFinite(value), state).toBe(true);
+      }
+    }
+    expect(poseTargets("thinking", 0, 0).headT).toBe(6);
+    expect(poseTargets("idle", 0, 0).bob).toBe(0);
   });
 });
 

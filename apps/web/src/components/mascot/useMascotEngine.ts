@@ -176,6 +176,18 @@ export function useMascotEngine(
         if (wanted === "celebrate") R.hopAt = now;
       }
 
+      // 静置超时休眠（§6-3 条件三）：睡前把眼睛睁开、清空眨眼队列，
+      // 避免冻结帧停在闭眼/半闭眼的诡异表情；末尾统一退订
+      if (
+        R.seenState === "idle"
+        && !flagsRef.current.idleTimedOut
+        && now - R.stateAt > IDLE_UNSUBSCRIBE_MS
+      ) {
+        flagsRef.current.idleTimedOut = true;
+        R.blinkQueue.length = 0;
+        R.blinkVal = 1;
+      }
+
       // reduced-motion：冻结时间相位 → poseTargets(·,0,0) = 静态标准姿态
       const ph = reduce ? 0 : (now - R.t0) / 1000;
       const dtS = reduce ? 0 : (now - R.stateAt) / 1000;
@@ -288,11 +300,8 @@ export function useMascotEngine(
         `translate(${PIVOT.mouth.x} ${PIVOT.mouth.y}) scale(1 ${S.mouth.x.toFixed(3)}) translate(${-PIVOT.mouth.x} ${-PIVOT.mouth.y})`,
       );
 
-      // 静置超时退订（§6-3 条件三）：恢复靠 state 变更 effect 重订
-      if (R.seenState === "idle" && now - R.stateAt > IDLE_UNSUBSCRIBE_MS) {
-        flagsRef.current.idleTimedOut = true;
-        syncRef.current();
-      }
+      // 休眠标记已置位：写完本帧静态姿态后退订（恢复靠 state 变更 effect）
+      if (flagsRef.current.idleTimedOut) syncRef.current();
     };
     // refs 内的 RefObject 本体跨渲染稳定，帧回调只建一次
     // eslint-disable-next-line react-hooks/exhaustive-deps

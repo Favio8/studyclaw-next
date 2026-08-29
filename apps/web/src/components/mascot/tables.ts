@@ -208,8 +208,10 @@ export function poseTargets(state: MascotState, ph: number, dtS: number): PoseTa
         P.sqy = 1 - 0.04 * (dtS / 0.16);
       }
       P.lid = 1;
-      P.pawL = -26;
-      P.pawR = -26;
+      // 举爪 -26（原型值）会盖住嘴线并压到吻部下缘（评审 P2 项）；
+      // 收到 -14：嘴部完整露出，爪尖贴在腮边，庆祝语义不变
+      P.pawL = -14;
+      P.pawR = -14;
       P.mouth = 1.6;
       P.spin = Math.sin(ph * 2.6) * 3;
       P.tail = Math.sin(ph * 3) * 10;

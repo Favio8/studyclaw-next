@@ -87,6 +87,8 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
   const setBuildStatus = useAppStore((s) => s.setBuildStatus);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
+  // 爪爪 uploading 态输入源：资料上传期间置位
+  const setUploading = useAppStore((s) => s.setUploading);
 
   const [tab, setTab] = useState<TabKind>("upload");
   const [busy, setBusy] = useState(false);
@@ -159,6 +161,7 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     setBusy(true);
+    setUploading(true); // 爪爪 uploading 姿态
     try {
       // FL-12：旧实现只解构 {added, buildJobId}——超限被拒的文件（rejected）
       // 与构建失败原因（buildError）静默消失，用户看到"已归档 N 份"却不知道
@@ -199,8 +202,9 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
       flashStatusBanner(`✗ ${errorMessage(cause)}`);
     } finally {
       setBusy(false);
+      setUploading(false); // 爪爪退出 uploading 姿态
     }
-  }, [activeCourseId, flashStatusBanner, pickedFiles, setBuildStatus]);
+  }, [activeCourseId, flashStatusBanner, pickedFiles, setBuildStatus, setUploading]);
 
   const submitUrl = useCallback(async () => {
     setUrlNotice(null);

@@ -164,12 +164,13 @@ export async function quizAnswer(answer: string): Promise<void> {
               misconceptions: ev.data.misconceptions,
             },
           });
-          // P0-⑤：答对触发爪爪 celebrate 脉冲（2400ms 窗口由 useMascotState
-          // 判过期；答错路径不接——encourage 是 P1 状态）。at 覆盖式更新，
-          // 连续作答不会叠加脉冲。
-          if (ev.data.passed) {
-            useAppStore.getState().setMascotPulse({ at: Date.now() });
-          }
+          // P0-⑤ + P1：quiz 结果触发爪爪脉冲——答对 celebrate（2400ms 举爪
+          // 跳跃）、答错 encourage（4000ms 委屈拍拍加油，§7.2：与 alerting
+          // 严格区分）。at 覆盖式更新，连续作答不会叠加脉冲。
+          useAppStore.getState().setMascotPulse({
+            at: Date.now(),
+            kind: ev.data.passed ? "celebrate" : "encourage",
+          });
           break;
         }
         case "sm2": {

@@ -225,6 +225,77 @@ export function poseTargets(state: MascotState, ph: number, dtS: number): PoseTa
       P.tail = 18;
       P.mouth = 1.5;
       break;
+    /* ── 以下 P1 八态为按既有姿态词汇的新设计（设计文档 §7.2），未经原型评审 ── */
+    case "sleeping":
+      // 闭眼横线、极缓呼吸（不眨眼由引擎保证）；6-10s 级慢周期
+      P.lid = 0.06;
+      P.headT = 3;
+      P.bob = Math.sin(ph * 0.5) * 0.8;
+      P.sqy = 1 + Math.sin(ph * 0.5) * 0.005;
+      P.sqx = 1 - Math.sin(ph * 0.5) * 0.004;
+      P.tail = Math.sin(ph * 0.3) * 3;
+      break;
+    case "waking":
+      // 惊醒→归位（约 1.8s 过渡）；强制双眨队列由引擎注入
+      P.lid = 1.2;
+      P.headT = -2 * (1 - Math.min(dtS / 1.8, 1));
+      P.bob = -2 * (1 - Math.min(dtS / 0.5, 1));
+      P.tail = Math.sin(ph * 2.2) * 6;
+      break;
+    case "searching":
+      // 眼左右扫 + 单爪前探；眨眼偏快区间由调用方节律控制
+      P.lid = 1.05;
+      P.headT = -2;
+      P.gx = Math.sin(ph * 3) * 1.2;
+      P.gy = -0.3;
+      P.pawL = -4 + Math.sin(ph * 2) * 4;
+      P.tail = Math.sin(ph * 1.2) * 5;
+      P.bob = 0.5;
+      break;
+    case "working":
+      // 双爪交替搬卡、低头看
+      P.lid = 0.75;
+      P.headT = 4;
+      P.bob = 1 + Math.sin(ph * 3) * 0.8;
+      P.pawL = Math.sin(ph * 3) * 8;
+      P.pawR = Math.sin(ph * 3 + Math.PI) * 8;
+      P.tail = Math.sin(ph * 1.5) * 4;
+      break;
+    case "uploading":
+      // 双爪上举微晃、仰头看进度
+      P.lid = 1;
+      P.headT = -2;
+      P.bob = Math.sin(ph * 2) * 1;
+      P.pawL = -18 + Math.sin(ph * 2) * 3;
+      P.pawR = -18 - Math.sin(ph * 2) * 3;
+      P.mouth = 1.2;
+      break;
+    case "asking":
+      // 单爪前伸递出、期待圆眼
+      P.lid = 1.15;
+      P.headT = 3;
+      P.gy = 0.2;
+      P.pawL = -10;
+      P.tail = Math.sin(ph * 0.9) * 4;
+      P.bob = 0.5;
+      break;
+    case "encourage":
+      // 委屈歪头、双爪轻拍加油（与 alerting 严格区分：是加油不是报错）
+      P.lid = 0.85;
+      P.headT = -3;
+      P.gx = 0.2;
+      P.pawL = -6 + Math.sin(ph * 4) * 5;
+      P.pawR = -6 - Math.sin(ph * 4) * 5;
+      P.mouth = 0.9;
+      P.tail = Math.sin(ph * 0.8) * 3;
+      break;
+    case "progress":
+      // 双爪悬吊（吊环感）、目光固定
+      P.lid = 0.9;
+      P.bob = Math.sin(ph * 1.5) * 1;
+      P.pawL = -20 + Math.sin(ph * 2.5) * 4;
+      P.pawR = -20 - Math.sin(ph * 2.5) * 4;
+      break;
   }
   return P;
 }

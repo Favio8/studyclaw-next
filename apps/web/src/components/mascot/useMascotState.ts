@@ -20,28 +20,61 @@ import type { MascotState } from "./types";
 /** celebrate 脉冲有效窗（≈一轮四段 hop 时长）。 */
 export const PULSE_WINDOW_MS = 2400;
 
+/** encourage 脉冲有效窗（设计文档 §7.2：委屈加油 4-7s，取下限）。 */
+export const ENCOURAGE_WINDOW_MS = 4000;
+
 /** thinking↔writing 互切的迟滞时长。 */
 export const STREAM_HYSTERESIS_MS = 300;
 
 export interface MascotStateInputs {
   /** 最后一条 agent 消息是否带 error（alerting 触发源）。 */
   hasError: boolean;
-  /** celebrate 脉冲时间戳（Date.now()），null=无脉冲。 */
-  pulseAt: number | null;
+  /** quiz 结果脉冲（celebrate=答对 / encourage=答错），null=无。 */
+  pulse: { at: number; kind: "celebrate" | "encourage" } | null;
   /** quiz.phase ∈ {scanning, evaluating} 视为判题中。 */
   quizPhase: string;
   streamPhase: "thinking" | "writing" | null;
   streaming: boolean;
   chatFocus: boolean;
+  /** 流式期间执行中的工具数（>0 → searching）。 */
+  toolRunning: number;
+  /** 资料上传进行中（→ uploading）。 */
+  uploading: boolean;
+  /** 课程构建中 buildStatus=running（→ working）。 */
+  buildRunning: boolean;
+  /** 同步进行中 syncState=syncing（→ progress）。 */
+  syncing: boolean;
+  /** Agent 显式提问等待作答（→ asking）。 */
+  asking: boolean;
 }
 
-/** 纯仲裁函数（§4.2 优先级表，单测全覆盖）。 */
+/** 脉冲按种类取有效窗。 */
+function pulseActive(pulse: MascotStateInputs["pulse"], now: number): boolean {
+  if (pulse === null) return false;
+  const window = pulse.kind === "celebrate" ? PULSE_WINDOW_MS : ENCOURAGE_WINDOW_MS;
+  return now - pulse.at < window;
+}
+
+/**
+ * 纯仲裁函数（§4.2 优先级表 + §7.2 P1 扩展，单测全覆盖）。
+ * 高→低：alerting > celebrate > encourage > 判题 thinking > asking >
+ * 流式 thinking > 工具 searching > 流式 writing > uploading > working >
+ * progress(同步) > listening > idle。
+ * sleeping/waking 不在本表——它们是引擎内部对 idle 的覆盖（idle 计时驱动）。
+ */
 export function deriveMascotState(inputs: MascotStateInputs, now: number): MascotState {
   if (inputs.hasError) return "alerting";
-  if (inputs.pulseAt !== null && now - inputs.pulseAt < PULSE_WINDOW_MS) return "celebrate";
+  if (inputs.pulse !== null && pulseActive(inputs.pulse, now)) {
+    return inputs.pulse.kind === "celebrate" ? "celebrate" : "encourage";
+  }
   if (inputs.quizPhase === "scanning" || inputs.quizPhase === "evaluating") return "thinking";
+  if (inputs.asking) return "asking";
   if (inputs.streamPhase === "thinking") return "thinking";
+  if (inputs.toolRunning > 0) return "searching";
   if (inputs.streaming && inputs.streamPhase === "writing") return "writing";
+  if (inputs.uploading) return "uploading";
+  if (inputs.buildRunning) return "working";
+  if (inputs.syncing) return "progress";
   if (inputs.chatFocus) return "listening";
   return "idle";
 }
@@ -57,15 +90,32 @@ function lastAgentHasError(messages: ChatMessage[]): boolean {
 export function useMascotState(): MascotState {
   // selector 全部带防御性默认值：宽容部分 mock / 异形 store（测试环境）
   const hasError = useAppStore((s) => lastAgentHasError(s.messages ?? []));
-  const pulseAt = useAppStore((s) => (s.mascotPulse ? s.mascotPulse.at : null));
+  const pulse = useAppStore((s) => s.mascotPulse ?? null);
   const quizPhase = useAppStore((s) => s.quiz?.phase ?? "idle");
   const streamPhase = useAppStore((s) => s.streamPhase ?? null);
   const streaming = useAppStore((s) => s.streaming ?? false);
   const chatFocus = useAppStore((s) => s.chatFocus ?? false);
+  const toolRunning = useAppStore((s) => s.toolRunning ?? 0);
+  const uploading = useAppStore((s) => s.uploading ?? false);
+  const buildRunning = useAppStore((s) => s.buildStatus === "running");
+  const syncing = useAppStore((s) => s.syncState === "syncing");
+  const asking = useAppStore((s) => s.pendingAsk != null);
 
   // SSR/首帧输入全为空值 → 恒为 idle，水合安全（§6-5）
   const target = deriveMascotState(
-    { hasError, pulseAt, quizPhase, streamPhase, streaming, chatFocus },
+    {
+      hasError,
+      pulse,
+      quizPhase,
+      streamPhase,
+      streaming,
+      chatFocus,
+      toolRunning,
+      uploading,
+      buildRunning,
+      syncing,
+      asking,
+    },
     Date.now(),
   );
 
@@ -87,14 +137,15 @@ export function useMascotState(): MascotState {
     return () => clearTimeout(timer);
   }, [target, stable]);
 
-  // celebrate 时间窗到点强制重算（脉冲过期无 store 变更时也能回落）
+  // 脉冲时间窗到点强制重算（过期无 store 变更时也能回落）
   useEffect(() => {
-    if (pulseAt === null) return;
-    const remain = pulseAt + PULSE_WINDOW_MS - Date.now();
+    if (pulse === null) return;
+    const window = pulse.kind === "celebrate" ? PULSE_WINDOW_MS : ENCOURAGE_WINDOW_MS;
+    const remain = pulse.at + window - Date.now();
     if (remain <= 0) return;
     const timer = setTimeout(() => bumpTick((n) => n + 1), remain + 5);
     return () => clearTimeout(timer);
-  }, [pulseAt]);
+  }, [pulse]);
 
   return stable;
 }

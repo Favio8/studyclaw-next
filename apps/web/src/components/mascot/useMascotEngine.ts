@@ -39,8 +39,11 @@ import {
 } from "./tables";
 import type { MascotState, MascotTier } from "./types";
 
-/** idle 超过多久退订帧循环（§6-3：实例静止且无 pulse 超 5 分钟）。 */
-const IDLE_UNSUBSCRIBE_MS = 5 * 60_000;
+/** idle 超过多久进入睡眠（P1 sleeping 态，取代 PR-1 的冻结退订）。 */
+const SLEEP_AFTER_MS = 5 * 60_000;
+
+/** waking 惊醒过渡时长（设计文档 §7.2：约 1.8s）。 */
+const WAKING_MS = 1800;
 
 /** Clawzy.tsx 渲染的可动部件 refs（icon 档部分元素不渲染，对应 ref 为 null）。 */
 export interface MascotPartRefs {
@@ -77,6 +80,12 @@ interface EngineRuntime {
   t0: number;
   stateAt: number;
   seenState: MascotState;
+  /** 引擎内部睡眠覆盖（seenState=idle 且静置超时后为 true）。 */
+  sleeping: boolean;
+  /** waking 过渡结束时刻（ms 时间戳），0=不在唤醒过渡。 */
+  wakingUntil: number;
+  /** waking 过渡起点（pose 的 dtS 基准）。 */
+  wakeStart: number;
   blinkQueue: BlinkFrame[];
   blinkUntil: number;
   blinkVal: number;
@@ -88,6 +97,18 @@ interface EngineRuntime {
   earTL: number;
   earTR: number;
   hopAt: number;
+}
+
+/** 从睡眠唤醒：惊醒 pose + 强制双眨队列 + 重置眨眼节律。 */
+function wakeRuntime(R: EngineRuntime, now: number): void {
+  if (!R.sleeping) return;
+  R.sleeping = false;
+  R.wakingUntil = now + WAKING_MS;
+  R.wakeStart = now;
+  R.blinkQueue.length = 0;
+  queueBlink(R.blinkQueue, now, true);
+  queueBlink(R.blinkQueue, now + 280, true);
+  R.blinkUntil = now + rand(BLINK_INTERVAL_MS[0], BLINK_INTERVAL_MS[1]);
 }
 
 function queueBlink(queue: BlinkFrame[], now: number, allowDouble: boolean): void {
@@ -133,6 +154,9 @@ export function useMascotEngine(
       t0: now,
       stateAt: now,
       seenState: state,
+      sleeping: false,
+      wakingUntil: 0,
+      wakeStart: 0,
       blinkQueue: [],
       blinkUntil: now + rand(BLINK_INTERVAL_MS[0], BLINK_INTERVAL_MS[1]),
       blinkVal: 1,
@@ -153,8 +177,7 @@ export function useMascotEngine(
   const tierRef = useRef(tier);
   tierRef.current = tier;
   const reduceRef = useRef(false);
-  const flagsRef = useRef({ pageVisible: true, inView: true, idleTimedOut: false });
-  const syncRef = useRef<() => void>(() => {});
+  const flagsRef = useRef({ pageVisible: true, inView: true });
 
   /**
    * 帧回调：pose 目标 → 弹簧积分 → setAttribute。
@@ -174,27 +197,36 @@ export function useMascotEngine(
         R.seenState = wanted;
         R.stateAt = now;
         if (wanted === "celebrate") R.hopAt = now;
+        // 状态迁移即活动信号：睡眠中则唤醒
+        wakeRuntime(R, now);
       }
 
-      // 静置超时休眠（§6-3 条件三）：睡前把眼睛睁开、清空眨眼队列，
-      // 避免冻结帧停在闭眼/半闭眼的诡异表情；末尾统一退订
-      if (
-        R.seenState === "idle"
-        && !flagsRef.current.idleTimedOut
-        && now - R.stateAt > IDLE_UNSUBSCRIBE_MS
-      ) {
-        flagsRef.current.idleTimedOut = true;
+      // P1 sleeping：idle 静置超时 → 入睡（睁眼值冻结、清眨眼队列，闭眼由
+      // pose 的 lid=0.06 压下）；恢复由 visibilitychange / state 变更触发唤醒
+      if (!R.sleeping && R.seenState === "idle" && now - R.stateAt > SLEEP_AFTER_MS) {
+        R.sleeping = true;
         R.blinkQueue.length = 0;
         R.blinkVal = 1;
       }
 
+      // 引擎内部姿态态：sleeping/waking 覆盖 idle，其余透传受控态
+      const poseState: MascotState = R.sleeping
+        ? "sleeping"
+        : now < R.wakingUntil
+          ? "waking"
+          : R.seenState;
+
       // reduced-motion：冻结时间相位 → poseTargets(·,0,0) = 静态标准姿态
       const ph = reduce ? 0 : (now - R.t0) / 1000;
-      const dtS = reduce ? 0 : (now - R.stateAt) / 1000;
-      const P = poseTargets(R.seenState, ph, dtS);
+      const dtS = reduce
+        ? 0
+        : poseState === "waking"
+          ? (now - R.wakeStart) / 1000
+          : (now - R.stateAt) / 1000;
+      const P = poseTargets(poseState, ph, dtS);
 
-      // 眨眼：reduce 关闭；icon 保留普通单眨、裁掉二次眨眼花样
-      if (!reduce && now >= R.blinkUntil) {
+      // 眨眼：reduce/睡眠关闭；icon 保留普通单眨、裁掉二次眨眼花样
+      if (!reduce && poseState !== "sleeping" && now >= R.blinkUntil) {
         queueBlink(R.blinkQueue, now, !icon);
         R.blinkUntil = now + rand(BLINK_INTERVAL_MS[0], BLINK_INTERVAL_MS[1]);
       }
@@ -202,15 +234,15 @@ export function useMascotEngine(
       if (blink !== null) R.blinkVal = blink;
       else if (R.blinkQueue.length === 0) R.blinkVal = 1;
 
-      // 扫视（icon 裁掉）
-      if (!reduce && !icon && now >= R.saccadeUntil) {
+      // 扫视（icon 裁掉；睡眠闭眼不扫）
+      if (!reduce && !icon && poseState !== "sleeping" && now >= R.saccadeUntil) {
         R.fx = rand(-1, 1);
         R.fy = rand(-0.8, 0.8);
         R.saccadeUntil = now + (Math.random() < 0.22 ? rand(90, 160) : rand(420, 1500));
       }
 
-      // 耳抽动（full 独有 + 仅 idle + reduce 禁用）
-      if (!reduce && !icon && now >= R.earTwitchUntil && R.seenState === "idle") {
+      // 耳抽动（full 独有 + 仅 idle 清醒态 + reduce/睡眠禁用）
+      if (!reduce && !icon && poseState === "idle" && now >= R.earTwitchUntil) {
         R.earTwitchUntil = now + rand(EAR_TWITCH_INTERVAL_MS[0], EAR_TWITCH_INTERVAL_MS[1]);
         queueEarTwitch(R.earQueue, now);
       }
@@ -300,22 +332,22 @@ export function useMascotEngine(
         `translate(${PIVOT.mouth.x} ${PIVOT.mouth.y}) scale(1 ${S.mouth.x.toFixed(3)}) translate(${-PIVOT.mouth.x} ${-PIVOT.mouth.y})`,
       );
 
-      // 休眠标记已置位：写完本帧静态姿态后退订（恢复靠 state 变更 effect）
-      if (flagsRef.current.idleTimedOut) syncRef.current();
+      // 帧尾暴露引擎内部姿态（sleeping/waking 对 a11y/测试可见；与 React
+      // 渲染的受控值一致，仅睡眠/唤醒覆盖）
+      refs.svg.current?.setAttribute("data-mascot-state", poseState);
     };
     // refs 内的 RefObject 本体跨渲染稳定，帧回调只建一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 订阅管理：三条件取反即退订；任一恢复即重订
+  // 订阅管理：两条件取反即退订（离屏/标签页隐藏；idle→sleeping 态保持订阅展示睡姿）
   useEffect(() => {
     const sync = (): void => {
       const flags = flagsRef.current;
-      const shouldRun = flags.pageVisible && flags.inView && !flags.idleTimedOut;
+      const shouldRun = flags.pageVisible && flags.inView;
       if (shouldRun) addTick(frame);
       else removeTick(frame);
     };
-    syncRef.current = sync;
 
     // prefers-reduced-motion（jsdom/老环境无 matchMedia 时视为不减弱）
     const media = typeof window.matchMedia === "function"
@@ -327,8 +359,12 @@ export function useMascotEngine(
     applyReduce();
     media?.addEventListener?.("change", applyReduce);
 
+    // 回到页面：睡眠中则唤醒（惊醒+强制双眨）
     const onVisibility = (): void => {
       flagsRef.current.pageVisible = !document.hidden;
+      if (!document.hidden && runtimeRef.current?.sleeping) {
+        wakeRuntime(runtimeRef.current, performance.now());
+      }
       sync();
     };
     flagsRef.current.pageVisible = !document.hidden;
@@ -351,15 +387,13 @@ export function useMascotEngine(
       media?.removeEventListener?.("change", applyReduce);
       observer?.disconnect();
       removeTick(frame);
-      syncRef.current = () => {};
     };
   }, [frame, refs]);
 
-  // 状态切换 = 实例恢复活动：清 idle 超时并恢复订阅（§6-3 的"恢复时重订"）
+  // 状态切换 = 实例恢复活动：睡眠中则唤醒（惊醒 + 强制双眨）
   useEffect(() => {
-    if (flagsRef.current.idleTimedOut) {
-      flagsRef.current.idleTimedOut = false;
-      syncRef.current();
+    if (runtimeRef.current?.sleeping) {
+      wakeRuntime(runtimeRef.current, performance.now());
     }
   }, [state]);
 }

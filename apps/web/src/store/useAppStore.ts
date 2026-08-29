@@ -123,10 +123,15 @@ interface AppState {
   buildStatus: "idle" | "running" | "done" | "failed";
   /** 吉祥物（爪爪）流式相位：thinking 帧→"thinking"，首个正文 token→"writing"，done/error/中止清空。 */
   streamPhase: "thinking" | "writing" | null;
+  /** 流式期间正在执行的工具数（爪爪 searching 态输入源，tool-start/tool 增减）。 */
+  toolRunning: number;
+  /** 资料上传进行中（爪爪 uploading 态输入源，MaterialsDialog 写入）。 */
+  uploading: boolean;
   /** 输入框聚焦（爪爪 listening 态输入源，ChatInput onFocus/onBlur 写入）。 */
   chatFocus: boolean;
-  /** 爪爪庆祝脉冲：quiz 答对时写 { at }，2400ms 后由 useMascotState 按时间窗自然过期。 */
-  mascotPulse: { at: number } | null;
+  /** 爪爪脉冲：quiz 结果写入（celebrate=答对 2400ms 窗 / encourage=答错 4000ms 窗），
+   * 由 useMascotState 按时间窗自然过期，at 覆盖式更新不叠加。 */
+  mascotPulse: { at: number; kind: "celebrate" | "encourage" } | null;
   mode: LearningMode;
   focusConceptId: string | null;
   modeBanner: string | null; // 模式/状态切换横幅（1.6s 后自动消失）
@@ -188,8 +193,11 @@ interface AppState {
   setSyncState: (state: "synced" | "syncing") => void;
   setBuildStatus: (state: "idle" | "running" | "done" | "failed") => void;
   setStreamPhase: (phase: "thinking" | "writing" | null) => void;
+  /** 工具计数增减（tool-start +1 / tool -1，钳制 ≥0）；流终态由调用方归零。 */
+  adjustToolRunning: (delta: number) => void;
+  setUploading: (uploading: boolean) => void;
   setChatFocus: (focus: boolean) => void;
-  setMascotPulse: (pulse: { at: number } | null) => void;
+  setMascotPulse: (pulse: { at: number; kind: "celebrate" | "encourage" } | null) => void;
   setMode: (mode: LearningMode) => void;
   setFocusConcept: (conceptId: string | null) => void;
   flashModeBanner: (text: string) => void;
@@ -250,6 +258,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncState: "synced",
   buildStatus: "idle",
   streamPhase: null,
+  toolRunning: 0,
+  uploading: false,
   chatFocus: false,
   mascotPulse: null,
   mode: "socratic",
@@ -293,6 +303,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       syllabusStatusFilter: null,
       focusConceptId: null,
       buildStatus: "idle",
+      streamPhase: null,
+      toolRunning: 0,
+      uploading: false,
       wakeupCard: null,
   pendingAsk: null,
       badges: state.badges,
@@ -330,6 +343,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSyncState: (syncState) => set({ syncState }),
   setBuildStatus: (buildStatus) => set({ buildStatus }),
   setStreamPhase: (streamPhase) => set({ streamPhase }),
+  adjustToolRunning: (delta) =>
+    set((state) => ({ toolRunning: Math.max(0, state.toolRunning + delta) })),
+  setUploading: (uploading) => set({ uploading }),
   setChatFocus: (chatFocus) => set({ chatFocus }),
   setMascotPulse: (mascotPulse) => set({ mascotPulse }),
   setMode: (mode) => set({ mode }),
@@ -415,5 +431,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       syllabusMindmapCollapsed: {},
       syllabusStatusFilter: null,
       buildStatus: "idle",
+      streamPhase: null,
+      toolRunning: 0,
+      uploading: false,
     }),
 }));

@@ -18,6 +18,8 @@ const { storeState, apiMocks } = vi.hoisted(() => {
       setBuildStatus: vi.fn(),
       flashStatusBanner: vi.fn(),
       setCourses: vi.fn(),
+      // 爪爪 uploading 态输入源（P1）：测试内不关心调用
+      setUploading: vi.fn(),
     },
     apiMocks: {
       ApiError: MockApiError,

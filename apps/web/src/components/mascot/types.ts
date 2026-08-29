@@ -1,22 +1,39 @@
 /**
- * 吉祥物「爪爪 / Clawzy」共享类型（MVP 六态，设计文档决策 4）。
+ * 吉祥物「爪爪 / Clawzy」状态集。
  *
- * 状态语义：
+ * MVP 六态（设计文档决策 4，姿态经原型评审）：
  * - idle       静置（呼吸/眨眼/扫视/尾巴慢摆）
  * - listening  输入框聚焦（侧头倾听）
  * - thinking   思考（歪头、视线游移、半眯眼）
  * - writing    流式输出（打字双爪交替）
  * - celebrate  quiz 答对庆祝（举爪 + 跳跃，2400ms 脉冲）
  * - alerting   会话出错（皱眉抖动，直到用户重试/新消息）
+ *
+ * P1 八态（设计文档 §7.2，姿态按既有词汇设计，未经原型评审）：
+ * - sleeping   静置超 5 分钟（闭眼横线、极缓呼吸；引擎内部由 idle 计时驱动）
+ * - waking     从睡眠被唤醒（惊醒→强制双眨→归位，约 1.8s 过渡）
+ * - searching  流式期间工具执行中（眼左右扫、单爪前探）
+ * - working    课程构建中 buildStatus=running（双爪交替搬卡）
+ * - uploading  资料上传中（双爪上举微晃、仰头看进度）
+ * - asking     Agent 显式提问等待作答（单爪前伸、期待圆眼）
+ * - encourage  quiz 答错（委屈歪头、双爪轻拍加油；与 alerting 严格区分）
+ * - progress   同步进行中 syncState=syncing（双爪悬吊、目光固定）
  */
-
 export type MascotState =
   | "idle"
   | "listening"
   | "thinking"
   | "writing"
   | "celebrate"
-  | "alerting";
+  | "alerting"
+  | "sleeping"
+  | "waking"
+  | "searching"
+  | "working"
+  | "uploading"
+  | "asking"
+  | "encourage"
+  | "progress";
 
 /**
  * 渲染分级（评审结论落地）：

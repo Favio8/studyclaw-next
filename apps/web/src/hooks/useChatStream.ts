@@ -50,6 +50,8 @@ export function useChatStream() {
   const setSyncState = useAppStore((s) => s.setSyncState);
   // 吉祥物（爪爪）流式相位：thinking/token 帧写入，全部终态清空
   const setStreamPhase = useAppStore((s) => s.setStreamPhase);
+  // 工具执行计数：tool-start +1 / tool -1，驱动爪爪 searching 态
+  const adjustToolRunning = useAppStore((s) => s.adjustToolRunning);
   const setPendingAsk = useAppStore((s) => s.setPendingAsk);
   const appendMessage = useAppStore((s) => s.appendMessage);
   const updateMessage = useAppStore((s) => s.updateMessage);
@@ -208,6 +210,8 @@ export function useChatStream() {
               durationMs: null,
             },
           ];
+          // 爪爪 searching 态：工具有执行中的了
+          adjustToolRunning(1);
           scheduleFlush();
           break;
         }
@@ -223,6 +227,8 @@ export function useChatStream() {
           } else {
             toolsRef.current = [...toolsRef.current, ev.data];
           }
+          // 终态工具帧：计数回落（未配对的 tool 帧防御性不增）
+          if (index >= 0) adjustToolRunning(-1);
           scheduleFlush();
           break;
         }
@@ -260,6 +266,7 @@ export function useChatStream() {
           setSyncState("synced");
           // 流式正常收尾：爪爪退出 thinking/writing 姿态
           setStreamPhase(null);
+          useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零
           // 完成即刷新左栏：turns 与标题（发送时已落盘的 session/title）立即可见；
           // LLM 智能标题稍后落盘，延迟再静默刷一次（无推送通道，不改 SSE 协议）。
           {
@@ -284,7 +291,8 @@ export function useChatStream() {
           cancelPendingFlush();
           updateLastAgent({ streaming: false, error: streamErrorRef.current });
           setSyncState("synced");
-          setStreamPhase(null); // 爪爪退出流式姿态（alerting 由 error 派生）
+          setStreamPhase(null);
+          useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态（alerting 由 error 派生）
           flashStatusBanner("✗ 服务端返回错误，已停止本回合（未重试）");
           break;
         }
@@ -293,7 +301,7 @@ export function useChatStream() {
         }
       }
     },
-    [cancelPendingFlush, flashStatusBanner, refreshPanel, refreshSessions, scheduleDeferred, scheduleFlush, setActiveSession, setLastTurnId, setPendingAsk, setStreamPhase, setSyncState, updateLastAgent],
+    [adjustToolRunning, cancelPendingFlush, flashStatusBanner, refreshPanel, refreshSessions, scheduleDeferred, scheduleFlush, setActiveSession, setLastTurnId, setPendingAsk, setStreamPhase, setSyncState, updateLastAgent],
   );
 
   const send = useCallback(
@@ -461,7 +469,8 @@ export function useChatStream() {
             // 用户停止/切换对话：定格占位卡并退出；FE-2：不 drain 队列。
             cancelPendingFlush();
             updateLastAgent({ streaming: false });
-            setStreamPhase(null); // 爪爪退出流式姿态
+            setStreamPhase(null);
+            useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
             break;
           }
           if (streamErrorRef.current !== null) {
@@ -470,6 +479,7 @@ export function useChatStream() {
             cancelPendingFlush();
             setStreaming(false);
             setStreamPhase(null);
+            useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零
             unregisterActiveChat(abort);
             abortRef.current = null;
             return;
@@ -477,7 +487,8 @@ export function useChatStream() {
           // 成功完成：收尾（done 已定格消息卡，此处清全局流态）
           cancelPendingFlush();
           setStreaming(false);
-          setStreamPhase(null); // 兜底：任何退出路径都不残留爪爪流式相位
+          setStreamPhase(null);
+          useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 兜底：任何退出路径都不残留爪爪流式相位
           unregisterActiveChat(abort);
           abortRef.current = null;
           drainQueueIfOwned();
@@ -488,7 +499,8 @@ export function useChatStream() {
             // FE-2：不走 drain——旧会话的排队文本绝不能发进当前会话。
             cancelPendingFlush();
             updateLastAgent({ streaming: false });
-            setStreamPhase(null); // 爪爪退出流式姿态
+            setStreamPhase(null);
+            useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
             abortRef.current = null;
             setStreaming(false);
             unregisterActiveChat(abort);
@@ -506,7 +518,8 @@ export function useChatStream() {
         }
       }
       setStreaming(false);
-      setStreamPhase(null); // 循环穷尽（重试耗尽等）同样不残留相位
+      setStreamPhase(null);
+      useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 循环穷尽（重试耗尽等）同样不残留相位
       unregisterActiveChat(abort);
       abortRef.current = null;
     },
@@ -554,7 +567,8 @@ export function useChatStream() {
       cancelPendingFlush();
       updateLastAgent({ content: contentRef.current, thinking: thinkingRef.current, ...(toolsRef.current.length ? { tools: toolsRef.current.slice() } : {}), streaming: false });
       setStreaming(false);
-      setStreamPhase(null); // 爪爪退出流式姿态
+      setStreamPhase(null);
+      useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
       unregisterActiveChat(abort);
       abortRef.current = null;
       drainQueueIfOwned();
@@ -564,7 +578,8 @@ export function useChatStream() {
       updateLastAgent({ streaming: false, error: errorMessage(exc) });
       flashStatusBanner("✗ 回答未送达，可重试");
       setStreaming(false);
-      setStreamPhase(null); // 爪爪退出流式姿态
+      setStreamPhase(null);
+      useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
       unregisterActiveChat(abort);
       abortRef.current = null;
       return false;

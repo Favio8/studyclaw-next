@@ -49,6 +49,8 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
   const draftKey = `${workspacePath ?? ""}\0${activeCourseId ?? ""}\0${activeSessionId ?? "new"}`;
   const value = useAppStore((s) => s.composerDrafts[draftKey] ?? "");
   const setComposerDraft = useAppStore((s) => s.setComposerDraft);
+  // 爪爪 listening 态输入源：输入框聚焦/失焦写全局，供 useMascotState 派生
+  const setChatFocus = useAppStore((s) => s.setChatFocus);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const token = activeToken(value);
@@ -231,6 +233,8 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
                 : "给导师发消息，输入 / 查看命令，输入 @ 引用文件"
           }
           onChange={(event) => setComposerDraft(draftKey, event.target.value)}
+          onFocus={() => setChatFocus(true)}
+          onBlur={() => setChatFocus(false)}
           onCompositionStart={() => { composingRef.current = true; }}
           onCompositionEnd={() => { composingRef.current = false; }}
           onKeyDown={(event) => {

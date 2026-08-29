@@ -12,6 +12,8 @@ const { storeState, apiMocks } = vi.hoisted(() => {
     setMode: vi.fn(),
     flashModeBanner: vi.fn(),
     setPaletteOpen: vi.fn(),
+    // 爪爪 listening 输入源（PR-1 新增字段）：测试内不关心调用
+    setChatFocus: vi.fn(),
     setComposerDraft: vi.fn((key: string, draft: string) => {
       const next = { ...state.composerDrafts };
       if (draft === "") delete next[key];

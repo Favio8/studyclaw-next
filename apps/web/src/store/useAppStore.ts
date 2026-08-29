@@ -121,6 +121,12 @@ interface AppState {
   syncState: "synced" | "syncing";
   /** 课程知识索引构建状态，和聊天同步状态分开显示。 */
   buildStatus: "idle" | "running" | "done" | "failed";
+  /** 吉祥物（爪爪）流式相位：thinking 帧→"thinking"，首个正文 token→"writing"，done/error/中止清空。 */
+  streamPhase: "thinking" | "writing" | null;
+  /** 输入框聚焦（爪爪 listening 态输入源，ChatInput onFocus/onBlur 写入）。 */
+  chatFocus: boolean;
+  /** 爪爪庆祝脉冲：quiz 答对时写 { at }，2400ms 后由 useMascotState 按时间窗自然过期。 */
+  mascotPulse: { at: number } | null;
   mode: LearningMode;
   focusConceptId: string | null;
   modeBanner: string | null; // 模式/状态切换横幅（1.6s 后自动消失）
@@ -181,6 +187,9 @@ interface AppState {
   setStreaming: (streaming: boolean) => void;
   setSyncState: (state: "synced" | "syncing") => void;
   setBuildStatus: (state: "idle" | "running" | "done" | "failed") => void;
+  setStreamPhase: (phase: "thinking" | "writing" | null) => void;
+  setChatFocus: (focus: boolean) => void;
+  setMascotPulse: (pulse: { at: number } | null) => void;
   setMode: (mode: LearningMode) => void;
   setFocusConcept: (conceptId: string | null) => void;
   flashModeBanner: (text: string) => void;
@@ -240,6 +249,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   streaming: false,
   syncState: "synced",
   buildStatus: "idle",
+  streamPhase: null,
+  chatFocus: false,
+  mascotPulse: null,
   mode: "socratic",
   focusConceptId: null,
   modeBanner: null,
@@ -317,6 +329,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setStreaming: (streaming) => set({ streaming }),
   setSyncState: (syncState) => set({ syncState }),
   setBuildStatus: (buildStatus) => set({ buildStatus }),
+  setStreamPhase: (streamPhase) => set({ streamPhase }),
+  setChatFocus: (chatFocus) => set({ chatFocus }),
+  setMascotPulse: (mascotPulse) => set({ mascotPulse }),
   setMode: (mode) => set({ mode }),
   setFocusConcept: (focusConceptId) => set({ focusConceptId }),
   flashModeBanner: (text) => {

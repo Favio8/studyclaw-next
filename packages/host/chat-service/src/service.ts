@@ -1224,7 +1224,20 @@ export async function* chatStream(
   agentRegistry?: AgentRegistry,
   approvals?: ApprovalQueue,
 ): AsyncGenerator<ChatEvent | { kind: 'error'; code: string; message: string } | { kind: 'meta'; payload: Record<string, unknown> }> {
-  const courseDir = courseDirOf(workspaceRoot, courseId)
+  // 课程校验失败（id 非法/与当前工作区不匹配）是业务错误而非异常：SSE 场景下
+  // 生成器一旦 throw，会穿透到宿主 HTTP 层（SSE 头已发时 writeHead 兜底会
+  // 以 ERR_HTTP_HEADERS_SENT 打崩进程）。这里转 error 帧由调用方收尾。
+  let courseDir: string
+  try {
+    courseDir = courseDirOf(workspaceRoot, courseId)
+  } catch (error) {
+    yield {
+      kind: 'error',
+      code: 'COURSE_NOT_FOUND',
+      message: error instanceof Error ? error.message : String(error),
+    }
+    return
+  }
   const session = new TutorSession(courseDir, workspaceRoot, {
     sessionId: input.sessionId ?? null,
     mode: input.mode ?? 'socratic',

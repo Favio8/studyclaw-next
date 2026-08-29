@@ -869,8 +869,14 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         response.writeHead(200)
         response.end(JSON.stringify(envelope))
       } catch (error) {
+        // headersSent（如 SSE 处理器已写 200 头后才抛错）时绝不能再 writeHead——
+        // ERR_HTTP_HEADERS_SENT 是未捕获异常，会打崩整个 host 进程；
+        // 此时只能安全地断开连接，SSE 层自己负责以 error 帧收尾。
+        if (response.headersSent || response.writableEnded || response.destroyed) {
+          response.end()
+          return
+        }
         if (error instanceof PayloadTooLargeError) {
-          if (response.writableEnded || response.destroyed) return
           response.writeHead(413)
           response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
           return
@@ -879,7 +885,6 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         // newly added service can reject outside dispatch; without this
         // boundary catch Next reports a misleading HTTP 500/socket hangup.
         console.error(`[studyclaw] rpc ${method} 失败:`, error)
-        if (response.writableEnded || response.destroyed) return
         const message = error instanceof Error ? error.message : String(error)
         response.writeHead(500)
         response.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message, details: null } }))
@@ -1130,32 +1135,44 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       const usage = await agentService.projection(`study-${sessionId}`).then(projection => projection.usage).catch(() => ({}))
       writeFrame('done', { usage, turnId: queuedTurnId }); response.end(); return
     }
-    for await (const event of chatStream(workspaceRoot, courseId, {
-      sessionId,
-      message,
-      mode,
-      conceptId,
-      fileRefs,
-      ...(typeof input.effort === 'string' ? { effort: input.effort } : {}),
-      ...(typeof input.requestId === 'string' ? { requestId: input.requestId } : {}),
-      signal: abortController.signal,
-    }, config, agentRegistry, agentService.approvals)) {
-      if (event.kind === 'meta') {
-        resolvedSessionId = String(event.payload['sessionId'] ?? resolvedSessionId ?? '') || null
-        writeFrame('meta', event.payload)
-      } else if (event.kind === 'error') {
-        writeFrame('error', { code: event.code, message: event.message })
-      } else if (event.kind === 'sync') {
-        writeFrame('sync', event.payload)
-      } else if (event.kind === 'tool-start') {
-        writeFrame('tool-start', event.payload)
-      } else if (event.kind === 'tool') {
-        writeFrame('tool', event.payload)
-      } else if (event.kind === 'ask') {
-        writeFrame('ask', { question: event.question })
-      } else {
-        writeFrame(event.kind, { delta: event.delta })
+    // 生成器内部（如 courseDirOf 的课程校验）可能抛业务异常；SSE 头此时已
+    // 发出，异常绝不能穿透到 RPC 兜底（headersSent 后再 writeHead 会以
+    // ERR_HTTP_HEADERS_SENT 打崩整个进程）——就地转 error 帧收尾。
+    try {
+      for await (const event of chatStream(workspaceRoot, courseId, {
+        sessionId,
+        message,
+        mode,
+        conceptId,
+        fileRefs,
+        ...(typeof input.effort === 'string' ? { effort: input.effort } : {}),
+        ...(typeof input.requestId === 'string' ? { requestId: input.requestId } : {}),
+        signal: abortController.signal,
+      }, config, agentRegistry, agentService.approvals)) {
+        if (event.kind === 'meta') {
+          resolvedSessionId = String(event.payload['sessionId'] ?? resolvedSessionId ?? '') || null
+          writeFrame('meta', event.payload)
+        } else if (event.kind === 'error') {
+          writeFrame('error', { code: event.code, message: event.message })
+        } else if (event.kind === 'sync') {
+          writeFrame('sync', event.payload)
+        } else if (event.kind === 'tool-start') {
+          writeFrame('tool-start', event.payload)
+        } else if (event.kind === 'tool') {
+          writeFrame('tool', event.payload)
+        } else if (event.kind === 'ask') {
+          writeFrame('ask', { question: event.question })
+        } else {
+          writeFrame(event.kind, { delta: event.delta })
+        }
       }
+    } catch (error) {
+      if (abortController.signal.aborted) { response.end(); return }
+      console.error(`[studyclaw] chat/stream 失败:`, error)
+      writeFrame('error', {
+        code: 'CHAT_STREAM_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+      })
     }
     const completedSessionId = resolvedSessionId
     const usage = completedSessionId === null ? {} : await agentService.projection(`study-${completedSessionId}`).then(projection => projection.usage).catch(() => ({}))

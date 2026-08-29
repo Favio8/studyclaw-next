@@ -41,6 +41,11 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
     setFeedback(null);
     try {
       const result = await submitWakeupAnswer(activeCourseId, card.taskId, answer.trim());
+      // 唤醒评测与 quiz 同享爪爪结果脉冲（celebrate/encourage）
+      useAppStore.getState().setMascotPulse({
+        at: Date.now(),
+        kind: result.passed ? "celebrate" : "encourage",
+      });
       setFeedback({
         passed: result.passed,
         text: result.passed

@@ -466,7 +466,10 @@ export function useChatStream() {
           }
           if (streamErrorRef.current !== null) {
             // FE-1 终态失败：不重试。消息卡错误已在 error 分支写入。
+            // 此前漏了清全局流式态——shimmer 行和输入框会永久卡在"生成中"。
             cancelPendingFlush();
+            setStreaming(false);
+            setStreamPhase(null);
             unregisterActiveChat(abort);
             abortRef.current = null;
             return;

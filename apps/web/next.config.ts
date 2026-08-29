@@ -1,24 +1,30 @@
 import type { NextConfig } from "next";
 
 /**
- * /api/* 反向代理到 StudyClaw 后端（apps/cli 的 node:http host，`studyclaw serve`，默认 127.0.0.1:8080）。
- * 前端一律请求相对路径 `/api/...`，规避 CORS；后端地址可用环境变量
- * STUDYCLAW_API_URL 覆盖（如容器化部署）。
+ * FL-21/FL-35：双阶段配置。
+ * - `next dev`：`/api/*` 经 rewrites 反代到 StudyClaw 后端（`studyclaw serve`，
+ *   默认 127.0.0.1:8080，可用 STUDYCLAW_API_URL 覆盖）——该代理目标仅存在于
+ *   开发服务器，token 由 layout.tsx 从 host.json 运行期读取注入，不进产物；
+ * - `next build`：`output: 'export'` 纯静态导出（out/），由 `studyclaw serve`
+ *   同端口托管（static-host.ts）——UI 与 API 同源，不再需要任何代理层，
+ *   构建期常量后端地址的 FL-35 问题随之消失。
+ * rewrites 与 output:'export' 互斥，因此按 phase 显式二选一。
  */
-const backend =
-  process.env.STUDYCLAW_API_URL ?? "http://127.0.0.1:8080";
+const PHASE_DEVELOPMENT_SERVER = "phase-development-server";
 
-const nextConfig: NextConfig = {
-  // Keep the Next.js development error indicator out of the product shell.
-  devIndicators: false,
-  async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backend}/api/:path*`,
+export default function nextConfig(phase: string): NextConfig {
+  if (phase === PHASE_DEVELOPMENT_SERVER) {
+    const backend = process.env.STUDYCLAW_API_URL ?? "http://127.0.0.1:8080";
+    return {
+      devIndicators: false,
+      async rewrites() {
+        return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
       },
-    ];
-  },
-};
-
-export default nextConfig;
+    };
+  }
+  return {
+    devIndicators: false,
+    output: "export",
+    images: { unoptimized: true },
+  };
+}

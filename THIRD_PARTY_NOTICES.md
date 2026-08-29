@@ -46,7 +46,7 @@ notices are retained in the copied files and directories.
 
 | @deepseek-ai/dsh-* | 职责 |
 |---|---|
-| dsh-storage / storage-domain / storage-json / storage-sqlite | 存储后端 |
+| dsh-storage / storage-domain / storage-json | 存储后端 |
 | dsh-llm / dsh-llm-deepseek | LLM 抽象与 DeepSeek 适配 |
 | dsh-settings / dsh-credentials | 配置与凭据域模型 |
 | dsh-timeout / invariants / launch-environment / anonymous-user-id | 基础设施 |

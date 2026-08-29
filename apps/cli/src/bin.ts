@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * StudyClaw CLI entry (M1): `studyclaw serve` runs the host — cordis
  * assembly (storage + workspace registry) and a node:http server that
@@ -8,7 +9,9 @@
  */
 
 import { createServer } from 'node:http'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { join, dirname } from 'node:path'
 import { readFile, realpath, readdir, stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
@@ -49,15 +52,107 @@ import { migrateLegacySession } from '@studyclaw/session'
 import type { LearningMode } from '@studyclaw/session'
 import { createCourseService } from '@studyclaw/chat-service'
 import { AgentRegistry } from '@studyclaw/agent'
-import { hostRpc } from './lib/client.ts'
+import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
 import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody } from './lib/http-guards.ts'
+import { installHostFileLogging } from './lib/host-logger.ts'
+import { createStaticHost } from './lib/static-host.ts'
+import type { StaticHost } from './lib/static-host.ts'
 import { quizCommand } from './commands/quiz.ts'
 import { reviewCommand } from './commands/review.ts'
 import { chatCommand } from './commands/chat.ts'
+import { syncCommand } from './commands/sync.ts'
 
 function hostHome(): string {
   return process.env.STUDYCLAW_HOME ?? join(homedir(), '.studyclaw')
+}
+
+/** FL-03：设置读写以 lastOpenedPath 为根；未打开工作区时配置会写到宿主进程
+ * cwd 的游离 `.studyclaw/`（假成功 + 重启失忆）。落盘前必须先有工作区。 */
+function requireWorkspaceRootForSettings(root: string, action: string): void {
+  if (root === '') {
+    throw new Error(`请先在左栏添加/打开一个项目，再${action}（当前没有已打开的工作区，配置无处落盘）`)
+  }
+}
+
+/** FL-41：宿主单实例锁（`<hostHome>/host.lock` 记 pid + port）。持有者进程
+ * 存活 → 拒绝启动并给出可读提示；进程已死（崩溃残留）→ 自愈抢走。 */
+interface HostInstanceLock {
+  release(): void
+}
+
+async function acquireHostInstanceLock(port: number): Promise<HostInstanceLock> {
+  const { open, readFile, rm } = await import('node:fs/promises')
+  const lockPath = join(hostHome(), 'host.lock')
+  const isAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+  for (;;) {
+    let handle
+    try {
+      handle = await open(lockPath, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const raw = await readFile(lockPath, 'utf8').catch(() => '')
+      let holder: { pid?: number; port?: number } = {}
+      try {
+        holder = JSON.parse(raw) as { pid?: number; port?: number }
+      } catch {
+        // 锁内容损坏按陈旧处理（pid 解析失败 → 抢走）。
+      }
+      const pid = Number(holder.pid)
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && isAlive(pid)) {
+        throw new Error(`已有 StudyClaw 宿主实例在运行（PID ${pid}${holder.port === undefined ? '' : `，端口 ${holder.port}`}）。请勿多开实例；确认没有实例在运行后可删除 ${lockPath} 再试。`)
+      }
+      await rm(lockPath, { force: true })
+      continue
+    }
+    try {
+      await handle.write(JSON.stringify({ pid: process.pid, port }), 0)
+    } finally {
+      await handle.close().catch(() => undefined)
+    }
+    const release = (): void => { void rm(lockPath, { force: true }).catch(() => undefined) }
+    process.on('exit', release)
+    return { release }
+  }
+}
+
+/** FL-30/35：宿主发现文件（`<hostHome>/host.json`）——记录实际端口与访问
+ * token，桌面端/CLI 客户端据此握手。token 为 null 表示 `--insecure-no-token`。 */
+async function writeHostConfig(port: number, token: string | null): Promise<void> {
+  const { writeFile } = await import('node:fs/promises')
+  await writeFile(
+    join(hostHome(), 'host.json'),
+    JSON.stringify({ pid: process.pid, port, token, startedAt: new Date().toISOString() }, null, 2) + '\n',
+    'utf8',
+  )
+}
+
+function removeHostConfig(): void {
+  void import('node:fs/promises').then(({ rm }) => rm(join(hostHome(), 'host.json'), { force: true }).catch(() => undefined))
+}
+
+/** 常数时间比较（先定长哈希，规避长度/时序侧信道）。 */
+function tokenMatches(presented: string, expected: string): boolean {
+  return timingSafeEqual(
+    createHash('sha256').update(presented).digest(),
+    createHash('sha256').update(expected).digest(),
+  )
+}
+
+/** 从请求提取 token：`Authorization: Bearer` / `x-studyclaw-token` / `?token=`。 */
+function requestToken(request: import('node:http').IncomingMessage, url: URL): string {
+  const auth = request.headers.authorization ?? ''
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
+  const header = request.headers['x-studyclaw-token']
+  if (typeof header === 'string' && header.trim() !== '') return header.trim()
+  return url.searchParams.get('token')?.trim() ?? ''
 }
 
 interface StartupRegistry {
@@ -83,18 +178,30 @@ const BROWSE_HIDDEN = new Set(['$RECYCLE.BIN', 'System Volume Information', 'Con
 
 /**
  * DSH browse-backend pattern: server-side directory listing, one fast RPC per
- * page. `null` lists the workspace root (and its children) — SEC-5: the old
- * implementation enumerated every drive and accepted any absolute path with
- * canonical-path echo in errors, i.e. a free whole-disk tree reader once
- * combined with a cross-origin RPC call. Browsing is now confined to the
- * currently opened workspace.
+ * page. `null` lists the roots page.
+ *
+ * FL-02：首启（尚无工作区）时 browse 是唯一的项目选择途径——原生选择器仅
+ * Windows 可用，而旧实现 browse 又要求"已打开工作区"，非 Windows 首启无任何
+ * 添加项目途径（整链断裂）。放开为：无工作区时全盘浏览（DSH
+ * directory-picker-browse 语义，仍受 POST + loopback Origin 门禁保护）；
+ * 已打开工作区后保持 SEC-5 收紧——只允许浏览当前工作区内部。
  */
 async function browseLocalDirectory(
   requested: string | null | undefined,
   workspaceRoot: string,
 ): Promise<DirectoryBrowseResult> {
   const { readdir } = await import('node:fs/promises')
-  if (workspaceRoot === '') throw new Error('尚未打开工作区，无法浏览目录')
+  if (workspaceRoot === '') {
+    const requestedTrimmed = requested === null || requested === undefined ? '' : requested.trim()
+    if (requestedTrimmed === '') {
+      return { path: '', parent: null, entries: await listRootEntries(readdir) }
+    }
+    const canonical = await realpath(requestedTrimmed).catch(() => null)
+    if (canonical === null) throw new Error('目标路径不存在或不可访问')
+    const info = await stat(canonical).catch(() => null)
+    if (info === null || !info.isDirectory()) throw new Error('目标路径不是文件夹')
+    return { path: canonical, parent: dirname(canonical), entries: await browseWorkspaceChildren(canonical, readdir) }
+  }
   const requestedTrimmed = requested === null || requested === undefined ? '' : requested.trim()
   if (requestedTrimmed === '') {
     const entries: DirectoryEntry[] = []
@@ -116,6 +223,25 @@ async function browseLocalDirectory(
   if (!stats.isDirectory()) throw new Error('目标路径不是文件夹')
   const entries: DirectoryEntry[] = await browseWorkspaceChildren(canonical, readdir)
   return { path: canonical, parent: dirname(canonical), entries }
+}
+
+/** FL-02：首启全盘浏览的根页——Windows 枚举盘符，POSIX 列根目录一级。 */
+async function listRootEntries(
+  readdir: typeof import('node:fs/promises').readdir,
+): Promise<DirectoryEntry[]> {
+  if (process.platform === 'win32') {
+    const entries: DirectoryEntry[] = []
+    for (const letter of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+      const drive = `${letter}:\\`
+      if ((await stat(drive).catch(() => null))?.isDirectory()) entries.push({ name: drive, path: drive })
+    }
+    return entries
+  }
+  const children = await readdir('/', { withFileTypes: true }).catch(() => [])
+  return children
+    .filter(entry => entry.isDirectory() && !BROWSE_HIDDEN.has(entry.name) && !entry.name.startsWith('.'))
+    .map(entry => ({ name: entry.name, path: join('/', entry.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 function isInsideRoot(root: string, candidate: string): boolean {
@@ -208,17 +334,19 @@ async function healStartupRegistry(registry: StartupRegistry): Promise<void> {
 }
 
 function usage(): void {
-  console.log('usage: studyclaw serve [--port <n>] | status | session migrate [<sessionId>] | quiz [count] [--mode new|review] [--course <id>] [--concept <id>] | review [count] [--course <id>] [--concept <id>] | chat [message] [--mode socratic|quick|feynman|debug] [--course <id>] [--session <id>] [--new] [--concept <id>] [--turns N] | agent <create|resume|prompt|send|answer|status|cancel|whenIdle|maintenance|maintenance-jobs|dispose> | approvals <list|resolve> | plan <get|update> | todo <get|update> | acp')
+  console.log('usage: studyclaw serve [--port <n>] [--open] [--insecure-no-token] | status | sync [--course <id>] | session migrate [<sessionId>] | quiz [count] [--mode new|review] [--course <id>] [--concept <id>] | review [count] [--course <id>] [--concept <id>] | chat [message] [--mode socratic|quick|feynman|debug] [--course <id>] [--session <id>] [--new] [--concept <id>] [--turns N] | agent <create|resume|prompt|send|answer|status|cancel|whenIdle|maintenance|maintenance-jobs|dispose> | approvals <list|resolve> | plan <get|update> | todo <get|update> | acp')
 }
 
 function hostUrl(): string {
-  return (process.env.STUDYCLAW_HOST_URL ?? `http://127.0.0.1:${process.env.PORT ?? '8080'}`).replace(/\/$/, '')
+  // FL-35：显式 env 最高优先；否则随 client.ts 从 host.json 自动发现实际端口。
+  if (process.env.STUDYCLAW_HOST_URL !== undefined) return process.env.STUDYCLAW_HOST_URL.replace(/\/$/, '')
+  return defaultClientDeps().baseUrl
 }
 
 async function acpRpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
   const response = await fetch(`${hostUrl()}/api/acp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeaders(defaultClientDeps()) },
     body: JSON.stringify({ jsonrpc: '2.0', id: `cli-${Date.now()}`, method, params }),
   })
   const message = await response.json() as { result?: T; error?: { code?: number; message?: string } }
@@ -283,7 +411,7 @@ async function acpStdio(): Promise<void> {
         : request
       const response = await fetch(`${hostUrl()}/api/acp`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...(wantsStream ? { accept: 'application/x-ndjson' } : {}) },
+        headers: { 'content-type': 'application/json', ...authHeaders(defaultClientDeps()), ...(wantsStream ? { accept: 'application/x-ndjson' } : {}) },
         body: JSON.stringify(outgoing),
       })
       process.stdout.write(`${await response.text()}\n`)
@@ -294,7 +422,31 @@ async function acpStdio(): Promise<void> {
   }
 }
 
-async function serve(port: number): Promise<void> {
+export interface ServeOptions {
+  /** FL-30：跳过 token 校验（逃生口；host.json 的 token 记为 null）。 */
+  insecureNoToken?: boolean
+  /** FL-21：listen 成功后自动打开系统浏览器。 */
+  open?: boolean
+}
+
+async function serve(port: number, options: ServeOptions = {}): Promise<void> {
+  // FL-37：文件日志先于任何业务逻辑安装——启动期错误也要留痕。仅 serve 安装
+  //（acp/quiz 等前台命令的 stdout 是协议/交互通道，不能被日志污染）。
+  const hostLogger = await installHostFileLogging(hostHome())
+  // FL-41：单实例守卫。桌面端/多开场景下两个宿主同时 serve 同一工作区会
+  // 交叉写 progress.md（进程内锁对跨进程无效），且用户双击两次图标会开出
+  // 两个宿主。host.lock 记 pid + port，持有者存活则拒绝启动并给出可读提示。
+  const instanceLock = await acquireHostInstanceLock(port)
+  // FL-30：启动即生成一次性访问 token；除 /api/health 外的每个端点都要求
+  // Bearer 校验（同机进程不再可无凭据调用全部 RPC）。--insecure-no-token 为
+  // 显式逃生口（host.json 的 token 记 null，便于排查）。
+  const token = options.insecureNoToken === true ? null : randomBytes(24).toString('hex')
+  // FL-21：同端口托管 Web UI（apps/web 的静态导出产物）。产物缺失时保持
+  // 纯 API 行为。token 经 index tap 注入同源页面（window.__STUDYCLAW__）。
+  const staticHost: StaticHost | null = await createStaticHost({
+    root: webDistRoot(),
+    bootstrap: token === null ? null : { token },
+  })
   const ctx = new Context()
   await ctx.plugin(Storage)
   await ctx.plugin(StorageJson, { root: hostHome() })
@@ -461,14 +613,17 @@ async function serve(port: number): Promise<void> {
       }
     },
     settingsService: {
-      get: async () => settingsPayload(registry.lastOpenedPath) as unknown as Record<string, unknown>,
-      update: async partial => updateSettings(registry.lastOpenedPath, partial) as unknown as Record<string, unknown>,
+      // FL-03：未打开工作区时 root 为 ''，`join('', '.studyclaw', 'config.yaml')`
+      // 会落在宿主进程 cwd——UI 报"已保存"但配置写飞，重启即失忆。所有落盘
+      // 操作必须先有工作区。
+      get: async () => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '读取设置'); return settingsPayload(registry.lastOpenedPath) as unknown as Record<string, unknown> },
+      update: async partial => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '更新设置'); return updateSettings(registry.lastOpenedPath, partial) as unknown as Record<string, unknown> },
       catalog: async () => providerCatalog() as unknown as Array<Record<string, unknown>>,
       discover: async input => discoverModels(input) as unknown as Array<Record<string, unknown>>,
-      save: async input => saveProvider(registry.lastOpenedPath, input as Parameters<typeof saveProvider>[1]) as unknown as Record<string, unknown>,
-      remove: async providerId => deleteProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown>,
-      activate: async providerId => activateProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown>,
-      credential: async (providerId, apiKey) => setCredential(registry.lastOpenedPath, providerId, apiKey) as unknown as Record<string, unknown>,
+      save: async input => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存模型供应商'); return saveProvider(registry.lastOpenedPath, input as Parameters<typeof saveProvider>[1]) as unknown as Record<string, unknown> },
+      remove: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '删除模型供应商'); return deleteProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
+      activate: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '激活模型供应商'); return activateProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
+      credential: async (providerId, apiKey) => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存 API Key'); return setCredential(registry.lastOpenedPath, providerId, apiKey) as unknown as Record<string, unknown> },
     },
     courseService: wrapCourseService(),
     toolProviders: () => ({
@@ -633,6 +788,33 @@ async function serve(port: number): Promise<void> {
       response.end()
       return
     }
+    // FL-30：token 门禁——/api/*（health 已放行）之外的一切 API 端点都要求
+    // 持有宿主签发的 token；静态资源（UI 资产）不设 token，公开可读。
+    if (url.pathname.startsWith('/api/') && token !== null && !tokenMatches(requestToken(request, url), token)) {
+      response.writeHead(401)
+      response.end(JSON.stringify({ error: { code: 'unauthorized', message: `缺少或错误的访问令牌（token 记录于 ${join(hostHome(), 'host.json')}，请求头 Authorization: Bearer <token>）`, details: null } }))
+      return
+    }
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      // FL-21：非 /api 的 GET/HEAD 交给静态托管（Web UI）；/api 的 GET 仍 405。
+      if (!url.pathname.startsWith('/api/') && staticHost !== null) {
+        void (async () => {
+          const hit = await staticHost.respond(url.pathname)
+          if (hit === null) {
+            response.writeHead(404)
+            response.end(JSON.stringify({ error: { code: 'not-found', message: `no such file '${url.pathname}'`, details: null } }))
+            return
+          }
+          response.setHeader('Content-Type', hit.contentType)
+          response.writeHead(hit.status)
+          response.end(request.method === 'HEAD' ? undefined : hit.body)
+        })()
+        return
+      }
+      response.writeHead(405)
+      response.end(JSON.stringify({ error: { code: 'method-not-allowed', message: `method ${request.method ?? ''} is not supported`, details: null } }))
+      return
+    }
     if (request.method !== 'POST') {
       response.writeHead(405)
       response.end(JSON.stringify({ error: { code: 'method-not-allowed', message: `method ${request.method ?? ''} is not supported`, details: null } }))
@@ -652,39 +834,40 @@ async function serve(port: number): Promise<void> {
     void (async () => {
       try {
         const body = await readRequestBody(request)
-        try {
-          if (method === 'chat/stream') {
-            await handleChatStream(request, response, body)
-            return
-          }
-          if (method === 'agents/answer/stream') {
-            await handleAgentAnswerStream(request, response, body)
-            return
-          }
-          // 评测提交：Web 客户端用斜杠 `eval/submit`，CLI 自带命令用点号 `eval.submit`，
-          // 两种形式都路由到同一处理函数（保持向后兼容，修复 Quiz SSE 断路）。
-          if (method === 'eval.submit' || method === 'eval/submit') {
-            await handleEvalSubmit(response, body)
-            return
-          }
-          if (method === 'acp') {
-            await handleAcp(request, response, body)
-            return
-          }
-          let payload: unknown
-          try {
-            const parsed = JSON.parse(body === '' ? '{}' : body) as { payload?: unknown }
-            payload = parsed.payload
-          } catch {
-            response.writeHead(400)
-            response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'request body is not valid JSON', details: null } }))
-            return
-          }
-          const envelope = await dispatch(method, payload, services)
-          response.writeHead(200)
-          response.end(JSON.stringify(envelope))
-        } catch (error) {
+        // FL-04：这里原本包了一层 `try { ... } catch (error) { }` 的空 catch，
+        // 把 `dispatch` 内部抛出的异常（而非返回的错误信封）整个吞掉：响应永不
+        // `end()`，请求挂死成 socket hang up——恰好是下方边界注释声称要防的场景。
+        // 去掉内层 try，让异常直接落到边界 catch，保证每个请求都有 JSON 信封。
+        if (method === 'chat/stream') {
+          await handleChatStream(request, response, body)
+          return
         }
+        if (method === 'agents/answer/stream') {
+          await handleAgentAnswerStream(request, response, body)
+          return
+        }
+        // 评测提交：Web 客户端用斜杠 `eval/submit`，CLI 自带命令用点号 `eval.submit`，
+        // 两种形式都路由到同一处理函数（保持向后兼容，修复 Quiz SSE 断路）。
+        if (method === 'eval.submit' || method === 'eval/submit') {
+          await handleEvalSubmit(response, body)
+          return
+        }
+        if (method === 'acp') {
+          await handleAcp(request, response, body)
+          return
+        }
+        let payload: unknown
+        try {
+          const parsed = JSON.parse(body === '' ? '{}' : body) as { payload?: unknown }
+          payload = parsed.payload
+        } catch {
+          response.writeHead(400)
+          response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'request body is not valid JSON', details: null } }))
+          return
+        }
+        const envelope = await dispatch(method, payload, services)
+        response.writeHead(200)
+        response.end(JSON.stringify(envelope))
       } catch (error) {
         if (error instanceof PayloadTooLargeError) {
           if (response.writableEnded || response.destroyed) return
@@ -826,7 +1009,11 @@ async function serve(port: number): Promise<void> {
       const config = await configFacts()
       if (config !== null && config.model !== '' && config.baseUrl !== '') {
         // 上传后直接同步构建（异步 job 路径由 sync 端点覆盖）
-        await services.courseService.sync(courseId)
+        // FL-01：sync() 返回的 buildJobId 此前被丢弃——响应恒 buildJobId:null，
+        // 前端 `if (buildJobId)` 轮询分支永不执行，上传后构建的进度与失败对
+        // 用户完全不可见（假完成）。
+        const syncResult = await services.courseService.sync(courseId)
+        buildJobId = typeof syncResult['buildJobId'] === 'string' ? syncResult['buildJobId'] : null
       }
     } catch (error) {
       // Build failure does not fail the upload itself, but it must reach the
@@ -1025,20 +1212,60 @@ async function serve(port: number): Promise<void> {
   }
 
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      // FL-41：端口被占时的默认 EADDRINUSE 栈对用户不可读——给出行动指引。
+      if (error.code === 'EADDRINUSE') {
+        reject(new Error(`端口 ${port === 0 ? '(随机)' : port} 已被占用（可能是另一个 StudyClaw 实例或其他应用）。可用 --port <n> 换端口，或排查占用进程后重试。`))
+        return
+      }
+      reject(error)
+    })
     server.listen(port, '127.0.0.1', () => {
-      console.log(`[studyclaw] host listening on http://127.0.0.1:${port} (home: ${hostHome()})`)
-      resolve()
+      // FL-35：`--port 0` → 由内核分配随机端口；实际端口以 listen 结果为准，
+      // 连同 token 写入 host.json 供 CLI/桌面端握手发现。
+      const address = server.address()
+      const actualPort = typeof address === 'object' && address !== null ? address.port : port
+      void writeHostConfig(actualPort, token).then(() => {
+        console.log(`[studyclaw] host listening on http://127.0.0.1:${actualPort} (home: ${hostHome()}, logs: ${hostLogger.logDir}${token === null ? ', auth: DISABLED' : ''})`)
+        if (options.open === true) void openBrowser(`http://127.0.0.1:${actualPort}`)
+        resolve()
+      }).catch(reject)
     })
   })
 
   const shutdown = async (): Promise<void> => {
     await new Promise<void>(resolve => server.close(() => resolve()))
+    removeHostConfig()
+    instanceLock.release()
+    hostLogger.stop()
     await ctx.fiber.dispose()
     process.exit(0)
   }
   process.on('SIGINT', () => void shutdown())
   process.on('SIGTERM', () => void shutdown())
+}
+
+/** FL-21：`--open` 自动打开系统浏览器（不阻塞、失败静默）。 */
+async function openBrowser(url: string): Promise<void> {
+  const { spawn } = await import('node:child_process')
+  try {
+    if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref()
+    } else {
+      spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
+    }
+  } catch (error) {
+    console.warn(`[studyclaw] 打开浏览器失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/** FL-21：Web UI 静态产物根目录。env 覆盖 > 仓库布局推断（对源码运行与
+ * 打包产物同深度成立：apps/cli/src 与 apps/cli/lib 都距仓库根三级）。 */
+function webDistRoot(): string {
+  if (process.env.STUDYCLAW_WEB_DIST !== undefined && process.env.STUDYCLAW_WEB_DIST !== '') {
+    return process.env.STUDYCLAW_WEB_DIST
+  }
+  return join(fileURLToPath(new URL('../../..', import.meta.url)), 'apps', 'web', 'out')
 }
 
 /** `studyclaw status`: print the workspace, courses, and progress summaries. */
@@ -1094,7 +1321,11 @@ async function main(): Promise<void> {
   if (command === 'serve') {
     const portFlag = args.indexOf('--port')
     const port = portFlag >= 0 && args[portFlag + 1] ? Number(args[portFlag + 1]) : Number(process.env.PORT ?? 8080)
-    await serve(Number.isFinite(port) ? port : 8080)
+    // FL-30/35/21：serve 旗标——token 逃生口、随机端口（--port 0）、自动开浏览器。
+    await serve(Number.isFinite(port) ? port : 8080, {
+      insecureNoToken: args.includes('--insecure-no-token'),
+      open: args.includes('--open'),
+    })
   } else if (command === 'status') {
     await status()
   } else if (command === 'session' && args[1] === 'migrate') {
@@ -1109,6 +1340,10 @@ async function main(): Promise<void> {
     await acpStdio()
   } else if (command === 'quiz') {
     await quizCommand(args.slice(1))
+  } else if (command === 'sync') {
+    // FL-13/FL-14：CLI 此前没有任何可触发课程构建的命令，quiz 空池提示指向
+    // 不存在的 sync 命令（死链）。补注册 sync 分支，提示链真实可行。
+    await syncCommand(args.slice(1))
   } else if (command === 'review') {
     await reviewCommand(args.slice(1))
   } else if (command === 'chat') {

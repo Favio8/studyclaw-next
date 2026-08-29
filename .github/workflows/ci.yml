@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  typecheck:
+    name: Typecheck (full project graph)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # `tsc -b` 走 project references 全图，是契约变更的第一道防线。
+      - run: node_modules/.bin/tsc -b tsconfig.json
+      # 陷阱防护：tsc 误发射会在 src/ 下留下 .js 产物，历史上误提交过两次。
+      - name: Guard against stray tsc emit in src/
+        run: |
+          stray=$(git status --porcelain --untracked-files=all | grep -E 'src/.*\.(js|d\.ts)$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::tsc emitted build artifacts into src/:"; echo "$stray"; exit 1
+          fi
+
+  test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 本机（Windows / 机械盘）全量并发会触发 vitest 默认 15s test / 10s hook
+      # 超时，属环境噪声而非回归；CI 机器足够快，这里适度放宽以避免假红。
+      - run: node_modules/.bin/vitest run --testTimeout=60000 --hookTimeout=60000
+
+  test-web:
+    name: Web tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node_modules/.bin/vitest run
+        working-directory: apps/web
+
+  release-gate:
+    name: Release pack + verify packed install + publint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # FL-43：发布链路门禁——打包（CLI bundle + Web 静态导出）→ 合成发布清单
+      # → npm pack → 真装一遍并运行。FL-20 这类"发布即坏"从此在这里现形。
+      - run: corepack pnpm run release:pack
+      - run: corepack pnpm run release:verify
+      - run: corepack pnpm run release:publint

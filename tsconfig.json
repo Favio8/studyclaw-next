@@ -5,7 +5,6 @@
     { "path": "./packages/storage/storage" },
     { "path": "./packages/storage/storage-domain" },
     { "path": "./packages/storage/storage-json" },
-    { "path": "./packages/storage/storage-sqlite" },
     { "path": "./packages/workspace/workspace" },
     { "path": "./packages/course/summary" },
     { "path": "./packages/host/apiproxy" },

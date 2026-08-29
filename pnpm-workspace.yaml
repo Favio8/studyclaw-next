@@ -6,3 +6,11 @@ allowBuilds:
   esbuild: true
   koffi: true # directory-picker-native 的原生依赖需要执行安装脚本（ENG-1）
 linkWorkspacePackages: true
+# FL-38：xlsx@0.18.5 有已知 CVE（CVE-2023-30533 原型污染 / CVE-2024-22363
+# ReDoS）且在用户上传解析路径上；SheetJS 自 0.19.3 起只从自家 CDN 分发，
+# npm 上无法升级。这里把全部直接/传递依赖（含 markitdown-ts 的 xlsx）统一
+# 指到官方 0.20.3 的 tgz——tgz 已下载进仓库（vendor/tarballs/，来源：
+# https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz），安装离线可复现；
+# pnpm v11 的 blockExoticSubdeps 拒绝 URL 型传递依赖，file: 引用可过关。
+overrides:
+  xlsx: file:vendor/tarballs/xlsx-0.20.3.tgz

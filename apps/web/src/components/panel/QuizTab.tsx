@@ -6,6 +6,7 @@ import { AlertCircle, Check, CircleHelp, ListChecks, RefreshCw, Send, Target, X 
 import { pct } from "@/src/lib/format";
 import { quizAnswer, quizLoad, quizNext, quizReset, quizRetry } from "@/src/lib/quizFlow";
 import { useAppStore } from "@/src/store/useAppStore";
+import { Clawzy } from "@/src/components/mascot";
 import {
   PanelEmptyState,
   PanelErrorState,
@@ -205,6 +206,8 @@ export default function QuizTab() {
           {answered && quiz.result ? (
             <div className={`mt-3 rounded-md border p-3 ${quiz.result.passed ? "border-accent-pass/25 bg-accent-pass/8" : "border-accent-fail/25 bg-accent-fail/8"}`}>
               <div className="flex flex-wrap items-center gap-2">
+                {/* P0-⑤：结果卡爪爪——pulse 窗口内自动 celebrate（答对），否则 idle */}
+                <Clawzy size={48} />
                 <StatusPill tone={quiz.result.passed ? "pass" : "fail"}>{quiz.result.passed ? "通过" : "待巩固"}</StatusPill>
                 <span className="text-[13px] font-medium text-text-primary">得分 {pct(quiz.result.score)}</span>
                 {quiz.sm2 ? <span className="text-[10px] text-text-muted">记忆系数 {quiz.sm2.ef} → {quiz.sm2.efNew}</span> : null}

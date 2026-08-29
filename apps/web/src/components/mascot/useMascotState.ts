@@ -55,12 +55,13 @@ function lastAgentHasError(messages: ChatMessage[]): boolean {
 }
 
 export function useMascotState(): MascotState {
-  const hasError = useAppStore((s) => lastAgentHasError(s.messages));
+  // selector 全部带防御性默认值：宽容部分 mock / 异形 store（测试环境）
+  const hasError = useAppStore((s) => lastAgentHasError(s.messages ?? []));
   const pulseAt = useAppStore((s) => (s.mascotPulse ? s.mascotPulse.at : null));
-  const quizPhase = useAppStore((s) => s.quiz.phase);
-  const streamPhase = useAppStore((s) => s.streamPhase);
-  const streaming = useAppStore((s) => s.streaming);
-  const chatFocus = useAppStore((s) => s.chatFocus);
+  const quizPhase = useAppStore((s) => s.quiz?.phase ?? "idle");
+  const streamPhase = useAppStore((s) => s.streamPhase ?? null);
+  const streaming = useAppStore((s) => s.streaming ?? false);
+  const chatFocus = useAppStore((s) => s.chatFocus ?? false);
 
   // SSR/首帧输入全为空值 → 恒为 idle，水合安全（§6-5）
   const target = deriveMascotState(

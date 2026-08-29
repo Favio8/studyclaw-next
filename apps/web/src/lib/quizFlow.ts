@@ -153,6 +153,12 @@ export async function quizAnswer(answer: string): Promise<void> {
               misconceptions: ev.data.misconceptions,
             },
           });
+          // P0-⑤：答对触发爪爪 celebrate 脉冲（2400ms 窗口由 useMascotState
+          // 判过期；答错路径不接——encourage 是 P1 状态）。at 覆盖式更新，
+          // 连续作答不会叠加脉冲。
+          if (ev.data.passed) {
+            useAppStore.getState().setMascotPulse({ at: Date.now() });
+          }
           break;
         }
         case "sm2": {

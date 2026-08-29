@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions } = vi.hoisted(() => ({
   storeState: {
@@ -216,14 +216,17 @@ describe("LeftNav 项目切换器", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
   });
 
-  it("移除只忘记录：按 id 调用 removeWorkspace 并刷新列表", async () => {
+  it("移除只忘记录：确认框后按 id 调用 removeWorkspace 并刷新列表", async () => {
     mockWorkspaces();
     apiMocks.removeWorkspace.mockResolvedValue({ items: [workspaceItems[0]] });
     render(<LeftNav />);
 
     fireEvent.click(screen.getByRole("button", { name: "切换项目" }));
-    const removeButton = await screen.findByRole("button", { name: "从列表移除 ws-beta" });
-    fireEvent.click(removeButton);
+    // 组件的 aria-label 是「移除项目 <title>」，且移除必须先过确认框
+    //（磁盘数据不删除）——旧用例断言的旧 label + 无确认框均已漂移。
+    fireEvent.click(await screen.findByRole("button", { name: "移除项目 ws-beta" }));
+    const dialog = await screen.findByRole("dialog", { name: "确认移除项目" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "移除" }));
 
     await waitFor(() => expect(apiMocks.removeWorkspace).toHaveBeenCalledWith("ws-b2"));
     expect(screen.queryByRole("menuitemradio", { name: /ws-beta/ })).not.toBeInTheDocument();

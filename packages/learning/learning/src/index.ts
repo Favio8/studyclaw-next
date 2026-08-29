@@ -59,6 +59,13 @@ export interface EvaluatorOptions {
   maxTokens?: number
 }
 
+/**
+ * FL-26：唯一的"通过"阈值。必须与 `scoreToQuality`（progress.ts:229-235）的
+ * q≥3 分界（score ≥ 0.6）保持一致——SM-2 用 q 决定间隔/EF 走向，streak 与
+ * mastery 用 `passed` 决定，两者若不一致就会出现"EF 说过了、streak 说重来"。
+ */
+const PASS_SCORE = 0.6
+
 /** Rubric binary-hit evaluator over the dsh-adapter stream client. */
 export class RubricEvaluator {
   constructor(
@@ -108,11 +115,18 @@ export class RubricEvaluator {
     if (aligned < rubric.length) {
       console.warn(`[evaluator] LLM 判定与评分点仅对齐 ${aligned}/${rubric.length} 条；缺失项按未命中计`)
     }
-    const passed = Object.values(hits).every(Boolean)
+    // FL-26：旧实现 `passed` 是"全部采分点命中"（全有全无），而 SM-2 消费的是
+    // 比例分 `score`（经 `scoreToQuality` 的 0.6 阈值转 q）。两套口径打架：
+    // 命中 3/4 时 passed=false，但 q=3 走 SM-2 的通过分支——EF 按 q=3 微调，
+    // streak 却被清零，两个字段互相矛盾（首次命中 75% 还会算出 mastery=0）。
+    // 统一为：以 score ≥ 0.6 作为唯一的 passed 定义，与 q≥3 严格对齐。
+    const hitCount = Object.values(hits).filter(Boolean).length
+    const score = hitCount / Math.max(1, rubric.length)
+    const passed = score >= PASS_SCORE
     return {
       taskId: task.task_id,
       conceptId: task.concept_id,
-      score: passed ? 1 : Object.values(hits).filter(Boolean).length / Math.max(1, rubric.length),
+      score,
       passed,
       rubricHits: hits,
       feedback: verdict.feedback,
@@ -141,10 +155,18 @@ export async function pickTasks(
   const board = await loadProgressBoard(join(courseDir, '.studyclaw', 'progress.md'))
   const due = new Set(dueRecords(board, today).map(record => record.conceptId))
 
+  // FL-24：学习进度的权威在 `progress.md`——`evalSubmit` 只写它，从不回写 task
+  // pool（见 course.ts:505-532，`writeTaskPool` 的调用点全在构建/去重/动态卡）。
+  // 因此 `task.history.attempts` 恒为生成时的 0（task-gen.ts:82），用它排序会让
+  // "最短尝试先出"退化成按 id 排序，用它判"是否新卡"则把所有练过的卡都当新卡补位。
+  // 这里改为从进度板读取真实评测次数。
+  const evalsByConcept = new Map(board.concepts.map(record => [record.conceptId, record.evals]))
+  const attemptsOf = (task: HarnessTask): number => evalsByConcept.get(task.concept_id) ?? 0
+
   if (mode === 'review') {
     // 到期卡优先，最短尝试（attempts 升序）先出，未评测新卡在 due 不足时补位。
     const ordered = [...pool].sort((a, b) =>
-      (a.history.attempts ?? 0) - (b.history.attempts ?? 0)
+      attemptsOf(a) - attemptsOf(b)
       || a.difficulty - b.difficulty
       || a.task_id.localeCompare(b.task_id),
     )
@@ -157,7 +179,7 @@ export async function pickTasks(
       const seen = new Set(picked.map(task => task.concept_id))
       for (const task of ordered) {
         if (picked.length >= Math.max(1, count)) break
-        if ((task.history.attempts ?? 0) === 0 && !seen.has(task.concept_id)) {
+        if (attemptsOf(task) === 0 && !seen.has(task.concept_id)) {
           picked.push(task)
           seen.add(task.concept_id)
         }

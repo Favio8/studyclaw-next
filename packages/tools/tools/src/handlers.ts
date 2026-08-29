@@ -4,7 +4,7 @@
  * @module @studyclaw/tools/src/handlers
  */
 
-import { mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
 import { ToolRejected } from './result.ts'
@@ -15,10 +15,74 @@ import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS 
  * 并发 read-modify-write 不再互相覆盖丢行。 */
 const courseLocks = new Map<string, Promise<void>>()
 
+/** FL-36：跨进程文件锁。进程内 Promise 链在"桌面端 + 用户另开 CLI/第二个
+ * 宿主"的跨进程并发下完全失效（progress.md 丢更新复发），所以在进程内链的
+ * 临界区里再套一层 `<课程>/.studyclaw/course.lock` 文件锁：`wx` 独占创建 +
+ * 写入 pid，持有者死亡后由后来者自愈抢走。 */
+const COURSE_LOCK_POLL_MS = 40
+const COURSE_LOCK_TIMEOUT_MS = 30_000
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** 锁可否抢走：内容不可读/无 pid、或持有者进程已死。活着则不抢（互斥语义核心）。 */
+async function canStealCourseLock(lockPath: string): Promise<boolean> {
+  const raw = await readFile(lockPath, 'utf8').catch(() => null)
+  if (raw === null) return true
+  const pid = Number.parseInt(raw.trim(), 10)
+  return !(Number.isInteger(pid) && pid > 0 && pid !== process.pid && isPidAlive(pid))
+}
+
+async function withCourseFileLock<T>(courseDir: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = join(courseDir, '.studyclaw', 'course.lock')
+  await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
+  const deadline = Date.now() + COURSE_LOCK_TIMEOUT_MS
+  let handle: import('node:fs/promises').FileHandle | null = null
+  while (handle === null) {
+    try {
+      handle = await open(lockPath, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (await canStealCourseLock(lockPath)) {
+        await rm(lockPath, { force: true })
+        continue
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`课程正被其他 StudyClaw 进程占用（${lockPath}），请稍后重试；若确认无其他实例运行可手动删除该锁文件`)
+      }
+      await new Promise(resolve => setTimeout(resolve, COURSE_LOCK_POLL_MS))
+    }
+  }
+  try {
+    await handle.write(String(process.pid), 0)
+    // 确认窗口：`wx` 成功到写入 pid 之间锁文件可能被后来者判定"陈旧"抢走，
+    // 内容与本进程 pid 不符说明锁已易主，重试获取。
+    const confirm = await readFile(lockPath, 'utf8').catch(() => '')
+    if (confirm.trim() !== String(process.pid)) {
+      await handle.close().catch(() => undefined)
+      handle = null
+      return await withCourseFileLock(courseDir, fn)
+    }
+    return await fn()
+  } finally {
+    if (handle !== null) {
+      await handle.close().catch(() => undefined)
+      await rm(lockPath, { force: true }).catch(() => undefined)
+    }
+  }
+}
+
 export function withCourseLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = courseLocks.get(key) ?? Promise.resolve()
-  // run 只在之前的临界区完全结束后才开始执行（无论成败）。
-  const run = previous.then(fn, fn)
+  // run 只在之前的临界区完全结束后才开始执行（无论成败）；文件锁在临界区内
+  // 再取，进程内调用者被链先行串行化，不会自相等待。
+  const run = previous.then(() => withCourseFileLock(key, fn), () => withCourseFileLock(key, fn))
   const settled = run.then(() => undefined, () => undefined)
   courseLocks.set(key, settled)
   void settled.then(() => {

@@ -68,7 +68,8 @@ describe('progress board', () => {
     expect(updateEf(2.5, 5)).toBeCloseTo(2.6)
     const pass = reviewSchedule(2.5, 1, 0.9)
     expect(pass.repetitions).toBe(2)
-    expect(pass.intervalDays).toBe(3)
+    // FL-29：对齐经典 SM-2 序列，I(2)=6（旧实现为 3）。
+    expect(pass.intervalDays).toBe(6)
     const fail = reviewSchedule(2.5, 5, 0.1)
     expect(fail.repetitions).toBe(0)
     expect(fail.intervalDays).toBe(1)

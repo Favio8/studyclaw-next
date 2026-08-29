@@ -58,7 +58,18 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
   });
   try {
     const { tasks } = await api.quiz(courseId, mode, 5, dueOnly);
-    useAppStore.getState().setQuiz({ loading: false, tasks });
+    // FL-28：池为空时旧实现只写入空数组，界面毫无反应（死胡同交互）——用户点
+    // "开始练习"后既没有题也没有提示。这里显式给出可操作的下一步。
+    useAppStore.getState().setQuiz({
+      loading: false,
+      tasks,
+      error:
+        tasks.length === 0
+          ? mode === "review"
+            ? "当前没有到期需要复习的题卡：可切换到「新卡」模式，或先构建课程。"
+            : "题卡池为空：请先在对话框发送 /build 构建课程，生成题卡后再来练习。"
+          : null,
+    });
   } catch (exc) {
     useAppStore.getState().setQuiz({
       loading: false,
@@ -174,6 +185,15 @@ export async function quizAnswer(answer: string): Promise<void> {
         }
         case "done":
           break;
+        case "warning": {
+          // FL-09：后端 F-10 的可见告警帧（如 AUDIT_WRITE_FAILED）此前落进
+          // default 分支被当"契约外"丢弃——修复只完成了服务端一半。这里以
+          // 状态横幅显式呈现（评分流程继续，不算中断、不重试）。
+          useAppStore
+            .getState()
+            .flashStatusBanner(`⚠ ${ev.data.message ?? ev.data.code ?? "评测告警"}`);
+          break;
+        }
         case "error": {
           throw new Error(`${ev.data.code}: ${ev.data.message}`);
         }

@@ -562,7 +562,11 @@ export async function updateSettings(workspaceRoot: string, partial: {
   const changed = JSON.stringify(nextLlm) !== JSON.stringify(llm) || JSON.stringify(nextUi) !== JSON.stringify(config.ui ?? {})
     || JSON.stringify(nextAgent) !== JSON.stringify(config.agent ?? {}) || JSON.stringify(nextPermissions) !== JSON.stringify(config.permissions ?? {})
     || JSON.stringify(nextPlugins) !== JSON.stringify(config.plugins ?? {})
-  if (!changed) throw new Error('没有需要更新的设置字段')
+  if (!changed) {
+    // FL-16：无改动是正常操作（幂等保存），旧实现抛「没有需要更新的设置字段」
+    // 让前端把"什么都没改就点保存"报成红色失败弹窗。直接返回当前 payload。
+    return settingsPayload(workspaceRoot)
+  }
   await writeConfig(workspaceRoot, { ...config, llm: nextLlm, ui: nextUi, agent: nextAgent, permissions: nextPermissions, plugins: nextPlugins })
   return settingsPayload(workspaceRoot)
 }

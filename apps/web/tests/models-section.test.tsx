@@ -138,7 +138,8 @@ describe("ModelsSection 首次运行与目录添加", () => {
 
     const save = screen.getByRole("button", { name: "保存" });
     expect(save).toHaveProperty("disabled", true);
-    expect(screen.getByText(/自定义网关必须填写 Base URL/)).toBeTruthy();
+    // FL-47：文案对齐组件现状（Base URL 必填提示）。
+    expect(screen.getByText(/必填：模型端点的 OpenAI 兼容 Base URL/)).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("acme-gateway"), { target: { value: "Bad_ID" } });
     expect(screen.getByText(/必须以小写字母开头/)).toBeTruthy();

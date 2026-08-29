@@ -10,7 +10,8 @@
  * - 拖把手 8px 热区（DSH：左栏纯热区，右栏 hover 显 12×32 胶囊）。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { CircleAlert, ListChecks, FolderPlus, Settings2, Upload } from "lucide-react";
 import ChatArea from "@/src/components/chat/ChatArea";
 import LeftNav from "@/src/components/left/LeftNav";
 import RightPanel from "@/src/components/panel/RightPanel";
@@ -51,6 +52,29 @@ export default function Console() {
   const [detailsWidth, setDetailsWidth] = useState(DETAILS_DEFAULT);
   const effectiveSidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
   const [dragging, setDragging] = useState<null | "sidebar" | "details">(null);
+  // FL-22：宿主心跳。旧版 api.workspaces() 失败被静默吞掉且"左栏错误横幅"
+  // 根本不存在——用户只起了 next dev 忘了起 studyclaw serve 时，三栏空壳、
+  // 零报错零引导，30 秒内判定"这软件是坏的"。null = 探测中。
+  const [hostUp, setHostUp] = useState<boolean | null>(null);
+  const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        await api.health();
+        if (!cancelled) setHostUp(true);
+      } catch {
+        if (!cancelled) setHostUp(false);
+      }
+    };
+    void probe();
+    heartbeatTimer.current = setInterval(() => void probe(), 8000);
+    return () => {
+      cancelled = true;
+      if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+    };
+  }, []);
 
   const loadCourses = useCallback(async () => {
     try {
@@ -102,7 +126,12 @@ export default function Console() {
       }
       // 骨架自愈（DSH：工作区随时可开聊）：课程记录缺失（如清场后）时补空
       // 骨架——不触发 LLM——然后重拉列表，恢复「新对话」可用。
-      const courseId = workspacePath.split(/[\/]/).pop() ?? "";
+      // FL-23：工作区路径是 `realpath` 的规范路径（paths.ts:19-21 只做 realpath，
+      // 不做分隔符转换）——Windows 上是 `D:\a\b`，POSIX 上是 `/a/b`。旧实现只按 `/`
+      // 切分，在 Windows 上 `pop()` 会拿到整条路径而非末段，随后被 courseDirOf 的
+      // basename 校验拒绝（course.ts:64-65）并被下面的 catch 静默吞掉，导致"新对话"
+      // 永远不可用。两种分隔符都要切。
+      const courseId = workspacePath.split(/[\\/]/).pop() ?? "";
       if (!courseId) return;
       try {
         await api.ensureCourse(courseId);
@@ -191,6 +220,61 @@ export default function Console() {
         {/* hover 胶囊（DSH：12×32 圆条，白底 l2 边） */}
         <span className="pointer-events-none absolute top-1/2 left-1/2 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-[10px] border border-border-line bg-bg-panel opacity-0 shadow-lv2 transition-opacity duration-150 group-hover:opacity-100" />
       </div>
+
+      {/* FL-22：后端未启动横幅（8s 心跳持续探测，恢复后自动消失） */}
+      {hostUp === false ? (
+        <div
+          role="alert"
+          className="absolute inset-x-0 top-0 z-50 flex items-center justify-center gap-2 border-b border-red-200 bg-red-50 px-4 py-2 text-[13px] text-red-700"
+        >
+          <CircleAlert size={15} strokeWidth={1.8} aria-hidden />
+          <span>
+            后端未启动：请在终端运行{" "}
+            <code className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[12px]">studyclaw serve</code>
+            （默认 127.0.0.1:8080），启动后本横幅会自动消失。
+          </span>
+        </div>
+      ) : null}
+
+      {/* FL-22：首启空态三步引导（无项目时唯一入口此前只是左栏一个"+"图标） */}
+      {hostUp !== false && workspacePath === null ? (
+        <div className="absolute inset-0 z-30 flex items-center justify-center p-4" role="presentation">
+          <section
+            role="dialog"
+            aria-label="开始使用引导"
+            className="w-[min(92vw,470px)] rounded-2xl border border-border-line bg-bg-panel p-6 shadow-lv3"
+          >
+            <h2 className="text-[16px] font-medium text-text-primary">欢迎使用 StudyClaw</h2>
+            <p className="mt-1.5 text-[13px] leading-5 text-text-muted">
+              「项目即课程」：把一个本地资料文件夹变成可对话、可出题、可复习的学习课程。三步开始：
+            </p>
+            <ol className="mt-4 space-y-3 text-[13px] leading-5">
+              <li className="flex items-start gap-2.5">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-accent-focus/10 text-accent-focus"><FolderPlus size={13} aria-hidden /></span>
+                <span className="text-text-secondary"><span className="font-medium text-text-primary">添加项目</span> — 选择一个存放学习资料的本地文件夹</span>
+              </li>
+              <li className="flex items-start gap-2.5">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-accent-focus/10 text-accent-focus"><Settings2 size={13} aria-hidden /></span>
+                <span className="text-text-secondary"><span className="font-medium text-text-primary">配置模型</span> — 设置 → 模型配置，保存并激活一个供应商（未配置也能做选择题：本地答案键判分）</span>
+              </li>
+              <li className="flex items-start gap-2.5">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-accent-focus/10 text-accent-focus"><Upload size={13} aria-hidden /></span>
+                <span className="text-text-secondary"><span className="font-medium text-text-primary">上传资料</span> — 资料对话框上传/勾选资料，构建后即可出题练习</span>
+              </li>
+            </ol>
+            <div className="mt-5 flex items-center justify-between border-t border-border-line pt-4">
+              <span className="flex items-center gap-1.5 text-[12px] text-text-faint"><ListChecks size={13} aria-hidden />随时可从左栏「＋ 新项目」进入</span>
+              <button
+                type="button"
+                onClick={() => useAppStore.getState().setWizardOpen(true)}
+                className="h-9 rounded-lg bg-accent-focus px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
+              >
+                ＋ 添加第一个项目
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {/* 弹层（卸载式渲染，T3.5） */}
       {paletteOpen && <CommandPalette />}

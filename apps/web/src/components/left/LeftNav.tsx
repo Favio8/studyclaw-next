@@ -254,10 +254,18 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         return next;
       });
       if (item.path === workspacePath) {
+        // FL-10：移除当前项目 → 本地指针同步清空（后端已回落/清空
+        // lastOpenedPath），整个控制台回到空态，而不是悬空挂在已移除项目上。
+        const store = useAppStore.getState();
+        store.setWorkspacePath(null);
+        store.setCourses([]);
+        store.setActiveCourse(null);
+        store.resetCourseScoped();
         flashStatusBanner(`已从列表移除当前项目（磁盘数据未删除）`);
       }
-    } catch {
-      // 移除失败静默：列表下次装载会重新拉取。
+    } catch (cause) {
+      // FL-15：移除失败旧实现 catch {} 全静默，用户毫无感知。
+      flashStatusBanner(`✗ 移除失败：${cause instanceof Error ? cause.message : String(cause)}`);
     }
   }
 
@@ -313,7 +321,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     try {
       const payload = await api.reorderWorkspace(sourceId, nextId);
       setWsItems(payload.items);
-    } catch {
+    } catch (cause) {
+      // FL-15：排序失败旧实现只静默回滚，用户不知道排序没有生效。
+      flashStatusBanner(`✗ 排序失败：${cause instanceof Error ? cause.message : String(cause)}`);
       void refreshWorkspaces();
     }
   }
@@ -954,9 +964,17 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         <button
           type="button"
           aria-label="设置"
-          title="设置"
+          title={workspacePath ? "设置" : "请先添加/打开一个项目，再打开设置"}
           className="mt-auto flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => {
+            // FL-03：未打开工作区时设置会写到宿主进程 cwd 的游离 `.studyclaw/`
+            //（UI 报"已保存"，重启即失忆）——入口直接拦截并引导先建项目。
+            if (!workspacePath) {
+              flashStatusBanner("⚠ 请先添加/打开一个项目，再打开设置（配置需要项目目录落盘）");
+              return;
+            }
+            setSettingsOpen(true);
+          }}
         >
           <Settings2 {...iconProps} aria-hidden />
         </button>

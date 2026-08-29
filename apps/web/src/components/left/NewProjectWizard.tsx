@@ -70,6 +70,12 @@ export default function NewProjectWizard() {
       if (!alive.current || !pickInFlight.current) return;
       pickInFlight.current = false;
       if (alive.current) {
+        // FL-02：非 Windows 宿主没有原生选择器——"不可用"要自动落到目录浏览
+        // 回退，而不是错误弹窗（更不能像用户取消那样直接关窗，否则首启死锁）。
+        if (cause instanceof ApiError && cause.message.includes("原生目录选择器")) {
+          setMode("browse");
+          return;
+        }
         setPhase("error");
         setError(errorMessage(cause));
       }

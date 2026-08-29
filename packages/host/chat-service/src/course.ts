@@ -56,6 +56,12 @@ export class CourseNotFoundError extends Error {
   }
 }
 
+/**
+ * FL-25：掌握度的指数平滑系数。单次评测对掌握度的影响上限为 α（即一次答错最多
+ * 回退 30%，不再出现旧实现 `Math.min(旧值, score*0.9)` 的"一错归零"）。
+ */
+const MASTERY_ALPHA = 0.3
+
 function courseDirOf(workspaceRoot: string, courseId: string): string {
   if (courseId === '' || /[\/]/.test(courseId) || courseId.includes('..') || courseId.startsWith('.')) {
     throw new CourseNotFoundError(courseId)
@@ -154,7 +160,8 @@ export interface JobView {
   readonly jobId: string
   readonly status: 'queued' | 'running' | 'done' | 'failed'
   readonly progress: { total: number; finished: number; currentFile: string | null }
-  readonly result: { syllabusVersion: string; tasksGenerated: number } | null
+  /** FL-05：degraded（抽取失败/零概念块/差卡被闸）必须透出——用户有权知道"资料只摄取了一半"。 */
+  readonly result: { syllabusVersion: string; tasksGenerated: number; degraded: string[] } | null
   readonly error: string | null
 }
 
@@ -162,7 +169,7 @@ interface MutableJob {
   readonly jobId: string
   status: 'queued' | 'running' | 'done' | 'failed'
   progress: { total: number; finished: number; currentFile: string | null }
-  result: { syllabusVersion: string; tasksGenerated: number } | null
+  result: { syllabusVersion: string; tasksGenerated: number; degraded: string[] } | null
   error: string | null
   /** PERF-10：终结时间戳，用于 TTL 回收。 */
   finishedAtMs: number | null
@@ -203,7 +210,9 @@ export class JobManager {
         job.progress = { total, finished, currentFile: currentFile || null }
       }, undefined, concurrency)
       job.progress = { total: report.added.length + report.modified.length, finished: report.added.length + report.modified.length, currentFile: null }
-      job.result = { syllabusVersion: report.version, tasksGenerated: report.tasksGenerated }
+      // FL-05：degraded 一并透出（旧实现只回 version + tasksGenerated，
+      // "抽取失败/零概念块/差卡被闸"对用户完全不可见）。
+      job.result = { syllabusVersion: report.version, tasksGenerated: report.tasksGenerated, degraded: report.degraded }
       job.status = 'done'
     } catch (error) {
       job.status = 'failed'
@@ -254,7 +263,11 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const dir = await requireCourse(workspaceRoot, courseId)
       const config = await getConfig()
       const generator = requireGenerator({ workspaceRoot, config })
-      const builder = new CourseBuilder(dir, generator, inferrerOf({ workspaceRoot, config }))
+      // FL-06：粒度重切必须与正常构建同一 builder 口径。旧实现用裸
+      // `new CourseBuilder(dir, …)`（缺省 sourceRoot → 只扫 `<dir>/sources`），
+      // 项目根的就地资料不随粒度重切，且重切末尾的 checksum 覆写会把根资料
+      // 误判为"新增"，下次构建重复跑 LLM 出题。
+      const builder = projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config }))
       await builder.regenerateSyllabus(granularity)
       return loadSyllabus(dir)
     },
@@ -471,8 +484,10 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           score: correct ? 1 : 0,
           passed: correct,
           rubricHits: Object.fromEntries((task.evaluation_criteria.rubric).map(criterion => [criterion, correct])),
+          // FL-27：schema 允许 rubric 2~4 条（learning/index.ts 的 dynamicBatch
+          // `min(2).max(4)`），旧文案硬编码"四个"在 2/3 条时会撒谎。
           feedback: correct
-            ? (rationale !== '' ? `回答正确。${rationale}` : '回答正确：四个采分点全部命中。')
+            ? (rationale !== '' ? `回答正确。${rationale}` : `回答正确：${task.evaluation_criteria.rubric.length} 个采分点全部命中。`)
             : (rationale !== ''
                 ? `正确答案：${correctText}。${rationale}`
                 : `正确答案：${correctText}。请对照评分要点，把闭环缺失的环节补进你的理解。`),
@@ -496,8 +511,12 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
         gradedBy = 'rubric'
       }
-      for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
-        yield { event: 'rubric', data: { index, criterion, hit } }
+      // FL-27：答案键路径不再把"单一布尔"伪装成 rubric 逐条命中帧（多采分点
+      // 的诊断价值归零）——MCQ 本地快判只发结论，rubric 帧仅属于 LLM 判分路径。
+      if (gradedBy !== 'answer_key') {
+        for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
+          yield { event: 'rubric', data: { index, criterion, hit } }
+        }
       }
       // Update the task history + progress board (SM-2) under the course lock
       // (P1-6)：读板→upsert→存板的整个 RMW 在临界区内，避免并发评测丢更新。
@@ -513,13 +532,23 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         const priorEf = record?.ef ?? 2.5
         const priorStreak = result.passed ? record?.streak ?? 0 : 0
         const nextLocal = reviewSchedule(priorEf, priorStreak, result.score)
-        const dueDate = new Date(Date.now() + Math.min(nextLocal.intervalDays, 365) * 86_400_000)
+        // FL-34：`Date.now() + days * 86_400_000` 用固定毫秒长累加，跨夏令时切换
+        // 会偏移一小时，配合 `localDateKey` 的本地日期取法可能整体错一天。
+        // 改为按日历天推进，交给 Date 自己处理 DST。
+        const dueDate = new Date()
+        dueDate.setDate(dueDate.getDate() + Math.min(nextLocal.intervalDays, 365))
         const dueDateKey = localDateKey(dueDate)
         const updated = upsertProgressRecord(board, {
           conceptId: task.concept_id,
           name: record?.name ?? task.concept_id,
           chapter: record?.chapter ?? '',
-          mastery: result.passed ? Math.max(record?.mastery ?? 0, result.score) : Math.min(record?.mastery ?? 0, result.score * 0.9),
+          // FL-25：旧实现失败分支 `Math.min(旧值, score*0.9)` 在 score=0 时把掌握度直接
+          // 归零——学到 80% 的概念一次失误即清零；成功分支 `Math.max` 又只增不减，第二次
+          // 只得 0.65 也锁在 0.95，长期虚高。改为指数平滑：单次最多回退 30%，不再断崖；
+          // 无历史记录（首次评测）时直接用本次得分作为基线。
+          mastery: record === undefined
+            ? result.score
+            : record.mastery * (1 - MASTERY_ALPHA) + result.score * MASTERY_ALPHA,
           evals: attempts,
           passRate,
           streak: nextLocal.repetitions,
@@ -537,32 +566,50 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       // 审计写入失败不阻断 result/sm2/done，但必须以 warning 帧显式告知
       // 客户端（F-10：静默吞错升级为可见告警）。
       const historyDir = join(stateDirOf(dir), 'history')
-      const auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
-      if (auditSessionId !== null) {
-        const eventStore = new SessionEventStore(historyDir)
-        if (await eventStore.exists(auditSessionId)) {
-          try {
-            await eventStore.append(auditSessionId, {
-              ts: utcTs(),
-              type: 'eval',
-              payload: {
-                task_id: taskId,
-                concept_id: task.concept_id,
-                score: result.score,
-                passed: result.passed,
-                rubric_hits: result.rubricHits,
-                misconceptions: result.misconceptions,
-                graded_by: gradedBy,
-              },
-            })
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${message}`)
-            yield { event: 'warning', data: { code: 'AUDIT_WRITE_FAILED', message: `评分已记录，但审计留痕失败：${message}` } }
-          }
-        } else {
-          console.warn(`[evalSubmit] 会话 ${auditSessionId} 不存在审计留痕（historyDir=${historyDir}）`)
+      const eventStore = new SessionEventStore(historyDir)
+      let auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
+      // 会话是否"存在"以事件流文件（session_<id>.events.jsonl）为准——legacy
+      // SessionStore 的 meta 文件命名是 session_<id>.jsonl，二者不同源。
+      if (auditSessionId !== null && !(await eventStore.exists(auditSessionId))) {
+        // FL-08（V5 同路径）：指定会话的事件流已不存在（fork/归档/清场）→ 不复用。
+        auditSessionId = null
+      }
+      if (auditSessionId === null) {
+        // FL-08：HANDOFF 约定「无会话则 newSession」。旧实现无会话（纯做题用户
+        // 从未聊天）时只 console.warn 后跳过——eval 不进任何 history 行，热力图
+        // /日详情恒为 0。这里就地补一个做题记录会话，保证评分必留痕（评分本身
+        // 已先落 progress.md，不受此处影响）。
+        try {
+          const created = await new SessionStore(historyDir).newSession('quick', `做题记录 ${localDateKey()}`)
+          auditSessionId = created.sessionId
+        } catch (error) {
+          console.warn(`[evalSubmit] 补建做题记录会话失败: ${error instanceof Error ? error.message : String(error)}`)
         }
+      }
+      if (auditSessionId !== null) {
+        try {
+          // append 自建事件流文件（SessionEventStore.pathFor 统一命名），刚补建的
+          // 会话无需先有 exists() 为 true 的前置。
+          await eventStore.append(auditSessionId, {
+            ts: utcTs(),
+            type: 'eval',
+            payload: {
+              task_id: taskId,
+              concept_id: task.concept_id,
+              score: result.score,
+              passed: result.passed,
+              rubric_hits: result.rubricHits,
+              misconceptions: result.misconceptions,
+              graded_by: gradedBy,
+            },
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${message}`)
+          yield { event: 'warning', data: { code: 'AUDIT_WRITE_FAILED', message: `评分已记录，但审计留痕失败：${message}` } }
+        }
+      } else {
+        console.warn(`[evalSubmit] 无可用审计会话（historyDir=${historyDir}），本条评测未留痕`)
       }
       yield { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } }
       yield { event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } }
@@ -607,11 +654,14 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         // Windows absolute paths use backslashes; splitting only on "/" would
         // keep the whole path as the file name and make the copy target invalid.
         const name = source.split(/[\\/]/).pop() ?? 'import.txt'
-        const copied = await copyFile(source, join(dir, name)).then(() => true).catch(() => false)
+        // FL-07：copyFile 直写目标会覆盖项目根同名文件；与上传路径同语义，
+        // 重名自动加序号落盘。
+        const target = await uniqueDestinationPathIn(dir, name)
+        const copied = await copyFile(source, target).then(() => true).catch(() => false)
         if (copied) ingested += 1
       }
       const config = await getConfig()
-      const generator = generatorOf({ workspaceRoot, config }, dir) ?? { generateTasks: async () => [] }
+      const generator = generatorOf({ workspaceRoot, config }, dir)
       // 空项目/未初始化项目：build 无变更不会产出 syllabus，先落骨架保证
       // "打开即初始化"（列表判定以 syllabus.json 存在为准）。
       const syllabusPath = join(stateDirOf(dir), 'syllabus.json')
@@ -622,7 +672,14 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           granularity: 'fine', chapters: [], adjacency: {},
         }, null, 2) + '\n', 'utf8')
       }
-      await projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config })).build(2)
+      // FL-07：配了真实模型时旧实现在 RPC 内同步 build（分钟级阻塞 HTTP，前端
+      // 只转圈且硬返 buildJobId:null 轮询永不执行）。改为与其他入口一致的异步
+      // job；未配置模型时保持同步空转构建（无 LLM、毫秒级，纯产出骨架）。
+      if (generator !== null && config !== null) {
+        const buildJobId = jobs.start(dir, basename(workspaceRoot), { workspaceRoot, config })
+        return { workspace: workspaceRoot, course: basename(workspaceRoot), ingestedFiles: ingested, buildJobId }
+      }
+      await projectBuilder(dir, { generateTasks: async () => [] }, null).build(2)
       return { workspace: workspaceRoot, course: basename(workspaceRoot), ingestedFiles: ingested, buildJobId: null }
     },
 
@@ -672,6 +729,20 @@ function stripTags(html: string): string {
 function slugId(title: string): string {
   const base = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40)
   return `c_${base !== '' ? base : createHash('md5').update(title).digest('hex').slice(0, 8)}`
+}
+
+/** FL-07：在 dir 内为 filename 找不冲突的唯一名（重名追加 -1/-2，与上传路径同语义）。 */
+async function uniqueDestinationPathIn(dir: string, filename: string): Promise<string> {
+  const { readdir } = await import('node:fs/promises')
+  const taken = new Set((await readdir(dir).catch(() => [] as string[])).map(entry => entry.toLowerCase()))
+  const dot = filename.lastIndexOf('.')
+  const stem = dot > 0 ? filename.slice(0, dot) : filename
+  const ext = dot > 0 ? filename.slice(dot) : ''
+  let candidate = filename
+  for (let index = 1; taken.has(candidate.toLowerCase()); index += 1) {
+    candidate = `${stem}-${index}${ext}`
+  }
+  return join(dir, candidate)
 }
 
 export { createUserMessage }

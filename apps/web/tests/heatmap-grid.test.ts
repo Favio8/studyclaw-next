@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { buildHeatmapGrid } from "../src/lib/heatmapGrid";
 import type { HeatmapDay } from "../src/types/api";
 
-function day(date: string, level = 0): HeatmapDay {
+function day(date: string, level: 0 | 1 | 2 | 3 = 0): HeatmapDay {
   return { date, score: level, level, tasks: level, chatTurns: 0, weakSpotsCleared: 0 };
 }
 

@@ -166,13 +166,14 @@ function ProviderEditorCard({
   const capacitiesValid = parsedRows.every(
     (r) => r.context !== "invalid" && r.max !== "invalid",
   );
-  // 写入即校验（DSH write-time refusal）：默认模型与 Base URL 是激活/构建
-  // 的硬前提，两处都空着保存只会产出「保存了却不可用」的配置。
+  // 写入即校验（DSH write-time refusal）：Base URL 是可用配置的硬前提。
+  // FL-47：默认模型允许留空保存——首次运行流是「贴 Key 即保存，之后再发现
+  // 模型选默认」（测试契约 + 组件内既有警告文案都是这个语义）；空默认模型
+  // 仅导致激活/构建不可用（后端 activate/构建侧已各自拒绝），不再阻止保存。
   const canSave =
     idValid &&
     id.length > 0 &&
     baseUrl.trim().length > 0 &&
-    model.trim().length > 0 &&
     rowIdsValid &&
     capacitiesValid;
 
@@ -389,7 +390,7 @@ function ProviderEditorCard({
           </div>
 
           <label className="flex flex-col gap-1.5 text-xs text-text-secondary">
-            默认模型（必填：新对话与课程构建使用）
+            默认模型（新对话与课程构建使用，可留空先保存）
             {modelOptions.length > 0 ? (
               <select
                 value={model}

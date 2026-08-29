@@ -10,6 +10,7 @@
  */
 
 import { api } from "@/src/lib/api";
+import { modeLabel } from "@/src/lib/modes";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { OpenWorkspaceResponse } from "@/src/types/api";
 
@@ -45,8 +46,15 @@ export async function adoptWorkspace(path: string): Promise<OpenWorkspaceRespons
   store.setActiveCourse(list.courses[0]?.id ?? null);
   store.setActiveSession(null, "");
   store.setMessages([]);
-  if (settings) store.setMode(settings.ui.defaultMode);
-  store.setSessionBanner("── 新对话 · 苏格拉底模式 ──");
+  // FL-17：横幅文案读同一状态源的默认模式，不再硬编码「苏格拉底模式」。
+  const mode = settings?.ui.defaultMode;
+  if (mode) store.setMode(mode);
+  store.setSessionBanner(`── 新对话 · ${modeLabel(mode ?? useAppStore.getState().mode)}模式 ──`);
+  // FL-18：自动建课骨架失败时后端以 courseWarning 透传——旧版被吞，用户拿到
+  // 一个零提示的空项目。
+  if (opened.courseWarning) {
+    store.flashStatusBanner(`⚠ 项目已打开，但自动初始化课程骨架失败：${opened.courseWarning}`);
+  }
   store.setBuildStatus("done");
   recordLastWorkspace(opened.workspace.path);
   return opened;

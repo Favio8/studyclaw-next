@@ -104,6 +104,14 @@ describe('SM-2 调度（F-12）', () => {
     expect(intervalDays(400, 2.9)).toBe(365)
   })
 
+  it('FL-29 回归：间隔序列对齐经典 SM-2（I(1)=1、I(2)=6、I(3)≈15）', () => {
+    expect(intervalDays(1, 2.5)).toBe(1)
+    expect(intervalDays(2, 2.5)).toBe(6)
+    // I(3) = round(6 * 2.5) = 15（经典 SM-2 序列 1/6/15）。
+    expect(intervalDays(3, 2.5)).toBe(15)
+    // 旧实现 I(2)=3 的回归哨兵：改回半速序列会在此变红。
+  })
+
   it('失败评测的调度结果写入 streak=0（nextReviewAt 隔天）', () => {
     const failed = reviewSchedule(2.5, 2, 0.2)
     expect(failed).toMatchObject({ repetitions: 0, intervalDays: 1 })

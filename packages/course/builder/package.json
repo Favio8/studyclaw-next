@@ -16,7 +16,9 @@
                          "@deepseek-ai/dsh-llm":  "workspace:^",
                          "@studyclaw/tools":  "workspace:^",
                          "js-yaml":  "^4.1.0",
-                         "markitdown-ts":  "^0.0.10",
+                         "mammoth":  "^1.12.1",
+                         "pdf-parse":  "^2.4.5",
+                         "turndown":  "^7.2.4",
                          "xlsx":  "^0.18.5",
                          "zod":  "^4.4.3"
                      },
@@ -24,6 +26,7 @@
                              "@deepseek-ai/cordis":  "workspace:^"
                          },
     "devDependencies":  {
+                            "@types/turndown":  "^5.0.5",
                             "docx":  "^9.7.1",
                             "exceljs":  "^4.4.0",
                             "pdf-lib":  "^1.17.1"

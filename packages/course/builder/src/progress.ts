@@ -243,8 +243,11 @@ export function updateEf(currentEf: number, quality: number): number {
 const MAX_INTERVAL_DAYS = 365
 
 export function intervalDays(repetitions: number, ef: number): number {
+  // FL-29：对齐经典 SM-2 间隔序列 I(1)=1、I(2)=6、I(n)=round(I(n-1)*EF)。
+  // 旧实现 I(2)=3 的"半速复习"未在文档中声明，对外宣称"实现 SM-2"有口径风险。
   if (repetitions <= 1) return 1
-  let interval = 3
+  if (repetitions === 2) return 6
+  let interval = 6
   for (let i = 3; i <= repetitions; i += 1) {
     interval = Math.round(interval * ef)
     if (interval >= MAX_INTERVAL_DAYS) return MAX_INTERVAL_DAYS

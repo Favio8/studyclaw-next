@@ -52,6 +52,13 @@ async function awaitBuild(
       if (signal?.aborted) return;
       if (job.status === "done") {
         report(`✓ 知识索引构建完成（syllabus 生成，共 ${job.result?.tasksGenerated ?? 0} 张题卡）`);
+        // FL-05：degraded（抽取失败/零概念块/差卡被闸）此前全线不可见——
+        // 用户永远不知道"资料只摄取了一半"。逐条透出。
+        const degraded = job.result?.degraded ?? [];
+        if (degraded.length > 0) {
+          report(`⚠ 构建降级：${degraded.length} 项资料/题卡未正常进入课程`);
+          for (const item of degraded) report(`  · ${item}`);
+        }
         return;
       }
       if (job.status === "failed") {
@@ -153,29 +160,35 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
     }
     setBusy(true);
     try {
-      const { added, buildJobId } = await api.uploadSources(activeCourseId, pickedFiles);
+      // FL-12：旧实现只解构 {added, buildJobId}——超限被拒的文件（rejected）
+      // 与构建失败原因（buildError）静默消失，用户看到"已归档 N 份"却不知道
+      // 有文件没进来。
+      const { added, buildJobId, buildError, rejected } = await api.uploadSources(activeCourseId, pickedFiles);
       // 重名序号反馈：后端归档 `foo.pdf` + 再次同名会落盘为 `foo_2.pdf` 等
       // （绝不覆盖既有资料），这里把落盘名原样反馈给用户。
       const dupNames = added.filter((name) => /_\d+\.[^./\\]+$/.test(name));
       const lines = added.map((name) => `  · ${name}`);
-      setNotice(
-        [
-          `✓ 已归档 ${added.length} 份资料：`,
-          ...lines,
-          dupNames.length > 0
-            ? `（${dupNames.length} 份与既有资料重名，已自动加序号保存，未覆盖原文件）`
-            : "",
-          "",
-          "后台开始构建课程索引…",
-        ].join("\n"),
-      );
+      const rejectedLines = (rejected ?? []).map((item) => `  · ${item.file}：${item.reason}`);
+      const noticeLines = [
+        `✓ 已归档 ${added.length} 份资料：`,
+        ...lines,
+        ...(dupNames.length > 0
+          ? [`（${dupNames.length} 份与既有资料重名，已自动加序号保存，未覆盖原文件）`]
+          : []),
+        ...(rejectedLines.length > 0
+          ? ["", `✗ ${rejected!.length} 份资料被拒绝归档：`, ...rejectedLines]
+          : []),
+        ...(buildError !== undefined ? ["", `✗ 构建失败：${buildError}`] : []),
+        ...(buildError === undefined && buildJobId !== null ? ["", "后台开始构建课程索引…"] : []),
+      ];
+      setNotice(noticeLines.join("\n"));
       setPickedFiles([]);
       if (fileRef.current) fileRef.current.value = "";
-      setBuildStatus("running");
-      if (buildJobId) {
+      setBuildStatus(buildJobId !== null && buildError === undefined ? "running" : "done");
+      if (buildJobId !== null && buildError === undefined) {
         await awaitBuild(buildJobId, activeCourseId, (msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
-        });
+        }, buildPollSignalRef.current);
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);
@@ -270,9 +283,10 @@ ${msg}`);
         `✓ 已创建课程 ${created.course}，归档 ${importPaths.length} 份资料，开始构建索引…`,
       );
       if (created.buildJobId) {
+        // FL-19：轮询绑定弹窗生命周期——关闭弹窗立即停止（旧实现僵尸轮询）。
         await awaitBuild(created.buildJobId, created.course, (msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
-        });
+        }, buildPollSignalRef.current);
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);

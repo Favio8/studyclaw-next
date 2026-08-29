@@ -69,7 +69,10 @@ function createDeepSeekAdapter(config: ResolvedChatConfig): DeepSeekAdapter {
     resolveApiKey: async (facts) => {
       const key = config.apiKey ?? process.env[facts.apiKeyEnv as string] ?? null
       if (key === null || key === '') {
-        throw new Error(`MISSING_CREDENTIAL: no API key configured (env ${String(facts.apiKeyEnv) || 'unset'} / credentials.json)`)
+        // FL-32：`configProblem`（course.ts:107-117）对 provider / Base URL / 默认模型
+        // 缺失都给出了中文且可操作的诊断，唯独密钥缺失抛的是英文裸串，风格断裂且没
+        // 告诉用户去哪补。这里统一到同一套措辞。
+        throw new Error(`缺少 API Key：请在 设置 → 模型配置 中为当前供应商填写密钥（环境变量 ${String(facts.apiKeyEnv) || '未设置'} 或 credentials.json）`)
       }
       return key
     },

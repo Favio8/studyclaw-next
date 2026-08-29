@@ -50,6 +50,21 @@ export class ApiError extends Error {
 }
 
 /**
+ * FL-30：宿主启动参数（token 等）。两种注入来源：
+ * 1. `studyclaw serve` 托管静态 UI 时由 index tap 注入（同源，生产路径）；
+ * 2. `next dev` 时由根布局从 host.json 读取注入（开发路径）。
+ */
+function bootstrapToken(): string | null {
+  const boot = (globalThis as unknown as { __STUDYCLAW__?: { token?: unknown } }).__STUDYCLAW__;
+  return typeof boot?.token === "string" && boot.token !== "" ? boot.token : null;
+}
+
+function authHeaders(): Record<string, string> {
+  const token = bootstrapToken();
+  return token === null ? {} : { Authorization: `Bearer ${token}` };
+}
+
+/**
  * RPC 协议（M1 起）：POST /api/<method>，body `{ payload }`，响应信封
  * `{ ok: true, result } | { ok: false, error: { code, message } }`。
  * 业务错误走信封错误分支（HTTP 200），传输层错误（网络/404/5xx）抛 ApiError。
@@ -57,7 +72,7 @@ export class ApiError extends Error {
 async function rpc<T>(method: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api/${method}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload === undefined ? {} : { payload }),
     signal,
   });
@@ -79,7 +94,7 @@ async function rpc<T>(method: string, payload?: unknown, signal?: AbortSignal): 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
   });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
@@ -101,7 +116,7 @@ async function uploadFiles<T>(path: string, files: File[]): Promise<T> {
     // 目录选择器会提供相对路径；它能让同名资料在归档后仍可辨识来源。
     form.append("files", file, file.webkitRelativePath || file.name);
   }
-  const response = await fetch(path, { method: "POST", body: form });
+  const response = await fetch(path, { method: "POST", headers: { ...authHeaders() }, body: form });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
@@ -127,6 +142,7 @@ export async function* streamSse<T extends { event: string }>(
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
+      ...authHeaders(),
       ...(headers ?? {}),
     },
     body: JSON.stringify(body),
@@ -184,6 +200,14 @@ function parseSseBlock<T extends { event: string }>(block: string): T | null {
 // ---------------------------------------------------------------------------
 
 export const api = {
+  /** FL-22：宿主心跳（GET /api/health）。前端探测失败时展示全屏
+   * "后端未启动"横幅，替代旧版三栏空壳零提示的死寂。 */
+  health: async (signal?: AbortSignal): Promise<{ ok: boolean }> => {
+    const response = await fetch("/api/health", { signal });
+    if (!response.ok) throw new ApiError("HOST_UNREACHABLE", `HTTP ${response.status}`, response.status);
+    return (await response.json()) as { ok: boolean };
+  },
+
   /** 指定项目的课程列表（M1 起经 RPC workspaces.courses 读取）。 */
   courseList: (path: string) => rpc<{ courses: CourseSummary[]; missing: boolean }>("workspaces.courses", { path }),
 
@@ -407,15 +431,22 @@ export const api = {
   workspaceCourses: (path: string) =>
     rpc<{ courses: CourseSummary[]; missing: boolean }>("workspaces.courses", { path }),
 
+  /** FL-19：buildJobId 可为 null（未配置模型不启动构建）；FL-12：消费
+   * rejected（超限/落盘失败清单）与 buildError（构建失败原因）。 */
   uploadSources: (courseId: string, files: File[]) =>
-    uploadFiles<{ added: string[]; buildJobId: string }>(
+    uploadFiles<{
+      added: string[];
+      buildJobId: string | null;
+      buildError?: string;
+      rejected?: Array<{ file: string; reason: string }>;
+    }>(
       `/api/courses/${courseId}/sources`,
       files,
     ),
 
   /** 网页链接 Ingest（api_spec §6.7）：URL -> 正文入 sources -> 增量构建。 */
   ingestUrl: (courseId: string, url: string, title?: string) =>
-    rpc<{ courseId: string; added: string; url: string; buildJobId: string }>(
+    rpc<{ courseId: string; added: string; url: string; buildJobId: string | null }>(
       "courses.ingestUrl",
       { courseId, url, title: title ?? null },
     ),

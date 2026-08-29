@@ -18,7 +18,13 @@ afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function makeCourse(): Promise<string> {
+/**
+ * 构造测试课程。FL-24 之后「是否已评测」的唯一事实源是 `progress.md`
+ * （`evalSubmit` 只写它，从不回写 task pool），所以要用进度板而不是
+ * `task.history.attempts` 来表达"这个概念练过几次"。
+ * @param cEvals - 概念 c_c 的评测次数（进度板口径）。
+ */
+async function makeCourse(cEvals = 0): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'studyclaw-pick-'))
   tmpRoots.push(root)
   const course = join(root, 'demo')
@@ -40,7 +46,7 @@ async function makeCourse(): Promise<string> {
     passRate: 0, streak: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
   })
   board = upsertProgressRecord(board, {
-    conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0, evals: 0,
+    conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0, evals: cEvals,
     passRate: 0, streak: 0, ef: 2.5, nextReviewAt: null, misattribution: 'none',
   })
   await saveProgressBoard(join(course, '.studyclaw', 'progress.md'), board)
@@ -77,7 +83,8 @@ describe('pickTasks', () => {
   })
 
   it('review 补位：attempts 升序先出，且每概念只补一张（Python parity）', async () => {
-    const course = await makeCourse()
+    // c_c 在进度板里已评测 3 次，不应被当成"未评测新卡"补位。
+    const course = await makeCourse(3)
     await writeTaskPool(course, [
       makeTask('t_b01', 'c_b', 0),
       makeTask('t_d01', 'c_b', 0, 3), // 同概念第二卡：补位按概念去重，不应出现
@@ -86,6 +93,40 @@ describe('pickTasks', () => {
     const picked = await pickTasks(course, 'review', null, 2, '2026-08-21')
     // 无到期卡 → 全部来自补位；attempts=0 优先，同概念只补一张。
     expect(picked.map(task => task.task_id)).toEqual(['t_b01'])
+  })
+
+  it('FL-24 回归：选题只认 progress.md，忽略恒为 0 的 task.history.attempts', async () => {
+    // c_c 在进度板里已评测 3 次，但 task 的 history 谎报 0 次（真实场景里
+    // history 恒为生成时的 0，因为评测从不回写 task pool）。旧实现会把所有
+    // 练过的卡都当新卡补进复习队列；新实现以进度板为准，c_c 不应被补位。
+    const course = await makeCourse(3)
+    await writeTaskPool(course, [
+      makeTask('t_b01', 'c_b', 0),
+      makeTask('t_c01', 'c_c', 0), // history 谎报"未评测"
+    ])
+    const picked = await pickTasks(course, 'review', null, 2, '2026-08-21')
+    expect(picked.map(task => task.task_id)).toEqual(['t_b01'])
+  })
+
+  it('FL-24 回归：到期卡按进度板的真实评测次数升序出卡', async () => {
+    const course = await makeCourse()
+    // 让 c_c 也到期，且评测次数（5）多于 c_a（1）。
+    const boardPath = join(course, '.studyclaw', 'progress.md')
+    let board = await loadProgressBoard(boardPath)
+    board = upsertProgressRecord(board, {
+      conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0.4, evals: 5,
+      passRate: 0.4, streak: 0, ef: 2.5, nextReviewAt: '2026-08-19', misattribution: 'none',
+    })
+    await saveProgressBoard(boardPath, board)
+    await writeTaskPool(course, [
+      // 两张卡的 history.attempts 都是 0（真实场景里评测从不回写 task pool），
+      // 且难度相同，因此若实现仍读 history 就会退化成按 task_id 排序 →
+      // 't_a00' 先于 't_a01'；按进度板的真实次数则 c_a(1) 应先于 c_c(5)。
+      makeTask('t_a00', 'c_c', 0),
+      makeTask('t_a01', 'c_a', 0),
+    ])
+    const picked = await pickTasks(course, 'review', null, 2, '2026-08-21')
+    expect(picked.map(task => task.task_id)).toEqual(['t_a01', 't_a00'])
   })
 
   it('dueOnly：只出到期卡，不补新卡（review 命令语义）', async () => {

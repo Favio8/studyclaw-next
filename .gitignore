@@ -17,6 +17,11 @@ out/
 # 临时 E2E 实验产物（非测试套件，勿提交）
 .e2e-*
 
+# 验证/冒烟临时目录与脚本（可能含本机凭据与密钥，勿提交）
+verify_tmp/
+.tmp-*
+.smoke-*
+
 # 本地运行时产物（host 注册表 / E2E 工作区，勿提交）
 .studyclaw/
 e2e-workspace/

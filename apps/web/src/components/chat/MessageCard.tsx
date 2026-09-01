@@ -99,7 +99,7 @@ export default function MessageCard({ message, onRetry, onBranch, branchUnavaila
       ) : null}
       {message.content ? (
         <div ref={contentRef} className="min-w-0" onMouseUp={onMouseUpInContent}>
-          <MarkdownView content={message.content} />
+          <MarkdownView content={message.content} streaming={streaming} />
           {streaming ? (
             <span className="stream-cursor text-accent-focus">█</span>
           ) : null}

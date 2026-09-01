@@ -124,8 +124,9 @@ class DeepSeekToolClient implements ToolLlmClient {
         yield { kind: 'text', delta: `<think>${chunk.text}</think>` }
       } else if (chunk.type === 'tool-call-delta') {
         const existing = callsByIndex.get(chunk.index) ?? { id: '', name: '', argumentsDelta: '' }
-        if (chunk.id !== undefined) existing.id = String(chunk.id)
-        if (chunk.name !== undefined) existing.name = chunk.name
+        // 与 translate 层同一契约：线格式可能显式给 null（sglang 系），视为缺席。
+        if (chunk.id != null) existing.id = String(chunk.id)
+        if (chunk.name != null) existing.name = String(chunk.name)
         existing.argumentsDelta += chunk.argumentsDelta
         callsByIndex.set(chunk.index, existing)
       } else if (chunk.type === 'finish' && chunk.reason.kind === 'error') {

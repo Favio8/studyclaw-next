@@ -62,6 +62,24 @@ describe('provider configuration write/read contract', () => {
     }
   })
 
+  it('falls back an empty display name to the provider id（UI「可选」契约）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-provider-noname-'))
+    try {
+      const payload = await saveProvider(root, {
+        id: 'qwen-lab',
+        name: '',
+        model: 'qwen3.8-27b-fp8',
+        baseUrl: 'https://gw.example/v1',
+      })
+      const saved = payload.providers.find((p) => p.id === 'qwen-lab')
+      expect(saved?.name).toBe('qwen-lab')
+      const config = await readYaml(root)
+      expect(((config['providers'] as Record<string, Record<string, unknown>>)['qwen-lab'])['name']).toBe('qwen-lab')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('loadChatConfig falls back to the first provider when the active pointer dangles', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-provider-fallback-'))
     try {

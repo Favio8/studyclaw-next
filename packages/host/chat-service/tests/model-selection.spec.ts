@@ -41,7 +41,10 @@ describe('session model directory', () => {
     expect(next.current).toEqual({ provider: 'acme', model: 'acme-large', effort: 'high' })
     const history = await readFile(join(root, '.studyclaw', 'history', `session_${sessionId}.jsonl`), 'utf8')
     expect(history).toContain('"type":"session_model"')
-    expect(history).toContain('"effort":"high"')
+    // 会话创建即登记事件日志后，选模走事件日志（运行时的事实来源），遗留 jsonl 只留创建时的默认模型行。
+    const events = await readFile(join(root, '.studyclaw', 'history', `session_${sessionId}.events.jsonl`), 'utf8')
+    expect(events).toContain('"type":"session/model"')
+    expect(events).toContain('"effort":"high"')
     await rm(root, { recursive: true, force: true })
   })
 

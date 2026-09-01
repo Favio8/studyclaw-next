@@ -22,11 +22,17 @@ import type {
 export interface RequestDefaults {
   thinking?: 'enabled' | 'disabled' | undefined
   reasoningEffort?: 'off' | 'low' | 'high' | 'max' | undefined
+  /**
+   * Also send the OpenAI-standard `reasoning_effort: "none"` when disabling
+   * thinking. Self-hosted gateways (SGLang, vLLM) ignore the private DeepSeek
+   * `thinking` field and only stop reasoning on the standard one.
+   */
+  noneEffortWhenDisabled?: boolean | undefined
 }
 
 interface ResolvedThinking {
   thinking?: 'enabled' | 'disabled'
-  reasoningEffort?: 'low' | 'high' | 'max'
+  reasoningEffort?: 'low' | 'high' | 'max' | 'none'
 }
 
 /** Dependencies required only when the request contains image input. */
@@ -52,9 +58,17 @@ function reasoningEffort(effort: NonNullable<GenerateOptions['reasoningEffort']>
   )
 }
 
+/** One place builds the disabled payload so every off path shares the wire fields. */
+function disabledThinking(defaults: RequestDefaults): ResolvedThinking {
+  return {
+    thinking: 'disabled',
+    ...defaults.noneEffortWhenDisabled === true ? { reasoningEffort: 'none' as const } : {},
+  }
+}
+
 /** Resolve one legal thinking/effort pair without exposing `off` as a wire effort. */
 function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): ResolvedThinking {
-  if (options.purpose === 'session-title') return { thinking: 'disabled' }
+  if (options.purpose === 'session-title') return disabledThinking(defaults)
   const effort = options.reasoningEffort === undefined
     ? defaults.reasoningEffort
     : reasoningEffort(options.reasoningEffort)
@@ -64,11 +78,13 @@ function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): R
       'UNSUPPORTED_REASONING_EFFORT',
     )
   }
-  if (effort === 'off') return { thinking: 'disabled' }
+  if (effort === 'off') return disabledThinking(defaults)
   if (effort === 'low' || effort === 'high' || effort === 'max') {
     return { thinking: 'enabled', reasoningEffort: effort }
   }
-  return defaults.thinking === undefined ? {} : { thinking: defaults.thinking }
+  return defaults.thinking === undefined ? {} : defaults.thinking === 'disabled'
+    ? disabledThinking(defaults)
+    : { thinking: defaults.thinking }
 }
 
 /** Join the text blocks of a message (used for user/tool-result content). */

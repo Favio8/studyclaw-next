@@ -156,8 +156,11 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
           toolBlocks.set(call.index, block)
           yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
         }
-        if (call.id !== undefined) block.callId = call.id
-        if (call.function?.name !== undefined) block.name = call.function.name
+        // vLLM/sglang 系端点在后续增量块里会显式发 `"id"/"name": null`
+        // （DeepSeek 官方是省略字段）；null 一旦被当作有效值写进 block，
+        // 会一路穿透到会话层的行校验炸掉整个 turn——必须与 undefined 同等对待。
+        if (call.id != null) block.callId = call.id
+        if (call.function?.name != null) block.name = call.function.name
         const fragment = call.function?.arguments ?? ''
         block.text += fragment
         yield {

@@ -552,7 +552,8 @@ const handlers = {
   'settings.saveProvider': {
     payload: z.object({
       id: z.string().min(1),
-      name: z.string().min(1),
+      // 显示名称可选：域层留空回退为 id（UI placeholder「可选」契约）。
+      name: z.string(),
       model: z.string(),
       baseUrl: z.string().nullish(),
       temperature: z.number().optional(),

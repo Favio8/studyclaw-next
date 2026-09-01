@@ -116,6 +116,31 @@ const OFF_ONLY_REASONING_EFFORTS = [
   { id: OFF_REASONING_EFFORT, name: 'Off' },
 ] as const
 
+/**
+ * Request defaults as they go on the wire for one endpoint. The official host
+ * keeps the private `thinking` contract untouched; any other base URL is a
+ * self-hosted OpenAI-compatible gateway (SGLang, vLLM, ...) that ignores that
+ * field and stops reasoning only on the standard `reasoning_effort: "none"`.
+ */
+function wireDefaults(connection: DeepSeekConnectionOptions): RequestDefaults {
+  const isOfficialHost = (() => {
+    try {
+      return new URL(connection.baseURL).hostname === 'api.deepseek.com'
+    } catch {
+      return false
+    }
+  })()
+  return isOfficialHost ? connection.defaults : { ...connection.defaults, noneEffortWhenDisabled: true }
+}
+
+/** Socket-level codes that mean undici picked a server-closed pooled connection. */
+const DEAD_POOLED_SOCKET_CODES = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE'])
+
+function isDeadPooledSocket(error: unknown): boolean {
+  const code = (error as { cause?: { code?: unknown } } | null)?.cause?.code
+  return typeof code === 'string' && DEAD_POOLED_SOCKET_CODES.has(code)
+}
+
 function modelInfo(provider: string, model: DeepSeekCatalogModel): LlmModelInfo {
   return {
     provider,
@@ -310,13 +335,14 @@ export class DeepSeekAdapter extends LlmAdapter {
     attachments: AttachmentStore | undefined,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
+    const defaults = wireDefaults(connection)
     const body = attachments === undefined
-      ? serializeRequest(options, connection.defaults)
+      ? serializeRequest(options, defaults)
       : await serializeRequestWithImages(options, {
         attachments,
         maxRequestImageBytes: connection.maxRequestImageBytes,
         signal,
-      }, connection.defaults)
+      }, defaults)
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
@@ -337,25 +363,34 @@ export class DeepSeekAdapter extends LlmAdapter {
     // TODO(http): adopt the Cordis HTTP service when shared transport configuration
     // outweighs its additional runtime dependencies.
     let response: Response
-    try {
-      response = await fetch(`${connection.baseURL}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: payload,
-        signal,
-      })
-    } catch (error: unknown) {
-      // The outer stream distinguishes caller cancellation and watchdog expiry.
-      if (signal.aborted) throw error
-      // fetch wraps every transport failure (DNS, refused connection, TLS,
-      // proxy) in a bare `TypeError: fetch failed` whose actionable detail
-      // lives on `cause`. Wrapping with the endpoint and chaining the cause
-      // lets `errorChain` render the full diagnosis at every reporting boundary.
-      throw new LlmError(
-        `DeepSeek API request to ${connection.baseURL} failed`,
-        'TRANSPORT',
-        { cause: error },
-      )
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        response = await fetch(`${connection.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers,
+          body: payload,
+          signal,
+        })
+        break
+      } catch (error: unknown) {
+        // The outer stream distinguishes caller cancellation and watchdog expiry.
+        if (signal.aborted) throw error
+        // undici's global agent pools keep-alive connections; self-hosted
+        // gateways (SGLang, vLLM, ...) commonly close idle sockets while the
+        // pool still holds them, so the next request dies before touching the
+        // wire and Node's fetch will not retry a body-bearing POST. The
+        // request was never delivered, so one silent re-send is safe.
+        if (attempt === 0 && isDeadPooledSocket(error)) continue
+        // fetch wraps every transport failure (DNS, refused connection, TLS,
+        // proxy) in a bare `TypeError: fetch failed` whose actionable detail
+        // lives on `cause`. Wrapping with the endpoint and chaining the cause
+        // lets `errorChain` render the full diagnosis at every reporting boundary.
+        throw new LlmError(
+          `DeepSeek API request to ${connection.baseURL} failed`,
+          'TRANSPORT',
+          { cause: error },
+        )
+      }
     }
 
     if (!response.ok) {

@@ -248,6 +248,33 @@ describe('serializeRequest', () => {
     expect(wire.reasoning_effort).toBeUndefined()
   })
 
+  it('pairs off with the standard none effort for self-hosted gateways', () => {
+    const wire = serializeRequest(
+      request({ messages: history, reasoningEffort: ReasoningEffortId('off') }),
+      { thinking: 'enabled', reasoningEffort: 'max', noneEffortWhenDisabled: true },
+    )
+    expect(wire.thinking).toEqual({ type: 'disabled' })
+    expect(wire.reasoning_effort).toBe('none')
+  })
+
+  it('pairs the session-title disable path with the standard none effort too', () => {
+    const wire = serializeRequest(
+      request({ messages: history, purpose: 'session-title' }),
+      { noneEffortWhenDisabled: true },
+    )
+    expect(wire.thinking).toEqual({ type: 'disabled' })
+    expect(wire.reasoning_effort).toBe('none')
+  })
+
+  it('leaves an enabled effort alone when the gateway flag is on', () => {
+    const wire = serializeRequest(
+      request({ messages: history, reasoningEffort: ReasoningEffortId('low') }),
+      { thinking: 'enabled', reasoningEffort: 'high', noneEffortWhenDisabled: true },
+    )
+    expect(wire.thinking).toEqual({ type: 'enabled' })
+    expect(wire.reasoning_effort).toBe('low')
+  })
+
   it('re-enables thinking when max overrides an off default', () => {
     const wire = serializeRequest(
       request({ messages: history, reasoningEffort: ReasoningEffortId('max') }),

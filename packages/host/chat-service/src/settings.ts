@@ -411,6 +411,9 @@ export async function saveProvider(workspaceRoot: string, input: {
   if (!/^[a-z][a-z0-9-]*$/.test(id)) {
     throw new Error('Provider ID 必须以小写字母开头且只含小写字母/数字/连字符')
   }
+  // 显示名称在 UI 中是可选字段（placeholder「可选」），留空时回退为 id——
+  // 行卡片与设置负载本来就用 `name || id` 兜底展示。
+  const name = input.name.trim() || id
   const config = await readConfig(workspaceRoot)
   const existing = config.providers?.[id]
   if (existing !== undefined && input.overwrite !== true) {
@@ -421,7 +424,7 @@ export async function saveProvider(workspaceRoot: string, input: {
     // 先展开既有 profile：未知键与未改字段原样保留（merge，非重建）。
     ...(existing ?? {}),
     id,
-    name: input.name.trim(),
+    name,
     model: input.model.trim(),
     base_url: input.baseUrl?.trim() || null,
     api_key_env: existing?.api_key_env ?? null,

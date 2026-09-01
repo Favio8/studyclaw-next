@@ -902,6 +902,11 @@ export async function createSession(
   const courseDir = courseDirOf(workspaceRoot, courseId)
   const store = new SessionStore(join(stateDirOf(courseDir), 'history'))
   const { sessionId, path } = await store.newSession(mode, title)
+  // chatStream 的 TutorSession.init 只认「遗留 jsonl 或事件日志」二者之一，而遗留
+  // 目录与这里的 .studyclaw/history 不是同一处；补写 session/create 事件，保证
+  // 先建会话再发消息（CLI 路径）不会报「会话不存在」。
+  const events = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
+  await events.append(sessionId, { ts: utcTs(), type: 'session/create', payload: { mode, agentId: `study-${sessionId}` } })
   const config = await loadChatConfig(workspaceRoot)
   if (config.providerId !== '' && config.model !== '' && !deprecatedModel(config.model)) {
     await store.append(sessionId, sessionModelLine.parse({ type: 'session_model', ts: utcTs(), provider: config.providerId, model: config.model }))

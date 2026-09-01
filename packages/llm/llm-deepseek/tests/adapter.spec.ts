@@ -286,8 +286,8 @@ describe('DeepSeekAdapter against a mock server', () => {
     })
     expect(server.requests[1]).toMatchObject({
       thinking: { type: 'disabled' },
+      reasoning_effort: 'none',
     })
-    expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
     expect(server.requests[2]).toMatchObject({
       thinking: { type: 'enabled' },
       reasoning_effort: 'max',
@@ -308,7 +308,7 @@ describe('DeepSeekAdapter against a mock server', () => {
     expect(server.requests[1]).toMatchObject({ max_tokens: 8_192 })
   })
 
-  it('publishes only off and omits the wire effort when thinking is disabled', async () => {
+  it('pairs a deployment locked to disabled with the standard none effort on gateways', async () => {
     const server = await mockServer([{ kind: 'sse', events: textEvents }])
     const ctx = await harness(server.url, { thinking: 'disabled' })
 
@@ -321,8 +321,8 @@ describe('DeepSeekAdapter against a mock server', () => {
     })
     expect(server.requests[0]).toMatchObject({
       thinking: { type: 'disabled' },
+      reasoning_effort: 'none',
     })
-    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
         reasoning: {

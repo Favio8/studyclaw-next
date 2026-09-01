@@ -147,6 +147,29 @@ describe('translate: tool calls', () => {
     ])
   })
 
+  it('ignores explicit null id/name in continuation deltas (vLLM/sglang shape)', async () => {
+    // sglang 系端点的后续增量块显式发 `"id": null` / `"name": null`（官方 API
+    // 是省略字段）；`!== undefined` 守卫会把 null 当有效值写进块，最终以
+    // `toolLine.parse({name: null})` 炸掉整个会话 turn（AGENT_TURN_FAILED）。
+    const chunks = await collect(translate(feed(
+      firstChunk,
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x', type: 'function', function: { name: 'search_files', arguments: '' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: null, type: 'function', function: { name: null, arguments: '{"q"' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: null, type: 'function', function: { name: null, arguments: ': "harness"}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    )))
+    for (const chunk of chunks) {
+      if (chunk.type === 'tool-call-delta') {
+        expect(chunk.name === undefined || typeof chunk.name === 'string').toBe(true)
+      }
+    }
+    const ends = chunks.filter(chunk => chunk.type === 'block-end')
+    expect(ends).toEqual([
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call_x', name: 'search_files', arguments: '{"q": "harness"}' } },
+    ])
+  })
+
   it('interleaves text and tool-call blocks with distinct indices', async () => {
     const chunks = await collect(translate(feed(
       firstChunk,

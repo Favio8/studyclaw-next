@@ -1,7 +1,8 @@
 node_modules/
 lib/
-!apps/web/src/lib/
-!apps/web/src/lib/**
+# 源码目录 src/lib 不是构建产物，必须重新包含（lib/ 规则会吞掉任意深度的 lib/）
+!**/src/lib/
+!**/src/lib/**
 dist/
 *.tsbuildinfo
 *.log

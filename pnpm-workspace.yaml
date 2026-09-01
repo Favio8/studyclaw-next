@@ -14,3 +14,17 @@ linkWorkspacePackages: true
 # pnpm v11 的 blockExoticSubdeps 拒绝 URL 型传递依赖，file: 引用可过关。
 overrides:
   xlsx: file:vendor/tarballs/xlsx-0.20.3.tgz
+  # 2026-09 依赖审计（pnpm audit）后续封堵：均为传递依赖，运行时影响有限，
+  # 但 patch 版本 API 兼容，统一指到补丁版让审计归零。
+  # lodash：mammoth>argparse 传递依赖（argparse 仅 mammoth 自带 CLI 使用），
+  #   锁定的 3.2.0 命中多条原型污染/命令注入通告，指到 4.x 最新。
+  lodash: ^4.18.1
+  # fast-csv / @fast-csv/parse：exceljs 传递依赖，<4.3.6 有 DoS 通告。
+  fast-csv: ^4.3.6
+  '@fast-csv/parse': ^4.3.6
+  # bl：exceljs>archiver>tar-stream 传递依赖，<4.0.3 有内存泄露通告。
+  bl: ^4.0.3
+  # ansi-regex：仅 dev 测试链（@testing-library），<5.0.1 有 ReDoS 通告。
+  ansi-regex: ^5.0.1
+  # 未封堵：exceljs>uuid@8 的 v3/v5/v6 buf 越界通告（moderate）——exceljs 仅调用
+  # v4() 且不传 buf，不可达；升级 uuid 主版本风险大于收益，留待 exceljs 上游处理。

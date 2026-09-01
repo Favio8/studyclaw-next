@@ -347,14 +347,10 @@ cd apps/web && pnpm dev
 | `pnpm build`                                               | 全量构建                       |
 | `pnpm release:pack` / `release:verify` / `release:publint` | 打包 / 真装验证 / 发布规范检查         |
 
-> 慢机器（Windows + 机械盘）上若 
+> 默认测试超时已内置为 60s（与 CI 同口径），正常机器开箱即绿。极慢的机械盘上若仍出现个别 I/O 超时假红，可加
+> `-- --testTimeout=120000 --hookTimeout=120000`
 >
-> `pnpm test`
->
->  出现 I/O 超时假红，改用
-> `node_modules/.bin/vitest run --testTimeout=60000 --hookTimeout=60000`
->
-> （CI 同口径，单测本身无失败）。
+> 再跑；单独重跑该文件必然通过的即为假红（非回归）。
 
 ### 目录结构
 
@@ -460,7 +456,15 @@ A：可直接用仓库内二进制，例如 `node_modules/.bin/tsx apps/cli/src/
 
 **Q：测试报超时失败？**
 
-A：多为慢磁盘并发下的假红（非回归），按开发指南加 `--testTimeout=60000 --hookTimeout=60000` 即可全绿；单独跑该测试文件也必然通过。
+A：默认超时已内置为 60s（CI 同口径），正常机器开箱即绿。极慢磁盘并发下若仍有个别 I/O 超时假红（非回归），加 `-- --testTimeout=120000 --hookTimeout=120000` 重跑即可；单独跑该测试文件也必然通过。
+
+**Q：对话里同一条用户消息出现了两次？**
+
+A：极少数情况下，SSE 流式回合中途失败（如网关断连）时，用户消息已写入会话文件但回复未生成，重发会形成重复消息。可手动修正：打开 `<项目>/.studyclaw/history/<会话ID>.jsonl`，删除内容相同且时间戳相邻的重复行；或用消息上的「从此处创建分支」从较早位置另起分支。该边界计划在 beta 期内修复。
+
+**Q：自托管网关（SGLang 等）上对话总是莫名断开？**
+
+A：部分 SGLang 版本对输出含 `<script>(` 模式的请求会确定性断连，而「交互演示块」的历史回放恰好满足该模式。当前版本已把回放中的旧演示块替换为占位行来规避；若仍遇到，请升级网关版本或新建会话（不要在受影响的旧会话上续聊），并欢迎在 Issue 里附上网关版本号。
 
 **Q：数据文件可以手动看 / 改吗？**
 
@@ -472,7 +476,7 @@ A：可以，这是「文件即状态」的设计目标：`progress.md` 是纯 M
 
 ## 贡献
 
-欢迎 Issue、PR 与试用反馈。开始之前建议先阅读：
+欢迎 Issue、PR 与试用反馈。开始之前请阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)（开发环境、测试门禁、提交规范与仓库导览），并遵守[行为准则](./CODE_OF_CONDUCT.md)。安装、配置等使用问题优先到 [Discussions](https://github.com/Favio8/studyclaw/discussions) 提问，便于后来者检索。
 
 
 
@@ -482,7 +486,7 @@ A：可以，这是「文件即状态」的设计目标：`progress.md` 是纯 M
 
 * Issue 请尽量附上：操作系统、Node 版本、`studyclaw status` 输出、`~/.studyclaw/logs/` 相关日志与复现步骤
 
-> 安全问题请不要直接开公开 Issue，优先私下联系维护者（详见后续补充的 SECURITY.md）。
+> 安全问题请不要直接开公开 Issue，优先走[私密安全上报](./SECURITY.md)。
 
 ## 致谢
 

@@ -270,6 +270,15 @@ body {
   }
 }
 
+/* 消息操作图标的小弹跳（复制成功 ✓ 等状态切换） */
+@keyframes ds-icon-pop {
+  from { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); }
+}
+.ds-icon-pop {
+  animation: ds-icon-pop 220ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ds-reasoning-row[data-state="running"]::after {
     animation: none;
@@ -278,6 +287,9 @@ body {
     animation: none;
   }
   .ds-row-in {
+    animation: none;
+  }
+  .ds-icon-pop {
     animation: none;
   }
 }

@@ -78,7 +78,7 @@ export default function MessageActions({
           aria-label="转为复习卡片"
           title="转为复习卡片"
           onClick={() => onInstantCard(text)}
-          className="flex h-7 items-center gap-1 rounded-full px-2 text-[12px] text-text-faint transition-colors hover:bg-bg-card hover:text-accent-focus"
+          className="flex h-7 items-center gap-1 rounded-full px-2 text-[12px] text-text-faint transition-[color,background-color,transform] duration-150 hover:bg-bg-card hover:text-accent-focus active:scale-95"
         >
           <ClipboardPlus size={14} strokeWidth={1.7} aria-hidden />
           转复习卡
@@ -91,7 +91,7 @@ export default function MessageActions({
           aria-disabled={branchUnavailable || branching || undefined}
           title={branchUnavailable ? "当前回复完成后可创建分支" : "从此处创建分支"}
           onClick={() => void branch()}
-          className="flex h-7 w-7 items-center justify-center rounded-full text-text-faint transition-colors hover:bg-bg-card hover:text-text-muted aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
+          className="flex h-7 w-7 items-center justify-center rounded-full text-text-faint transition-[color,background-color,transform] duration-150 hover:bg-bg-card hover:text-accent-focus active:scale-90 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 aria-disabled:hover:text-text-faint"
         >
           <GitBranch size={14} strokeWidth={1.7} aria-hidden />
         </button>
@@ -101,10 +101,12 @@ export default function MessageActions({
         aria-label={copied ? "已复制" : "复制"}
         title={copied ? "已复制" : "复制"}
         onClick={() => void copy()}
-        className="flex h-7 w-7 items-center justify-center rounded-full text-text-faint transition-colors hover:bg-bg-card hover:text-text-muted"
+        className={`flex h-7 w-7 items-center justify-center rounded-full transition-[color,background-color,transform] duration-150 hover:bg-bg-card hover:text-accent-focus active:scale-90 ${
+          copied ? "text-accent-pass" : "text-text-faint"
+        }`}
       >
         {copied ? (
-          <Check size={14} strokeWidth={1.8} aria-hidden />
+          <Check size={14} strokeWidth={2} aria-hidden className="ds-icon-pop" />
         ) : (
           <Clipboard size={14} strokeWidth={1.7} aria-hidden />
         )}

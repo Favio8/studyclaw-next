@@ -20,13 +20,16 @@ interface FakeScript {
 }
 
 class FakeLlmClient implements ToolLlmClient {
+  readonly received: Array<Array<Record<string, unknown>>> = []
+
   constructor(private readonly script: FakeScript) {}
 
   async *request(
     _system: string,
-    _messages: Array<Record<string, unknown>>,
+    messages: Array<Record<string, unknown>>,
     _tools: Array<Record<string, unknown>> | null,
   ): AsyncGenerator<{ kind: 'text'; delta: string } | { kind: 'toolCalls'; calls: ToolCall[] }> {
+    this.received.push(messages)
     for (const round of this.script.rounds) {
       if (round.text !== undefined) yield { kind: 'text', delta: round.text }
       if (round.calls !== undefined) yield { kind: 'toolCalls', calls: round.calls }
@@ -202,6 +205,82 @@ describe('TutorSession chat loop', () => {
     for await (const _ of resumed.chatEvents('第二问')) { /* consume */ }
     const history2 = await resumed.history()
     expect(history2.map(c => c.content)).toEqual(['第一问', '第一轮回答。', '第二问', '第二轮回答。'])
+    await rm(root, { recursive: true, force: true })
+  })
+
+  // 网关会在任何含 `<script>(...)` 的请求上毫秒级断连；完整交互演示块必然
+  // 命中。落盘保留全量块（UI 渲染），模型回放只见占位行。
+  const interactiveReply = [
+    '看这个演示。', '',
+    '```sc-interactive',
+    '<title>演示甲</title>',
+    '<script>(function () { document.body.textContent = "hi" })()</script>',
+    '```', '',
+    '以上是演示。',
+  ].join('\n')
+
+  function replayedAssistant(client: FakeLlmClient): string {
+    const request = client.received[client.received.length - 1]!
+    const assistant = request.filter(message => message['role'] === 'assistant')
+    expect(assistant).toHaveLength(1)
+    return String(assistant[0]!['content'])
+  }
+
+  it('elides closed sc-interactive bodies from replayed history (legacy store)', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const first = makeSession(courseDir, wsRoot, { rounds: [{ text: interactiveReply }] }, { new: true })
+    await first.init()
+    for await (const _ of first.chatEvents('给我一个演示')) { /* consume */ }
+
+    const persisted = await new SessionStore(join(courseDir, 'history')).loadChat(first.sessionId)
+    expect(persisted[1]!.content).toContain('<script>')
+
+    const client = new FakeLlmClient({ rounds: [{ text: '第二轮。' }] })
+    const resumed = new TutorSession(courseDir, wsRoot, {
+      sessionId: first.sessionId,
+      toolRegistry: defaultToolRegistry(courseDir, wsRoot),
+      toolClientFactory: () => client,
+    })
+    await resumed.init()
+    for await (const _ of resumed.chatEvents('继续')) { /* consume */ }
+
+    const replayed = replayedAssistant(client)
+    expect(replayed).not.toContain('<script>')
+    expect(replayed).toContain('```sc-interactive')
+    expect(replayed).toContain('已被系统省略（演示甲）')
+    expect(replayed).toContain('看这个演示。')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('elides closed sc-interactive bodies from replayed history (event log)', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const eventStore = new SessionEventStore(join(courseDir, 'history'))
+    const first = makeSession(courseDir, wsRoot, { rounds: [{ text: interactiveReply }] }, {
+      new: true, persistLegacy: false, eventStore,
+    })
+    await first.init()
+    // 事件持久化由宿主 AgentLoop 负责：送前写 user/input，收完写 assistant/message。
+    await eventStore.append(first.sessionId, { ts: utcTs(), type: 'user/input', payload: { content: '给我一个演示' } })
+    for await (const _ of first.chatEvents('给我一个演示')) { /* consume */ }
+    await eventStore.append(first.sessionId, { ts: utcTs(), type: 'assistant/message', payload: { content: interactiveReply, provider: 'fake' } })
+
+    const projection = await eventStore.project(first.sessionId)
+    expect(projection.messages.map(message => message.content)[1]).toContain('<script>')
+
+    const client = new FakeLlmClient({ rounds: [{ text: '第二轮。' }] })
+    const resumed = new TutorSession(courseDir, wsRoot, {
+      sessionId: first.sessionId,
+      persistLegacy: false,
+      eventStore,
+      toolRegistry: defaultToolRegistry(courseDir, wsRoot),
+      toolClientFactory: () => client,
+    })
+    await resumed.init()
+    for await (const _ of resumed.chatEvents('继续')) { /* consume */ }
+
+    const replayed = replayedAssistant(client)
+    expect(replayed).not.toContain('<script>')
+    expect(replayed).toContain('已被系统省略（演示甲）')
     await rm(root, { recursive: true, force: true })
   })
 })

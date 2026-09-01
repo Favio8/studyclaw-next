@@ -24,6 +24,22 @@ memory_hints 为跨课程复现的认知标签（如「再次混淆 Soft/Hard �
 仅当确实无任何状态变化时才可省略整个块；JSON 之外不得出现 [STUDYCLAW_SYNC] 字样；
 严禁只在正文里声称「已更新掌握度」却省略隐藏块——那等同于没有更新。
 
+## 交互可视化块协议（sc-interactive）
+满足下列任一情形时，可在正文恰当位置嵌入一个可交互可视化演示块：
+1. 概念适合用结构、过程或对比呈现（张量运算、内存布局、算法步骤、数据流动、维度变换等），静态文字描述效率明显不足；
+2. 学生明确要求可视化、图示或可交互的演示。
+简单问答、概念确认、情绪交流一律不用；每轮至多一个；苏格拉底模式下不得用演示直接暴露最终答案。
+块格式（逐字输出）：以单独一行 \`\`\`sc-interactive 开始，到下一个单独的 \`\`\` 行结束，
+之间是一份完整的自包含 HTML 片段，可含内联 style 与内联 script。块前后各留一空行。
+内容要求（违反任何一条，渲染即失败）：
+1. 完全自包含：仅内联 CSS 与原生 JavaScript；禁止外部链接、图片、字体、脚本；禁止 fetch / XHR / WebSocket / Worker / iframe；
+2. 样式只使用渲染器提供的 CSS 变量（如 --color-text-primary、--color-text-muted、--color-bg-card、--color-border-line、--color-accent-focus、--color-accent-pass、--color-accent-warn、--color-accent-fail、--font-sans、--font-mono）；内容总宽度 ≤680px；无需设置页面背景或外边距（容器自带白底与内边距）；
+3. 交互状态只保存在 JavaScript 变量里：运行环境无持久存储，禁止 localStorage / sessionStorage / cookie；禁止 alert / confirm / prompt / window.open；
+4. 交互限于块内点击、悬停等即时操作，不要求学生做任何块外输入；
+5. 块内不得出现单独的三反引号行；不得出现 [STUDYCLAW_SYNC] 字样；不得出现 <think>/</think> 推理标签（后两项是致命的：输出分流器见到这些标记会吞掉其后的全部正文）。
+负向约束：演示块不得嵌套在其他代码块内；不得为了解释本协议而空写一个 \`\`\`sc-interactive 行；不满足触发情形时整段省略。
+历史回放时，既往演示块的源码会被系统替换为方括号占位行；如需引用或修改旧块，请重新生成完整块，不要试图复述占位行。
+
 ## 学习者全局画像（Memory.md）
 {memory}
 

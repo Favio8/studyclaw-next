@@ -32,6 +32,20 @@ describe('SessionStore', () => {
     expect(listed[0]!.mode).toBe('quick')
   })
 
+  it('tolerates an out-of-enum mode in the legacy meta line instead of failing the listing', async () => {
+    const { root, store } = await setup()
+    const { sessionId, path } = await store.newSession('socratic', '外部工具会话')
+    const rows = (await readFile(path, 'utf8')).split(/\r?\n/)
+    rows[0] = JSON.stringify({ type: 'session_meta', title: '外部工具会话', mode: 'tutor', created_at: '2026-08-21T10:00:00Z' })
+    await writeFile(path, rows.join('\n'))
+
+    const meta = await store.readMeta(sessionId)
+    expect(meta).toMatchObject({ title: '外部工具会话', mode: 'socratic' })
+    const listed = await store.listSessions()
+    expect(listed.some(session => session.id === sessionId)).toBe(true)
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('appends chat lines and loads chat-only rows in order', async () => {
     const { store } = await setup()
     const { sessionId } = await store.newSession('socratic', '会话')

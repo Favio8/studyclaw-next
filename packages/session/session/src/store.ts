@@ -8,7 +8,7 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { chatLine, sessionMetaLine, sessionModelLine, type ChatLine, type HistoryLine, type LearningMode, type SessionMetaLine, type SessionModelLine } from './models.ts'
+import { LEARNING_MODES, chatLine, sessionMetaLine, sessionModelLine, type ChatLine, type HistoryLine, type LearningMode, type SessionMetaLine, type SessionModelLine } from './models.ts'
 
 const SESSION_FILE_RE = /^session_(\d{8}-\d{6})\.jsonl$/
 const EVENT_FILE_RE = /^session_(\d{8}-\d{6})\.events\.jsonl$/
@@ -313,7 +313,18 @@ export class SessionStore {
       return null
     }
     if (typeof line !== 'object' || line === null || (line as { type?: string }).type !== 'session_meta') return null
-    return sessionMetaLine.parse(line)
+    const parsed = sessionMetaLine.safeParse(line)
+    if (parsed.success) return parsed.data
+    // 容忍越界 meta（如外部工具写入了枚举外的 mode）：只保留合法字段、让默认值兜底，
+    // 否则一条坏会话会让 sessions.list 整体失败。
+    const record = line as Record<string, unknown>
+    const coerced = sessionMetaLine.safeParse({
+      type: 'session_meta',
+      title: typeof record['title'] === 'string' ? record['title'] : '',
+      ...(LEARNING_MODES.includes(record['mode'] as LearningMode) ? { mode: record['mode'] } : {}),
+      created_at: typeof record['created_at'] === 'string' ? record['created_at'] : '',
+    })
+    return coerced.success ? coerced.data : null
   }
 
   /** Read every raw JSON row (tolerates corrupt lines: skipped). */

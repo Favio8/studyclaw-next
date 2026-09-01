@@ -73,6 +73,50 @@ export function publicToolArgs(name: string, args: Record<string, unknown>, maxS
   return out
 }
 
+const INTERACTIVE_FENCE_OPEN = /^ {0,3}```\s*sc-interactive\s*$/
+const FENCE_CLOSE = /^ {0,3}```\s*$/
+
+function interactiveBlockSummary(body: string[]): string {
+  const title = /<title>\s*([^<]+?)\s*<\/title>/i.exec(body.join('\n'))
+  return title !== null && title[1]!.trim() !== '' ? `（${title[1]!.trim()}）` : ''
+}
+
+/**
+ * Replace sc-interactive fence bodies with a one-line placeholder. The lab
+ * gateway drops the connection in milliseconds once any message contains
+ * `<script ...>(...)` — which every closed interactive block satisfies — so
+ * replayed history must never carry the raw HTML/JS. Persistence and UI
+ * rendering keep the full block; only the model-facing reconstruction is
+ * elided. Unclosed fences are elided the same way — their body can still
+ * carry the trigger pattern, and the placeholder also re-closes the fence so
+ * the replayed markdown stays well-formed.
+ */
+export function elideInteractiveBlocks(content: string): string {
+  if (!content.includes('```sc-interactive')) return content
+  const lines = content.split('\n')
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    if (!INTERACTIVE_FENCE_OPEN.test(line)) {
+      out.push(line)
+      i += 1
+      continue
+    }
+    const body: string[] = []
+    let j = i + 1
+    while (j < lines.length && !FENCE_CLOSE.test(lines[j]!)) {
+      body.push(lines[j]!)
+      j += 1
+    }
+    out.push(line)
+    out.push(`[该交互演示块的源码在回放时已被系统省略${interactiveBlockSummary(body)}；需要引用或修改时请重新生成完整块]`)
+    out.push('```')
+    i = j + 1
+  }
+  return out.join('\n')
+}
+
 /**
  * One session's orchestration over its course. Instantiate with
  * `new: true` to create the session file, or with an existing `sessionId`
@@ -252,7 +296,9 @@ export class TutorSession {
       : await this.store.loadChat(this.sessionId)
     const messages = priorMessages.map(line => ({
       role: line.role === 'agent' ? 'assistant' : line.role,
-      content: line.content,
+      // 历史回放省略交互演示块体：原始 HTML/JS 会触发网关断连（见
+      // elideInteractiveBlocks），落盘与 UI 渲染不受影响。
+      content: elideInteractiveBlocks(line.content),
     }))
     const answeredAsk = await this.pendingAsk()
     if (answeredAsk !== null) {

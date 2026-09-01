@@ -38,6 +38,7 @@ export { SyncApplier } from './applier.ts'
 export {
   TutorSession,
   publicToolArgs,
+  elideInteractiveBlocks,
   DEFAULT_TOOL_LOOP_LIMIT,
 } from './session.ts'
 export type { ChatEvent, ToolCall, ToolLlmClient } from './session.ts'

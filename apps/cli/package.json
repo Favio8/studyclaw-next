@@ -4,6 +4,9 @@
   "description": "StudyClaw CLI and host server (serve hosts the Web UI; bin is a flat tsdown bundle)",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
   "bin": {
     "studyclaw": "./lib/bin.js"
   },

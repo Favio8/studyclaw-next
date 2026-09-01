@@ -35,6 +35,7 @@ const manifest = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) 
   type: string
   bin: Record<string, string>
   files: string[]
+  engines: { node: string }
   dependencies: Record<string, string>
 }
 
@@ -59,7 +60,8 @@ const publishManifest = {
   type: manifest.type,
   bin: manifest.bin,
   files: manifest.files,
-  engines: { node: '>=20.19' },
+  // 单一事实源：engines 与根/apps/cli 清单一致（Node 20 已 EOL，不再承诺支持）。
+  engines: manifest.engines,
   dependencies: {
     koffi: manifest.dependencies['koffi'] ?? '^3.1.0',
     'pdf-parse': manifest.dependencies['pdf-parse'] ?? '^2.4.5',

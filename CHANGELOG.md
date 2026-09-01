@@ -45,6 +45,14 @@
 - 本地 Host 仅绑定 `127.0.0.1`：随机启动 token、恒定时间比对、loopback Origin 白名单、413 干净响应；
 - 关闭 drive-by RPC 与 SSRF 通道；文件操作拒绝 symlink 越界；课程文件锁保护并发写入。
 
+### 修复
+
+- SSE 流式回合失败（如网关断连）且零输出时，用户输入自动从会话中剔除（补偿事件 `input/voided`）——
+  失败后重发不再在会话里留下重复的用户消息；
+- 自托管网关兼容：容忍线格式显式 null 的 chunk id/name；非官方端点以 `reasoning_effort: "none"` 关闭推理；
+  自动重试复用池中被服务端关闭的连接；
+- CLI 先建会话再发消息的路径补写 `session/create` 事件，不再报「会话不存在」。
+
 ### 工程与发布
 
 - TypeScript 全严格类型，pnpm monorepo（25 个内部包 + vendored cordis 生态）；

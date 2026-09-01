@@ -28,7 +28,10 @@ export default defineConfig({
           pool: 'forks',
           // Integration suites exercise the real HTTP/SSE adapter and can wait
           // for Windows fork/process startup when the monorepo runs in parallel.
-          testTimeout: 15_000,
+          // Defaults match the CI invocation so a cold laptop passes too
+          // (ENG-2：慢盘/低配机按 README 跑 `pnpm test` 不出现超时假红).
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
           execArgv: vitestExecArgv,
           include: [
             'packages/*/*/tests/**/*.spec.ts',
@@ -56,6 +59,9 @@ export default defineConfig({
           environment: 'jsdom',
           globals: true,
           setupFiles: ['apps/web/tests/setup.ts'],
+          // 与 node 集群/CI 同口径：jsdom 用例在慢机上不因默认 5s 假红。
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
           include: ['apps/web/tests/**/*.test.{ts,tsx}'],
         },
       },

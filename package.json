@@ -1,9 +1,10 @@
 {
   "name": "studyclaw-next",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "version": "0.1.0",
   "description": "StudyClaw TypeScript monorepo (dsh-style: cordis + zod + storage-domain)",
+  "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题 / 环境咨询
+    url: https://github.com/Favio8/studyclaw/discussions
+    about: 安装、模型端点配置、数据文件等使用问题请到 Discussions 提问，便于后来者检索（环境类问题请先看 README 的 FAQ）
+  - name: 安全漏洞上报
+    url: https://github.com/Favio8/studyclaw/security/advisories/new
+    about: 请勿以公开 Issue 披露安全问题，走 GitHub 私密安全公告（详见 SECURITY.md）

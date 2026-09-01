@@ -1,0 +1,112 @@
+name: 🐛 Bug 报告
+description: 报告 StudyClaw 的功能异常或崩溃
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请先确认：
+        - 已看过 [README 的 FAQ](../README.md#faq)（端口占用、corepack/pnpm、测试超时等常见问题）
+        - 环境类疑问建议先到 [Discussions](../../discussions) 提问
+        - **日志与截图请先脱敏**：不要粘贴 API Key、令牌或不想公开的个人资料内容
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 简明扼要地说明出现了什么问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 从启动到出错的操作序列，例如：serve --open → 新建项目 → 上传 PDF → 构建课程
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为与实际行为
+      description: 你预期发生什么 / 实际发生了什么（含报错原文请一并贴出）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本
+      description: 例如 Windows 11 24H2 / macOS 15.5 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node 版本
+      description: "`node --version` 的输出（要求 ^22.19.0 或 >=24）"
+      placeholder: v22.19.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: 安装 / 运行方式
+      options:
+        - 从源码运行（pnpm serve）
+        - npm 全局安装（studyclaw serve）
+        - 开发模式（两个终端 + next dev）
+    validations:
+      required: true
+
+  - type: textarea
+    id: status-output
+    attributes:
+      label: "`studyclaw status` 输出"
+      description: 在项目目录下运行 `studyclaw status`（或 `pnpm --silent -- tsx apps/cli/src/bin.ts status`），粘贴输出
+    validations:
+      required: false
+
+  - type: input
+    id: model-provider
+    attributes:
+      label: 模型提供商与模型名
+      description: 例如 DeepSeek 官方 / deepseek-chat，或 vLLM + Qwen3-32B。**不要贴 API Key**
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: "`~/.studyclaw/logs/` 下当日日志的相关片段（请先脱敏）"
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 截图、录屏、或你认为相关的任何线索
+    validations:
+      required: false

@@ -163,6 +163,60 @@ describe('Agent runtime', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('voids the user input of a failed turn that produced no visible output', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-void-'))
+    const events = new SessionEventStore(join(root, 'history'))
+    let attempts = 0
+    const agent = new Agent({
+      agentId: 'void-agent',
+      sessionId: 'void-session',
+      events,
+      runner: async function* () {
+        attempts += 1
+        if (attempts === 1) throw new Error('gateway gone')
+        yield { type: 'assistant/message', payload: { content: 'done:will fail' } }
+      },
+    })
+    const handle = agent.send({ content: 'will fail' })
+    await expect((async () => { for await (const _event of handle.events) { /* drain */ } })()).rejects.toThrow('gateway gone')
+    await agent.whenIdle()
+    // 零输出的失败回合：用户输入被补偿剔除，投影不再保留它。
+    await expect(agent.projection().then(p => p.messages)).resolves.toEqual([])
+    const rows = await events.load('void-session')
+    expect(rows.filter(row => row.type === 'input/voided')).toHaveLength(1)
+    expect(rows.find(row => row.type === 'user/input')?.payload['content']).toBe('will fail')
+    // 重发同一消息后只出现一条用户消息，不再残留重复行。
+    const retry = agent.send({ content: 'will fail' })
+    for await (const _event of retry.events) { /* drain */ }
+    await agent.whenIdle()
+    await expect(agent.projection().then(p => p.messages.map(message => [message.role, message.content])))
+      .resolves.toEqual([['user', 'will fail'], ['assistant', 'done:will fail']])
+    await agent.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('keeps the user input visible when a failed turn already produced output', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-void-kept-'))
+    const events = new SessionEventStore(join(root, 'history'))
+    const agent = new Agent({
+      agentId: 'void-kept-agent',
+      sessionId: 'void-kept-session',
+      events,
+      runner: async function* () {
+        yield { type: 'assistant/message', payload: { content: 'partial answer' } }
+        throw new Error('died mid-turn')
+      },
+    })
+    const handle = agent.send({ content: 'explain X' })
+    await expect((async () => { for await (const _event of handle.events) { /* drain */ } })()).rejects.toThrow('died mid-turn')
+    await agent.whenIdle()
+    const projection = await agent.projection()
+    expect(projection.messages.map(message => [message.role, message.content])).toEqual([['user', 'explain X'], ['assistant', 'partial answer']])
+    expect((await events.load('void-kept-session')).some(row => row.type === 'input/voided')).toBe(false)
+    await agent.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('supports next-step steering, wake latch, and stable idle convergence', async () => {
     const { root, agent } = await setup()
     const first = agent.send({ content: 'wait' })

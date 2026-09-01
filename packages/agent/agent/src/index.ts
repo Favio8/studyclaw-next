@@ -832,6 +832,12 @@ export class Agent {
       await this.append('turn/end', { reason: { kind: 'aborted', reason: normalizeAbortReason(reason) } satisfies TurnEndReason }, entry.turnId)
       this.completedTurnIds.add(entry.turnId)
     }
+    // 失败回合补偿的追踪：回合以错误收场且零可见输出（无 assistant 消息、
+    // 无工具活动）时，把本回合的用户输入 void 掉——否则用户重发同一消息
+    // 会在会话里留下一条重复的用户消息（SSE 失败残留，2026-09 修复）。
+    // 声明在 try 之外：catch 的补偿路径需要读取它们。
+    let userInputSeq: number | null = null
+    let turnVisibleActivity = false
     try {
       await entry.persisted
       this.activeInjected = this.injected.splice(0)
@@ -853,7 +859,8 @@ export class Agent {
           content: entry.input.content,
           metadata: entry.input.metadata ?? {},
         }, entry.turnId)
-        await this.append('user/input', { content: entry.input.content, ...(entry.input.metadata ?? {}) }, entry.turnId)
+        const userInputRow = await this.append('user/input', { content: entry.input.content, ...(entry.input.metadata ?? {}) }, entry.turnId)
+        userInputSeq = userInputRow.seq
         await this.append('turn/start', { mode: entry.input.mode ?? 'socratic', target: entry.target }, entry.turnId)
       }
       let blockedByAsk = false
@@ -903,7 +910,10 @@ export class Agent {
               } else if (event.type === 'assistant/message') {
                 outputTokens += Math.ceil(String(payload['content'] ?? '').length / 4)
                 assistantMessageEmitted = payload['interrupted'] !== true
+                if (assistantMessageEmitted) turnVisibleActivity = true
                 assistantPrefix = ''
+              } else if (event.type === 'tool/call' || event.type === 'tool/result') {
+                turnVisibleActivity = true
               }
               const row = await this.append(event.type, payload, entry.turnId)
               const output: AgentEvent = { agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: entry.turnId, type: event.type, payload, seq: row.seq }
@@ -981,6 +991,13 @@ export class Agent {
       const message = error instanceof Error ? error.message : String(error)
       const row = await this.append('turn/error', { message }, entry.turnId)
       entry.queue.push({ agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: entry.turnId, type: 'turn/error', payload: { message }, seq: row.seq })
+      if (userInputSeq !== null && !turnVisibleActivity) {
+        // 零可见输出的失败回合：补写补偿事件把用户输入从投影中剔除。写入失败
+        // 时退化为旧行为（保留输入），不掩盖原始错误。
+        try {
+          await this.append('input/voided', { seq: userInputSeq, reason: 'turn-failed' }, entry.turnId)
+        } catch { /* 保留输入，退化旧行为 */ }
+      }
       if (activeSteering !== null) {
         activeSteering.queue.push({ agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: activeSteering.turnId, type: 'turn/error', payload: { message }, seq: row.seq })
         void this.append('inbox/dropped', { reason: 'error' }, activeSteering.turnId)

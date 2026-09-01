@@ -89,6 +89,26 @@ describe('SessionEventStore', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('excludes user inputs voided by failed-turn compensation events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-voided-'))
+    const store = new SessionEventStore(root)
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'user/input', payload: { content: '失败的那条' } },
+      { ts: '2026-08-22T12:00:00.001Z', type: 'turn/error', payload: { message: 'boom' } },
+      { ts: '2026-08-22T12:00:00.002Z', type: 'input/voided', payload: { seq: 1, reason: 'turn-failed' } },
+      { ts: '2026-08-22T12:00:00.003Z', type: 'turn/end', payload: { reason: { kind: 'error', error: { message: 'boom', code: 'UNKNOWN' } } } },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'user/input', payload: { content: '重发的同一条' } },
+      { ts: '2026-08-22T12:00:00.005Z', type: 'assistant/message', payload: { content: '回答' } },
+    )
+    const projection = await store.project('s')
+    expect(projection.messages.map(message => [message.role, message.content])).toEqual([['user', '重发的同一条'], ['assistant', '回答']])
+    // 分支定位与投影同口径：被 void 的输入不计入对话边界。
+    await store.forkSession('s', 'fork', 1)
+    const forked = await store.project('fork')
+    expect(forked.messages.map(message => message.content)).toEqual(['重发的同一条', '回答'])
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('forks event history with lineage and a chat boundary', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-fork-'))
     const store = new SessionEventStore(root)

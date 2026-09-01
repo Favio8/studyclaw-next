@@ -69,6 +69,12 @@ export interface SessionEventMap {
   'request/error': { message: string; attempt?: number }
   'request/retry': { message: string; attempt: number }
   'user/input': { content: string; [key: string]: unknown }
+  /** Compensating marker for the append-only log: the referenced user/input
+   * turn failed before producing any durable output (no assistant message,
+   * no tool activity), so the input is excluded from conversations and
+   * replay. This keeps a failed-then-retried turn from leaving a duplicate
+   * user message behind. */
+  'input/voided': { seq: number; reason?: string }
   'assistant/chunk': { delta: string }
   'assistant/reasoning': { delta: string }
   'assistant/message': { content: string; provider?: string; model?: string; interrupted?: true }
@@ -120,6 +126,7 @@ const knownPayloadSchemas: Partial<Record<SessionEventName, z.ZodTypeAny>> = {
   'request/error': z.object({ message: z.string().min(1), attempt: z.number().int().nonnegative().optional() }).passthrough(),
   'request/retry': z.object({ message: z.string().min(1), attempt: z.number().int().nonnegative() }).passthrough(),
   'user/input': z.object({ content: z.string() }).passthrough(),
+  'input/voided': z.object({ seq: z.number().int().positive() }).passthrough(),
   'assistant/chunk': z.object({ delta: z.string() }).passthrough(),
   'assistant/reasoning': z.object({ delta: z.string() }).passthrough(),
   'assistant/message': z.object({ content: z.string(), provider: z.string().min(1).optional(), model: z.string().min(1).optional(), interrupted: z.literal(true).optional() }).passthrough(),
@@ -329,8 +336,11 @@ export class SessionEventStore {
       if (!Number.isInteger(throughChatIndex) || throughChatIndex < 0) throw new Error('分支位置无效')
       let chatIndex = 0
       let cutoff = -1
+      // 与投影同口径：被 input/voided 剔除的输入不计入对话边界。
+      const voidedSeqs = new Set(source.filter(row => row.type === 'input/voided').map(row => Number(row.payload['seq'] ?? 0)).filter(seq => Number.isInteger(seq) && seq > 0))
       for (const row of source) {
         if (row.type !== 'user/input' && row.type !== 'assistant/message') continue
+        if (voidedSeqs.has(row.seq)) continue
         if (chatIndex === throughChatIndex) { cutoff = row.seq; break }
         chatIndex += 1
       }
@@ -418,6 +428,14 @@ export class SessionEventStore {
         }
       } else if (row.type === 'user/input') {
         messages.push({ role: 'user', content: String(payload['content'] ?? ''), seq: row.seq })
+      } else if (row.type === 'input/voided') {
+        // 追加式日志的“软删除”：失败回合在 turn/error 后补写该事件，把零输出
+        // 的用户输入从会话与回放中剔除（重复消息修复，2026-09）。
+        const voidedSeq = Number(payload['seq'] ?? 0)
+        if (Number.isInteger(voidedSeq) && voidedSeq > 0) {
+          const index = messages.findIndex(message => message.role === 'user' && message.seq === voidedSeq)
+          if (index >= 0) messages.splice(index, 1)
+        }
       } else if (row.type === 'assistant/message') {
         messages.push({ role: 'assistant', content: String(payload['content'] ?? ''), ...(payload['interrupted'] === true ? { interrupted: true as const } : {}), seq: row.seq })
       } else if (row.type === 'tool/result') {

@@ -43,19 +43,24 @@ jobs:
           - os: windows-latest
             target: win
             artifact: release-desktop-windows
-            glob: 'dist/*.exe
-                   dist/latest.yml'
+            glob: |
+              dist/*.exe
+              dist/*.blockmap
+              dist/latest.yml
           - os: macos-latest
             target: mac
             artifact: release-desktop-macos
-            glob: 'dist/*.dmg
-                   dist/latest-mac.yml'
+            glob: |
+              dist/*.dmg
+              dist/*.blockmap
+              dist/latest-mac.yml
           - os: ubuntu-latest
             target: linux
             artifact: release-desktop-linux
-            glob: 'dist/*.AppImage
-                   dist/*.deb
-                   dist/latest-linux.yml'
+            glob: |
+              dist/*.AppImage
+              dist/*.deb
+              dist/latest-linux.yml
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -76,8 +81,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p packaged
+          # glob 保持未引用展开（nullglob 兜底）：矩阵 glob 是模式而非字面路径，
+          # 首跑曾因把模式放进双引号导致恒不匹配、artifact 收集为空。
+          shopt -s nullglob
           for f in ${{ matrix.glob }}; do
-            [ -e "apps/desktop/$f" ] && cp "apps/desktop/$f" packaged/ || true
+            cp -v "apps/desktop/$f" packaged/
           done
           ls -la packaged/
       - uses: actions/upload-artifact@v4
@@ -111,9 +119,12 @@ jobs:
         # 凭据就绪 → 实发（scoped 包需 --access public）；预发布版本
         # （0.1.0-beta 等）打 beta dist-tag，不抢占 latest；
         # 凭据缺失 → --dry-run 验证发布面，实际发布由维护者本机执行。
+        # 注意必须 cd 进 artifacts 再 publish 裸文件名：npm 会把含 `/` 的
+        # tarball 参数解析成 git remote 规格（`git ls-remote` 报 access rights）。
         run: |
-          tgz=$(ls artifacts/studyclaw-cli-*.tgz | head -1)
-          version=$(node -p "require('./apps/cli/package.json').version")
+          cd artifacts
+          tgz=$(ls studyclaw-cli-*.tgz | head -1)
+          version=$(node -p "require('../apps/cli/package.json').version")
           tag_args=()
           if [[ "$version" == *-* ]]; then tag_args+=(--tag beta); fi
           if [ -n "$NPM_TOKEN" ]; then

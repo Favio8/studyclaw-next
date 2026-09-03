@@ -76,10 +76,13 @@ jobs:
         run: node scripts/assemble-host.mjs --build
         working-directory: apps/desktop
       # --publish never：tag 触发会激活 electron-builder 隐式发布，generic
-      # provider 只下载不上传，会吞掉 latest*.yml；发布统一由本 workflow 的
-      # github-release job 上传。
+      # provider 只下载不上传；发布统一由本 workflow 的 github-release job 上传。
       - name: electron-builder (--${{ matrix.target }})
         run: node node_modules/electron-builder/cli.js --${{ matrix.target }} --publish never
+        working-directory: apps/desktop
+      # CI 上（tag 存在）electron-builder 不落盘 latest*.yml——按相同格式自生成。
+      - name: Generate update info
+        run: node scripts/gen-update-info.mjs --target ${{ matrix.target }}
         working-directory: apps/desktop
       - name: Collect artifacts
         shell: bash

@@ -67,12 +67,14 @@ jobs:
         run: node scripts/assemble-host.mjs --build
         working-directory: apps/desktop
 
-      # GitHub runner 可直连 GitHub，无需本机的 ELECTRON_MIRROR；
-      # @electron/get 已在 pnpm-workspace.yaml override 到 5.1.0，勿删。
-      # --publish never：tag 触发会激活隐式发布，generic provider 只下载不上传，
-      # 会把 latest*.yml 吞掉；发布统一由 release.yml 的 gh-release 上传。
       - name: electron-builder (--${{ matrix.target }})
         run: node node_modules/electron-builder/cli.js --${{ matrix.target }} --publish never
+        working-directory: apps/desktop
+
+      # CI 上（tag 存在）electron-builder 不落盘 latest*.yml（隐式发布被
+      # generic provider 吞掉，--publish never 也不写）——按相同格式自生成。
+      - name: Generate update info
+        run: node scripts/gen-update-info.mjs --target ${{ matrix.target }}
         working-directory: apps/desktop
 
       - name: Collect artifacts

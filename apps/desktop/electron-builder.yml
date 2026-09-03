@@ -60,9 +60,11 @@ linux:
     - target: deb
       arch: [x64]
   category: Education
-  # scope 包名（@studyclaw/desktop）默认派生出含 @ 的 executableName，
-  # AppImage 打包会因路径安全检查拒绝——显式指定合法名。
+  # scope 包名（@studyclaw/desktop）默认派生出含 @ 的 executableName 与
+  # dist/@studyclaw/ 产物目录——AppImage 路径安全检查会拒绝前者，fpm（deb）
+  # 会因父目录不存在炸掉后者。显式指定合法名与扁平产物名。
   executableName: studyclaw
+  artifactName: ${productName}-${version}-${arch}.${ext}
 
 # 自动更新元数据（latest*.yml 的 url 指向 GitHub Release 的 latest 下载地址；
 # Release 由 .github/workflows/release.yml 在 tag 推送时产出）。

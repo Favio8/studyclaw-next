@@ -23,6 +23,9 @@ export interface StreamChatArgs {
   lastEventId?: string | null;
   /** Existing durable Agent turn to consume (used by the inbox queue). */
   turnId?: string | null;
+  /** UI-1 幂等键：客户端在重试循环内复用同一值，服务端据此重放/跟随已落盘 turn
+   * 而非新开（避免断线重试产生重复 user/input 与重复计费）。 */
+  requestId?: string | null;
 }
 
 export async function* streamChat(
@@ -41,21 +44,25 @@ export async function* streamChat(
       ...(args.conceptId ? { conceptId: args.conceptId } : {}),
       ...(args.fileRefs?.length ? { fileRefs: args.fileRefs } : {}),
       ...(args.turnId ? { turnId: args.turnId } : {}),
+      ...(args.requestId ? { requestId: args.requestId } : {}),
     },
     headers,
     signal,
   );
 }
 
-/** Resume a durable ask-user turn through the Agent answer transport. */
+/** Resume a durable ask-user turn through the Agent answer transport.
+ * UI-14：携带 requestId 幂等键——网络中断后用同一键重试，服务端 attach
+ * 已落盘 turn 重放，而不是报"没有待回答的问题"。 */
 export async function* streamAgentAnswer(
   agentId: string,
   answer: string,
   signal?: AbortSignal,
+  requestId?: string | null,
 ): AsyncGenerator<ChatEvent> {
   yield* streamSse<ChatEvent>(
     "/api/agents/answer/stream",
-    { agentId, answer },
+    { agentId, answer, ...(requestId ? { requestId } : {}) },
     undefined,
     signal,
   );

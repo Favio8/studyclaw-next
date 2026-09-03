@@ -29,7 +29,16 @@ export default function QueueDock() {
 
   async function cancelQueued() {
     try {
-      await api.cancelAgent(status!.agentId, false);
+      // UI-13：此前调用 cancelAgent(keepInbox=false)——按 agent 整体取消，
+      // 正在运行的回合会被一并杀掉，且本地 queuedMessages 不同步，drain 时
+      // 对已被取消的 turnId 反复报错。改走 agents.clearQueued：仅清排队回合。
+      const result = await api.clearQueuedAgent(status!.agentId);
+      // 同步清空前端队列记录，避免 drain 时再发送已被取消的 turnId。
+      const store = useAppStore.getState();
+      if (store.queuedMessages.length > 0) {
+        useAppStore.setState({ queuedMessages: [] });
+      }
+      flashStatusBanner(`已取消 ${result.cleared} 个排队回合`);
       await refresh();
     } catch (cause) {
       flashStatusBanner(`队列取消失败：${cause instanceof Error ? cause.message : String(cause)}`);
@@ -42,7 +51,7 @@ export default function QueueDock() {
       <span className="truncate">队列中 {status.queued} 个回合</span>
       {status.phase === "running" ? <span className="ml-auto shrink-0 text-text-faint">Agent 运行中</span> : null}
     </div>
-    <button type="button" aria-label="取消排队回合" title="取消排队回合" onClick={() => void cancelQueued()} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-line text-text-muted hover:bg-bg-card hover:text-accent-fail">
+    <button type="button" aria-label="取消排队回合" title="取消排队回合（不影响正在生成的回复）" onClick={() => void cancelQueued()} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-line text-text-muted hover:bg-bg-card hover:text-accent-fail">
       <Square size={11} fill="currentColor" strokeWidth={1.8} aria-hidden />
     </button>
   </div>;

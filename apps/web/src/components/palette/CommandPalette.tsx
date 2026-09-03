@@ -130,8 +130,8 @@ export default function CommandPalette() {
       }
       case "new-session": {
         closePalette();
-        const ok = await createNewSession();
-        if (!ok) flashStatusBanner("未选择项目，无法新建对话");
+        // UI-22：失败原因（无项目 vs 请求失败）由 createNewSession 内部提示。
+        await createNewSession();
         return;
       }
       default: {
@@ -155,6 +155,9 @@ export default function CommandPalette() {
       if (count > 0) void execute(items[selected].id);
     } else if (event.key === "Escape") {
       event.preventDefault();
+      // UI-11：阻止冒泡到 window 的全局 Esc——否则子层"返回根层"的意图会被
+      // 全局监听读成"关闭整个 Palette"，分层关闭失效。
+      event.stopPropagation();
       if (pickCourse || pickModel) {
         backToRoot();
       } else {

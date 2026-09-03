@@ -31,7 +31,9 @@ import {
 import MaterialsDialog from "@/src/components/left/MaterialsDialog";
 import NewProjectWizard from "@/src/components/left/NewProjectWizard";
 import { Clawzy } from "@/src/components/mascot";
-import { useSessionActions } from "@/src/hooks/useSessionActions";
+import { useSessionActions, suppressAutoSelectOnce } from "@/src/hooks/useSessionActions";
+import { abortActiveChat } from "@/src/lib/chatStream";
+import { abortActiveEval } from "@/src/lib/quizFlow";
 import { api } from "@/src/lib/api";
 import { relativeTime } from "@/src/lib/format";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
@@ -254,9 +256,15 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         return next;
       });
       if (item.path === workspacePath) {
+        // UI-17：activeCourseId→null 时 useSessionActions/QuizTab 的 effect
+        // 都会早退，不会中止在途流——chat 与评测必须在这里显式停止，
+        // 否则服务端继续跑完计费、store 被旧流事件污染。
+        abortActiveChat();
+        abortActiveEval();
         // FL-10：移除当前项目 → 本地指针同步清空（后端已回落/清空
         // lastOpenedPath），整个控制台回到空态，而不是悬空挂在已移除项目上。
         const store = useAppStore.getState();
+        store.setStreaming(false);
         store.setWorkspacePath(null);
         store.setCourses([]);
         store.setActiveCourse(null);
@@ -534,8 +542,13 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   async function openSearchResult(result: SessionSearchResult) {
     closeSearch();
     if (result.workspacePath !== workspacePath) await adoptWorkspace(result.workspacePath);
-    if (result.courseId !== activeCourseId) setActiveCourse(result.courseId);
-    selectSession(result.sessionId, result.courseId);
+    // UI-9：本次交互明确了目标会话——抑制自动选会话，防止"列表第一条"
+    // 的恢复晚到覆盖显式选择。
+    if (result.courseId !== useAppStore.getState().activeCourseId) {
+      suppressAutoSelectOnce(result.courseId);
+      setActiveCourse(result.courseId);
+    }
+    await selectSession(result.sessionId, result.courseId);
   }
 
   function toggleExpandedGroup(courseId: string) {
@@ -549,7 +562,12 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
 
   function createInCourse(course: CourseSummary) {
     closeSearch();
-    if (course.id !== activeCourseId) setActiveCourse(course.id);
+    // UI-9：本次交互明确了"新建对话"目标——抑制自动选会话，防止创建
+    // 过程中 effect 的列表第一条恢复覆盖新建/复用的空白对话。
+    if (course.id !== useAppStore.getState().activeCourseId) {
+      suppressAutoSelectOnce(course.id);
+      setActiveCourse(course.id);
+    }
     void createSession(undefined, course.id);
   }
 
@@ -644,13 +662,20 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
               }}
               onClick={() => {
                 closeSearch();
-                if (course.id !== activeCourseId) setActiveCourse(course.id);
+                // UI-9：跨项目点会话——同一交互既切项目又选会话，抑制自动选会话。
+                if (course.id !== useAppStore.getState().activeCourseId) {
+                  suppressAutoSelectOnce(course.id);
+                  setActiveCourse(course.id);
+                }
                 void selectSession(session.sessionId, course.id);
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  if (course.id !== activeCourseId) setActiveCourse(course.id);
+                  if (course.id !== useAppStore.getState().activeCourseId) {
+                    suppressAutoSelectOnce(course.id);
+                    setActiveCourse(course.id);
+                  }
                   void selectSession(session.sessionId, course.id);
                 }
               }}

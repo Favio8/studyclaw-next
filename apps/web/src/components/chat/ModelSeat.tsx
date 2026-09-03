@@ -79,6 +79,10 @@ export default function ModelSeat() {
         setActiveModel({ providerId: result.selected.provider, model: result.selected.model, ...(result.selected.effort === undefined ? {} : { effort: result.selected.effort }) });
         setDirectory((current) => ({ ...current, current: result.selected }));
       } else {
+        // UI-18：尚无会话时不能只写本地 store——下一轮 chat 的 meta 帧会按
+        // 服务端默认路由把座位静默打回。落盘到全局默认（部分更新语义），
+        // 让新会话的 ensureSessionModel 兜底读到这次选择。
+        await api.updateSettings({ provider, model });
         setActiveModel({ providerId: provider, model, ...(effort === undefined ? {} : { effort }) });
         setDirectory((current) => ({ ...current, current: { provider, model, ...(effort === undefined ? {} : { effort }) }, routable: true }));
       }

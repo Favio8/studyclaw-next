@@ -54,6 +54,7 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
     result: null,
     sm2: null,
     lastAnswer: null,
+    lastEvalId: null,
     answerText: "",
   });
   try {
@@ -91,6 +92,7 @@ export async function quizNext(): Promise<void> {
       sm2: null,
       error: null,
       lastAnswer: null,
+      lastEvalId: null,
       answerText: "",
     });
   } else {
@@ -98,8 +100,21 @@ export async function quizNext(): Promise<void> {
   }
 }
 
-/** 提交作答并驱动六帧评测流。 */
-export async function quizAnswer(answer: string): Promise<void> {
+/** UI-7：作答幂等指纹（课程+题卡+会话+作答内容）。SSE 中断后重试同一作答
+ * 携带同一 evalId，服务端直接重放已结算帧——绝不二次 settle 重复计分。 */
+function evalFingerprint(courseId: string, taskId: string, sessionId: string | null, answer: string): string {
+  let hash = 5381;
+  for (let i = 0; i < answer.length; i += 1) {
+    hash = ((hash << 5) + hash + answer.charCodeAt(i)) | 0;
+  }
+  return `ev_${courseId}_${taskId}_${sessionId ?? "none"}_${(hash >>> 0).toString(36)}_${answer.length}`;
+}
+
+/** 提交作答并驱动六帧评测流。
+ * A2（第三轮审查）：evalId 只在失败重试（quizRetry）时复用——此前纯内容指纹
+ * 会让"同题同答案的合法重复练习"命中服务端幂等账本被重放吞掉，学习进度
+ * 静默丢失。正常作答每次生成新键。 */
+export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string | null }): Promise<void> {
   const state = useAppStore.getState();
   const { quiz, activeCourseId, activeSessionId } = state;
   const text = answer.trim();
@@ -107,6 +122,10 @@ export async function quizAnswer(answer: string): Promise<void> {
   if (quiz.phase === "scanning" || quiz.phase === "evaluating") return;
   if (quiz.tasks.length === 0) return;
   const task = quiz.tasks[quiz.index];
+  // A2：正常作答生成唯一键（内容指纹 + 随机后缀）——同题同答的合法重复
+  // 练习必须各自结算；只有失败重试经 opts.reuseEvalId 复用完整键。
+  const evalId = opts?.reuseEvalId
+    ?? `${evalFingerprint(activeCourseId, task.taskId, activeSessionId, text)}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
   const abort = new AbortController();
   activeAbort = abort;
@@ -117,6 +136,7 @@ export async function quizAnswer(answer: string): Promise<void> {
     sm2: null,
     error: null,
     lastAnswer: text,
+    lastEvalId: evalId,
     answerText: "",
   });
 
@@ -134,6 +154,7 @@ export async function quizAnswer(answer: string): Promise<void> {
       text,
       activeSessionId,
       abort.signal,
+      evalId,
     )) {
       switch (ev.event) {
         case "scan":
@@ -221,10 +242,12 @@ export async function quizAnswer(answer: string): Promise<void> {
   }
 }
 
-/** 重试上一题（手动触发；不自动重试，避免重复 settle 计分）。 */
+/** 重试上一题（手动触发；不自动重试，避免重复 settle 计分）。
+ * A2：失败重试复用 lastEvalId——服务端幂等账本保证 SSE 中断后重试
+ * 重放已结算帧而不是二次计分。 */
 export async function quizRetry(): Promise<void> {
-  const { lastAnswer } = useAppStore.getState().quiz;
-  if (lastAnswer) await quizAnswer(lastAnswer);
+  const { quiz } = useAppStore.getState();
+  if (quiz.lastAnswer) await quizAnswer(quiz.lastAnswer, { reuseEvalId: quiz.lastEvalId });
 }
 
 /** 重置到初始态（切换项目/课程时由调用方触发）。 */

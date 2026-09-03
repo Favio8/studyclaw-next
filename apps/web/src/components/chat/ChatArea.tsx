@@ -150,15 +150,19 @@ export default function ChatArea() {
             {wakeupCard ? <WakeupCard card={wakeupCard} /> : null}
             {(() => {
               let persistedChatIndex = -1;
+              // UI-6：重试按钮必须重发"该卡对应的用户消息"，而不是全局最后一次
+              // 发送——旧失败卡在后续成功发送之后重试时，lastSent 已被覆盖。
+              let lastUserText = "";
               return messages.map((msg) => {
                 const hasPersistedChat = msg.persisted !== false && (msg.role === "user" || Boolean(msg.content));
                 if (hasPersistedChat) persistedChatIndex += 1;
                 const chatIndex = persistedChatIndex;
+                if (msg.role === "user" && msg.persisted !== false) lastUserText = msg.content;
                 return (
                   <MessageCard
                     key={msg.id}
                     message={msg}
-                    onRetry={msg.error ? retryLast : undefined}
+                    onRetry={msg.error ? () => retryLast(lastUserText) : undefined}
                     onBranch={hasPersistedChat && activeSessionId ? () => branchFromMessage(chatIndex) : undefined}
                     branchUnavailable={streaming}
                   />

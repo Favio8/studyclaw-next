@@ -67,13 +67,14 @@ export function useKeyboardShortcuts() {
           state.setPaletteOpen(!state.paletteOpen);
           return;
         }
+        // UI-20：其余 Ctrl 组合键不再穿透弹层——Palette 搜索框里按 Ctrl+N
+        // 会静默新建会话、设置弹层里会静默切 Tab。Ctrl+K 留作弹层互斥开关。
+        if (state.paletteOpen || state.wizardOpen || state.settingsOpen) return;
         if (key === "n") {
           event.preventDefault();
-          void createNewSession().then((ok) => {
-            if (!ok) {
-              useAppStore.getState().flashStatusBanner("未选择项目，无法新建对话");
-            }
-          });
+          // UI-22：失败原因（无项目 vs 请求失败）由 createNewSession 内部
+          // 以横幅呈现，这里不再统一覆盖为"未选择项目"。
+          void createNewSession();
           return;
         }
         const n = Number(event.key);
@@ -125,7 +126,9 @@ export function useKeyboardShortcuts() {
       }
 
       if (event.key === "Tab") {
-        if (state.paletteOpen || state.wizardOpen) return; // 弹层让位原生 Tab
+        // UI-12：设置弹层同为模态——Tab 必须在弹层内部导航，不能被三区
+        // 焦点循环劫持（此前焦点会逃逸到背景三区）。
+        if (state.paletteOpen || state.wizardOpen || state.settingsOpen) return; // 弹层让位原生 Tab
         event.preventDefault();
         const zone = currentZone() ?? "left";
         const delta = event.shiftKey ? -1 : 1;
@@ -138,6 +141,9 @@ export function useKeyboardShortcuts() {
 
       if (event.code === "Space" && !inEditable) {
         if (state.activeTab === "quiz" && state.quiz.phase === "done") {
+          // UI-21：焦点落在可交互控件（按钮/会话行等）时让位原生激活——
+          // 此前焦点在任意按钮上按 Space 都会被劫持成"下一题"。
+          if (target?.closest("button, a, [role='treeitem'], [role='tab'], [role='menuitem']")) return;
           event.preventDefault();
           void quizNext();
         }

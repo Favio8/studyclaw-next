@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions } = vi.hoisted(() => ({
+const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions, suppressAutoSelect } = vi.hoisted(() => ({
   storeState: {
     courses: [
       {
@@ -54,6 +54,7 @@ const { storeState, selectSession, createSession, renameSession, forkSession, ar
     adoptWorkspace: vi.fn(),
     monitorBuildJob: vi.fn(),
   },
+  suppressAutoSelect: vi.fn(),
 }));
 
 vi.mock("../src/store/useAppStore", () => ({
@@ -64,6 +65,8 @@ vi.mock("../src/store/useAppStore", () => ({
 }));
 vi.mock("../src/hooks/useSessionActions", () => ({
   useSessionActions: () => ({ selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession }),
+  // UI-9：跨项目选会话时抑制自动选会话的导出。
+  suppressAutoSelectOnce: suppressAutoSelect,
 }));
 vi.mock("../src/components/left/NewProjectWizard", () => ({ default: () => null }));
 vi.mock("../src/lib/api", () => ({ api: apiMocks }));

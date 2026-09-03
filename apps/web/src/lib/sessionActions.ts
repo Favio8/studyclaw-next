@@ -10,14 +10,26 @@
 import { api } from "@/src/lib/api";
 import { abortActiveChat } from "@/src/lib/chatStream";
 import { modeLabel } from "@/src/lib/modes";
+// A7：从独立模块导入，消除与 useSessionActions 的循环依赖。
+import { suppressAutoSelectOnce } from "@/src/lib/selectEpoch";
 import { useAppStore } from "@/src/store/useAppStore";
 
-/** 指定课程下新建对话（空对话复用）；返回是否成功（无课程/请求失败为 false）。 */
+/** 指定课程下新建对话（空对话复用）；返回是否成功。
+ * UI-22：失败原因在函数内部以横幅呈现（无项目 vs 请求失败此前都由调用方
+ * 统一提示"未选择项目"，网络失败时文案误导）。 */
 export async function createNewSession(title?: string, targetCourseId?: string): Promise<boolean> {
   const state = useAppStore.getState();
   const courseId = targetCourseId ?? state.activeCourseId;
-  if (!courseId) return false;
-  if (courseId !== state.activeCourseId) state.setActiveCourse(courseId);
+  if (!courseId) {
+    state.flashStatusBanner("未选择项目，无法新建对话");
+    return false;
+  }
+  if (courseId !== state.activeCourseId) {
+    // UI-9：本次调用明确了"新建对话"目标，抑制目标课程的自动选会话，
+    // 防止下方空对话复用/新建落地后被 effect 的列表第一条恢复覆盖。
+    suppressAutoSelectOnce(courseId);
+    state.setActiveCourse(courseId);
+  }
   abortActiveChat();
   state.setStreaming(false);
 
@@ -57,8 +69,11 @@ export async function createNewSession(title?: string, targetCourseId?: string):
       fresh.setSessionBanner(`── 新对话 · ${modeLabel(fresh.mode)}模式 ──`);
     }
     return true;
-  } catch {
+  } catch (cause) {
     useAppStore.getState().setWakeupCard(null);
+    useAppStore
+      .getState()
+      .flashStatusBanner(`✗ 新建对话请求失败：${cause instanceof Error ? cause.message : String(cause)}，请稍后重试`);
     return false;
   }
 }

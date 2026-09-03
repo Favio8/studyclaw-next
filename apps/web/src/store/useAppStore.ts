@@ -66,6 +66,9 @@ export interface QuizState {
   loading: boolean;
   /** 最后一题的作答文本（失败重试用）。 */
   lastAnswer: string | null;
+  /** A2：与 lastAnswer 配套的评测幂等键——只有失败重试复用它，
+   * 正常重复练习生成新键（否则同题同答的合法练习会被服务端账本吞掉）。 */
+  lastEvalId: string | null;
   /** 简答题输入缓冲（组件直接读写，避免 effect 竞态）。 */
   answerText: string;
 }
@@ -81,6 +84,7 @@ export const initialQuiz: QuizState = {
   error: null,
   loading: false,
   lastAnswer: null,
+  lastEvalId: null,
   answerText: "",
 };
 
@@ -137,7 +141,6 @@ interface AppState {
   modeBanner: string | null; // 模式/状态切换横幅（1.6s 后自动消失）
   sessionBanner: string | null; // 对话横幅（常驻，切换时闪现）
   suggestedEntry: string | null; // 恢复对话的建议入口（可点击发送）
-  lastTurnId: string | null; // 最近完成轮次 id（断线 Last-Event-ID 重连用）
   /** FE-2：全局排队消息（streaming 时发送）。此前是 useChatStream 实例私有
    * ref——ChatArea 与 CommandPalette 两个实例各自排队，Palette 关闭即蒸发。 */
   queuedMessages: Array<{ text: string; turnId?: string }>;
@@ -204,7 +207,6 @@ interface AppState {
   flashStatusBanner: (text: string) => void;
   setSessionBanner: (text: string | null) => void;
   setSuggestedEntry: (text: string | null) => void;
-  setLastTurnId: (turnId: string | null) => void;
   enqueueQueuedMessage: (entry: { text: string; turnId?: string }) => void;
   /** 取出队首消息；无可取时返回 undefined。 */
   shiftQueuedMessage: () => { text: string; turnId?: string } | undefined;
@@ -246,7 +248,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSessionTitle: "",
   sessionBanner: null,
   suggestedEntry: null,
-  lastTurnId: null,
   queuedMessages: [],
   wakeupCard: null,
   pendingAsk: null,
@@ -363,7 +364,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setSessionBanner: (sessionBanner) => set({ sessionBanner }),
   setSuggestedEntry: (suggestedEntry) => set({ suggestedEntry }),
-  setLastTurnId: (lastTurnId) => set({ lastTurnId }),
   enqueueQueuedMessage: (entry) =>
     set((state) => ({ queuedMessages: [...state.queuedMessages, entry] })),
   shiftQueuedMessage: () => {
@@ -415,7 +415,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeSessionTitle: "",
       sessionBanner: null,
       suggestedEntry: null,
-      lastTurnId: null,
       queuedMessages: [], // 切项目即丢弃旧排队（串课防护）
       wakeupCard: null,
   pendingAsk: null,

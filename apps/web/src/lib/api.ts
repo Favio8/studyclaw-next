@@ -97,7 +97,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
+  // UI-25：非 JSON 响应（反向代理错误页等）此前直接抛裸 SyntaxError，
+  // 错误信息不可读；统一转 ApiError。
+  let body: unknown = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new ApiError("INTERNAL_ERROR", `非 JSON 响应（HTTP ${response.status}）`, response.status);
+    }
+  }
   if (!response.ok) {
     const payload = body as ApiErrorPayload;
     throw new ApiError(
@@ -118,7 +127,15 @@ async function uploadFiles<T>(path: string, files: File[]): Promise<T> {
   }
   const response = await fetch(path, { method: "POST", headers: { ...authHeaders() }, body: form });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
+  // UI-25：同 request——非 JSON 响应转可读的 ApiError。
+  let body: unknown = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new ApiError("INTERNAL_ERROR", `非 JSON 响应（HTTP ${response.status}）`, response.status);
+    }
+  }
   if (!response.ok) {
     const payload = body as ApiErrorPayload;
     throw new ApiError(
@@ -168,6 +185,9 @@ export async function* streamSse<T extends { event: string }>(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    // UI-28：SSE 规范允许 CRLF 行终止；服务端当前输出 LF，这里统一归一化，
+    // 防止跨实现（代理/其他宿主）用 \r\n 时帧边界永远匹配不到。
+    if (buffer.includes("\r")) buffer = buffer.replace(/\r\n/g, "\n");
     let boundary = buffer.indexOf("\n\n");
     while (boundary >= 0) {
       const block = buffer.slice(0, boundary);
@@ -260,6 +280,8 @@ export const api = {
   agentStatus: (agentId: string) => rpc<AgentStatusView>("agents.status", { agentId }),
   agents: () => rpc<AgentListPayload>("agents.list"),
   cancelAgent: (agentId: string, keepInbox = false) => rpc<AgentStatusView>("agents.cancel", { agentId, keepInbox }),
+  /** UI-13：仅清空排队回合，不中止正在运行的回合（QueueDock 取消按钮）。 */
+  clearQueuedAgent: (agentId: string) => rpc<{ agentId: string; cleared: number }>("agents.clearQueued", { agentId }),
   agentWhenIdle: (agentId: string) => rpc<AgentStatusView>("agents.whenIdle", { agentId }),
   maintenance: (agentId: string, kind: "checkpoint" | "compaction" = "checkpoint", summary?: string | null) =>
     rpc<{ jobId: string; agentId: string; kind: "checkpoint" | "compaction"; status: "queued" | "running" | "done" | "failed" }>("agents.maintenance", { agentId, kind, summary: summary ?? null }),
@@ -367,17 +389,20 @@ export const api = {
   sync: (courseId: string, sessionId?: string | null) =>
     rpc<SyncResponse>("courses.sync", { courseId, sessionId }),
 
-  /** 提交作答并流式接收判定（SSE 六帧：scan/rubric×N/result/sm2/done）。 */
+  /** 提交作答并流式接收判定（SSE 六帧：scan/rubric×N/result/sm2/done）。
+   * UI-7：evalId 为幂等键（taskId+会话+作答内容的稳定指纹）——网络中断后
+   * 用同一键重试，服务端直接重放已结算帧，不重复 settle 计分。 */
   evalSubmit: (
     courseId: string,
     taskId: string,
     answer: string,
     sessionId?: string | null,
     signal?: AbortSignal,
+    evalId?: string | null,
   ) =>
     streamSse<EvalEvent>(
       "/api/eval/submit",
-      { courseId, taskId, answer, sessionId },
+      { courseId, taskId, answer, sessionId, ...(evalId ? { evalId } : {}) },
       undefined,
       signal,
     ),

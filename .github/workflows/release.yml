@@ -169,6 +169,7 @@ jobs:
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
           files: |
             artifacts/*.exe
+            artifacts/*.zip
             artifacts/*.dmg
             artifacts/*.AppImage
             artifacts/*.deb

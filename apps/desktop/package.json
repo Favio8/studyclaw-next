@@ -1,0 +1,23 @@
+{
+  "name": "@studyclaw/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StudyClaw desktop shell (Electron + embedded local host sidecar)",
+  "license": "MIT",
+  "main": "src/main.cjs",
+  "scripts": {
+    "check:runtime": "node scripts/check-runtime.mjs",
+    "assemble": "node scripts/assemble-host.mjs",
+    "dev:desktop": "node scripts/check-runtime.mjs && node node_modules/electron/cli.js .",
+    "dist:dir": "node scripts/check-runtime.mjs && node scripts/assemble-host.mjs && node node_modules/electron-builder/cli.js --dir",
+    "dist": "node scripts/check-runtime.mjs && node scripts/assemble-host.mjs && node node_modules/electron-builder/cli.js",
+    "dist:win": "node scripts/assemble-host.mjs && node node_modules/electron-builder/cli.js --win",
+    "dist:mac": "node scripts/assemble-host.mjs && node node_modules/electron-builder/cli.js --mac",
+    "dist:linux": "node scripts/assemble-host.mjs && node node_modules/electron-builder/cli.js --linux"
+  },
+  "devDependencies": {
+    "electron": "^44.1.1",
+    "electron-builder": "^26.0.0"
+  },
+  "author": "StudyClaw authors"
+}

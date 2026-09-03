@@ -1,0 +1,12 @@
+{
+  "name": "studyclaw-host-runtime-assets",
+  "version": "0.0.0",
+  "private": true,
+  "description": "External (never-bundled) host deps collected for the desktop sidecar",
+  "dependencies": {
+    "koffi": "^3.1.0",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "5.4.296",
+    "@napi-rs/canvas": "0.1.80"
+  }
+}

@@ -3,9 +3,13 @@ packages:
   - packages/*/*
   - apps/*
 allowBuilds:
+  electron: true # 桌面壳需要下载 Electron 二进制（check-runtime 校验内嵌 Node）
+  electron-winstaller: false # 本期不构建 Windows 安装器增量补丁
   esbuild: true
   koffi: true # directory-picker-native 的原生依赖需要执行安装脚本（ENG-1）
 linkWorkspacePackages: true
+minimumReleaseAgeExclude:
+  - electron@44.1.1
 # FL-38：xlsx@0.18.5 有已知 CVE（CVE-2023-30533 原型污染 / CVE-2024-22363
 # ReDoS）且在用户上传解析路径上；SheetJS 自 0.19.3 起只从自家 CDN 分发，
 # npm 上无法升级。这里把全部直接/传递依赖（含 markitdown-ts 的 xlsx）统一
@@ -13,6 +17,12 @@ linkWorkspacePackages: true
 # https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz），安装离线可复现；
 # pnpm v11 的 blockExoticSubdeps 拒绝 URL 型传递依赖，file: 引用可过关。
 overrides:
+  # app-builder-lib@26.15.3 的 electronGet 引用 ElectronDownloadCacheMode
+  # 枚举（@electron/get 4.x+ 引入），却声明依赖 ^3.0.0 —— 打包 Electron 44
+  # 时在 resolveCacheMode 处必炸（undefined.ReadWrite）。强制对齐 5.1.0
+  #（枚举持有者）；@electron/get 5 对 fuses/osx-sign 等 builder 生态保持
+  # downloadArtifact API 兼容。
+  '@electron/get': 5.1.0
   xlsx: file:vendor/tarballs/xlsx-0.20.3.tgz
   # 2026-09 依赖审计（pnpm audit）后续封堵：均为传递依赖，运行时影响有限，
   # 但 patch 版本 API 兼容，统一指到补丁版让审计归零。

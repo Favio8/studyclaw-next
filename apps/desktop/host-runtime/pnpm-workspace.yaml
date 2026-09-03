@@ -1,0 +1,8 @@
+# host-runtime 是独立于主 workspace 的依赖闭包收集包（见 assemble-host.mjs：
+# 安装时 --ignore-workspace）。koffi/@napi-rs/canvas 的原生二进制由平台分包
+# （optionalDependencies prebuild）直接分发，postinstall 仅是冗余校验——
+# 跳过不影响运行时加载（已验证 koffi require 可用）。
+allowBuilds:
+  koffi: set this to true or false
+neverBuiltDependencies:
+  - koffi

@@ -32,3 +32,10 @@ e2e-workspace/
 # 用户学习数据与构建产物不入库（ENG-3）
 courses/
 artifacts/
+
+# 桌面壳组装/构建产物（assemble 与 electron-builder 生成，勿提交）
+apps/desktop/resources/
+apps/desktop/dist/
+apps/desktop/dist*/
+apps/desktop/host-runtime/node_modules/
+apps/desktop/host-runtime/package-lock.json

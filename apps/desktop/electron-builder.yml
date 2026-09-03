@@ -1,0 +1,63 @@
+appId: ai.studyclaw.desktop
+productName: StudyClaw
+copyright: Copyright © 2026 StudyClaw authors
+
+directories:
+  output: dist
+  buildResources: build
+
+# Host 依赖闭包（node_modules 顶层目录被 createFilter 硬编码剪枝，无法经
+# extraResources 落盘）——由 afterPack 钩子直接拷入，见 scripts/after-pack.cjs。
+afterPack: scripts/after-pack.cjs
+
+# 主程序只打包壳自身代码；host/web 资源走 extraResources（原样落盘，
+# 不进 asar —— 原生 .node 与运行时读取都更稳，R4）。
+files:
+  - src/**/*
+  - package.json
+extraResources:
+  - from: resources/host
+    to: host
+    filter: ["**/*"]
+  - from: resources/web
+    to: web
+    filter: ["**/*"]
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.education
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # 签名/公证见 plan 4.4；无证书时保持 identity: null 可出未签名包
+  identity: null
+  hardenedRuntime: true
+dmg:
+  title: ${productName}-${version}
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Education
+
+# 自动更新产物（plan 4.5）：发布时把 OWNER/REPO 换成真实仓库。
+publish:
+  provider: generic
+  url: https://github.com/OWNER/REPO/releases/latest/download/

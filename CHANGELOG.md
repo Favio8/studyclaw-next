@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.1.0-beta.0] - 2026-09-01
+## [0.1.0-beta] - 2026-09-04
 
 首个公开测试版。核心形态：本地优先的 AI 学习搭子——挂载一个本地资料文件夹，
 构建课程，对话学习、测验复习，状态全部落在本机文件里。
@@ -23,7 +23,14 @@
 - 23 个工具（13 学习 + 10 通用）与工具审批队列：写操作 / 命令执行需审批，通道缺失时 fail-closed 降级；
 - 持久化 Agent 循环：durable inbox（排队/插队/转向/注入）、turn/step 状态机、子 Agent、空闲维护任务；
 - ACP（NDJSON）协议模式，可接入兼容的 Agent 客户端；
-- CLI 全套命令：`serve` / `status` / `sync` / `quiz` / `review` / `chat` / `session migrate` / `agent` / `approvals` / `plan` / `todo` / `acp`。
+- CLI 全套命令：`serve` / `status` / `course` / `sync` / `quiz` / `review` / `chat` / `session migrate` / `agent` / `approvals` / `plan` / `todo` / `acp`。
+
+### 桌面版
+
+- Electron 44 桌面壳：单实例、sidecar 内嵌 Host（`ELECTRON_RUN_AS_NODE`，零业务改造）、崩溃退避重启、外链系统浏览器打开；
+- 免装 Node：安装包内嵌完整 host 运行时闭包（含平台原生二进制）与 Web UI 静态资源；
+- 三平台安装包（Windows NSIS / macOS dmg / Linux AppImage+deb），GitHub Actions 矩阵出包；
+- 自动更新元数据（latest*.yml）随 Release 发布（签名/公证待后续版本）。
 
 ### 模型接入
 
@@ -49,6 +56,9 @@
 
 - SSE 流式回合失败（如网关断连）且零输出时，用户输入自动从会话中剔除（补偿事件 `input/voided`）——
   失败后重发不再在会话里留下重复的用户消息；
+- 旧行 assistant 输出随失败回合一并 void（`assistant/voided`），恢复会话不再出现孤儿回复；
+- 队列回合消费与 ask 幂等重放两条 SSE 路径统一走 `agentEventToFrame` 帧映射——已取消回合不再被
+  `done` 帧错误闭环为成功（半截回复当成功渲染）；
 - 自托管网关兼容：容忍线格式显式 null 的 chunk id/name；非官方端点以 `reasoning_effort: "none"` 关闭推理；
   自动重试复用池中被服务端关闭的连接；
 - CLI 先建会话再发消息的路径补写 `session/create` 事件，不再报「会话不存在」。
@@ -62,4 +72,4 @@
 - 供应链：vendored xlsx 0.20.3 官方 tgz 封堵 CVE-2023-30533 / CVE-2024-22363，离线可复现；
 - Node 引擎要求 `^22.19.0 || >=24`（Node 20 已 EOL，不再支持）。
 
-[0.1.0-beta.0]: https://github.com/Favio8/studyclaw/releases/tag/v0.1.0-beta.0
+[0.1.0-beta]: https://github.com/Favio8/studyclaw-next/releases/tag/v0.1.0-beta

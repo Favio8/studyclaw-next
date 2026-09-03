@@ -57,7 +57,8 @@ linux:
       arch: [x64]
   category: Education
 
-# 自动更新产物（plan 4.5）：发布时把 OWNER/REPO 换成真实仓库。
+# 自动更新元数据（latest*.yml 的 url 指向 GitHub Release 的 latest 下载地址；
+# Release 由 .github/workflows/release.yml 在 tag 推送时产出）。
 publish:
   provider: generic
-  url: https://github.com/OWNER/REPO/releases/latest/download/
+  url: https://github.com/Favio8/studyclaw-next/releases/latest/download/

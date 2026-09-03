@@ -1,6 +1,6 @@
 {
   "name": "studyclaw-next",
-  "version": "0.1.0",
+  "version": "0.1.0-beta",
   "private": true,
   "type": "module",
   "description": "StudyClaw TypeScript monorepo (dsh-style: cordis + zod + storage-domain)",

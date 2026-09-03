@@ -63,6 +63,7 @@ import { quizCommand } from './commands/quiz.ts'
 import { reviewCommand } from './commands/review.ts'
 import { chatCommand } from './commands/chat.ts'
 import { syncCommand } from './commands/sync.ts'
+import { courseCommand } from './commands/course.ts'
 
 function hostHome(): string {
   return process.env.STUDYCLAW_HOME ?? join(homedir(), '.studyclaw')
@@ -346,7 +347,7 @@ async function healStartupRegistry(registry: StartupRegistry): Promise<void> {
 }
 
 function usage(): void {
-  console.log('usage: studyclaw serve [--port <n>] [--open] [--insecure-no-token] | status | sync [--course <id>] | session migrate [<sessionId>] | quiz [count] [--mode new|review] [--course <id>] [--concept <id>] | review [count] [--course <id>] [--concept <id>] | chat [message] [--mode socratic|quick|feynman|debug] [--course <id>] [--session <id>] [--new] [--concept <id>] [--turns N] | agent <create|resume|prompt|send|answer|status|cancel|whenIdle|maintenance|maintenance-jobs|dispose> | approvals <list|resolve> | plan <get|update> | todo <get|update> | acp')
+  console.log('usage: studyclaw serve [--port <n>] [--open] [--insecure-no-token] | status | course <list|show> [<courseId>] | sync [--course <id>] | session migrate [<sessionId>] | quiz [count] [--mode new|review] [--course <id>] [--concept <id>] | review [count] [--course <id>] [--concept <id>] | chat [message] [--mode socratic|quick|feynman|debug] [--course <id>] [--session <id>] [--new] [--concept <id>] [--turns N] | agent <create|resume|prompt|send|answer|status|cancel|whenIdle|maintenance|maintenance-jobs|dispose> | approvals <list|resolve> | plan <get|update> | todo <get|update> | acp')
 }
 
 function hostUrl(): string {
@@ -1376,6 +1377,10 @@ async function main(): Promise<void> {
     await reviewCommand(args.slice(1))
   } else if (command === 'chat') {
     await chatCommand(args.slice(1))
+  } else if (command === 'course') {
+    // HANDOFF 待办 #2：顶层 course 命令接线（list/show，quiz/review 复用的
+    // resolveCourse 同源）。
+    await courseCommand(args.slice(1))
   } else {
     usage()
     process.exit(command === '--help' ? 0 : 1)

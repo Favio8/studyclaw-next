@@ -52,6 +52,7 @@ jobs:
             artifact: release-desktop-macos
             glob: |
               dist/*.dmg
+              dist/*.zip
               dist/*.blockmap
               dist/latest-mac.yml
           - os: ubuntu-latest
@@ -74,8 +75,11 @@ jobs:
       - name: Assemble host sidecar
         run: node scripts/assemble-host.mjs --build
         working-directory: apps/desktop
+      # --publish never：tag 触发会激活 electron-builder 隐式发布，generic
+      # provider 只下载不上传，会吞掉 latest*.yml；发布统一由本 workflow 的
+      # github-release job 上传。
       - name: electron-builder (--${{ matrix.target }})
-        run: node node_modules/electron-builder/cli.js --${{ matrix.target }}
+        run: node node_modules/electron-builder/cli.js --${{ matrix.target }} --publish never
         working-directory: apps/desktop
       - name: Collect artifacts
         shell: bash

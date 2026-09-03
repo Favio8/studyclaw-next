@@ -33,6 +33,7 @@ jobs:
             artifact: desktop-macos
             glob: |
               dist/*.dmg
+              dist/*.zip
               dist/*.blockmap
               dist/latest-mac.yml
           - os: ubuntu-latest
@@ -68,8 +69,10 @@ jobs:
 
       # GitHub runner 可直连 GitHub，无需本机的 ELECTRON_MIRROR；
       # @electron/get 已在 pnpm-workspace.yaml override 到 5.1.0，勿删。
+      # --publish never：tag 触发会激活隐式发布，generic provider 只下载不上传，
+      # 会把 latest*.yml 吞掉；发布统一由 release.yml 的 gh-release 上传。
       - name: electron-builder (--${{ matrix.target }})
-        run: node node_modules/electron-builder/cli.js --${{ matrix.target }}
+        run: node node_modules/electron-builder/cli.js --${{ matrix.target }} --publish never
         working-directory: apps/desktop
 
       - name: Collect artifacts

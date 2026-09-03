@@ -39,6 +39,10 @@ nsis:
 
 mac:
   target:
+    # zip 是 generic provider 自动更新的载荷（latest-mac.yml 引用它），dmg 是人
+    # 下载的安装镜像——两者都要出。
+    - target: zip
+      arch: [arm64, x64]
     - target: dmg
       arch: [arm64, x64]
   category: public.app-category.education

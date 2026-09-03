@@ -20,5 +20,8 @@
     "electron": "^44.1.1",
     "electron-builder": "^26.0.0"
   },
-  "author": "StudyClaw authors"
+  "author": {
+    "name": "StudyClaw authors",
+    "email": "favio9758@gmail.com"
+  }
 }

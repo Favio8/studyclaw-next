@@ -7,7 +7,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { ToolRejected } from './result.ts'
 
 export const SOURCE_ROOT_BINDING_NAME = '.source-root.json'
@@ -105,7 +105,12 @@ export async function resolveSourceRef(courseDir: string, ref: string): Promise<
     throw new ToolRejected('不允许访问隐藏文件/目录或课程内部状态目录')
   }
   const target = resolve(root, ...parts)
-  if (target !== root && !target.startsWith(root.endsWith('\\') ? root : root + '\\')) {
+  // 前缀必须用平台分隔符（sep）：此前硬编码 '\\'，Linux/macOS 上 resolve 产物
+  // 以 '/' 分隔，前缀永不匹配 → 所有相对路径读取被误拒（CI Linux 两个红测试
+  // 的根因；Windows 上恰好通过故本机未暴露）。resolve 已产出规范绝对路径，
+  // 与 static-host.ts 的 `root + sep` 同一containment 惯例。
+  const prefix = root.endsWith(sep) ? root : root + sep
+  if (target !== root && !target.startsWith(prefix)) {
     throw new ToolRejected('path 超出课程资料根目录')
   }
   return target

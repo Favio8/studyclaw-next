@@ -81,10 +81,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p packaged
-          # glob 保持未引用展开（nullglob 兜底）：矩阵 glob 是模式而非字面路径，
-          # 首跑曾因把模式放进双引号导致恒不匹配、artifact 收集为空。
+          # 矩阵 glob 先落到变量再按空白分词展开（nullglob 兜底）：块标量含
+          # 换行，直接内联进 for 会把后续模式当独立命令执行（首跑 exit 2）。
           shopt -s nullglob
-          for f in ${{ matrix.glob }}; do
+          patterns="${{ matrix.glob }}"
+          for f in $patterns; do
             cp -v "apps/desktop/$f" packaged/
           done
           ls -la packaged/

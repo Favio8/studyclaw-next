@@ -4,6 +4,7 @@
   "private": true,
   "description": "StudyClaw desktop shell (Electron + embedded local host sidecar)",
   "license": "MIT",
+  "homepage": "https://github.com/Favio8/studyclaw-next",
   "main": "src/main.cjs",
   "scripts": {
     "check:runtime": "node scripts/check-runtime.mjs",

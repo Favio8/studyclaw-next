@@ -77,6 +77,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # FL-43：发布链路门禁——打包（CLI bundle + Web 静态导出）→ 合成发布清单
       # → npm pack → 真装一遍并运行。FL-20 这类"发布即坏"从此在这里现形。
-      - run: corepack pnpm run release:pack
-      - run: corepack pnpm run release:verify
-      - run: corepack pnpm run release:publint
+      - run: pnpm run release:pack
+      - run: pnpm run release:verify
+      - run: pnpm run release:publint

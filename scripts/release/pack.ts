@@ -11,7 +11,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,11 +20,27 @@ const cliDir = join(repoRoot, 'apps', 'cli')
 const stageDir = join(repoRoot, 'artifacts', 'stage')
 const outDir = join(repoRoot, 'artifacts')
 
-function run(command: string, args: string[], cwd: string): void {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
+function run(command: string, args: string[], cwd: string, opts: { shell?: boolean } = {}): void {
+  // node 直调一律关 shell：本机 node 安装在带空格路径（D:\Program Files\...），
+  // shell 模式会把 command 从空格处截断。仅 npm（.cmd shim）保留 shell。
+  const shell = opts.shell ?? (process.platform === 'win32' && command === 'npm')
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell })
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(' ')} 失败（exit ${result.status}）`)
   }
+}
+
+/**
+ * 解析 pnpm 虚拟存储中的包真实入口（workspace 根 node_modules 无稳定 .js 入口）。
+ * 本机 corepack 已坏、CI 由 action-setup 提供 pnpm——为让本机与 CI 走同一条
+ * 路径，构建命令一律 node 直调包入口（与 apps/desktop/scripts/assemble-host.mjs
+ * 的适配一致），不再经由 pnpm --filter。
+ */
+function pkgBinInPnpmStore(pkgName: string, binRel: string): string {
+  const pnpmDir = join(repoRoot, 'node_modules', '.pnpm')
+  const dir = readdirSync(pnpmDir).find(name => name.startsWith(`${pkgName}@`))
+  if (dir === undefined) throw new Error(`[release:pack] ${pkgName} not found under node_modules/.pnpm`)
+  return join(pnpmDir, dir, 'node_modules', pkgName, binRel)
 }
 
 const manifest = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) as {
@@ -39,10 +55,12 @@ const manifest = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) 
   dependencies: Record<string, string>
 }
 
-run('corepack', ['pnpm', '--filter', '@studyclaw/cli', 'run', 'build:bundle'], repoRoot)
+// CLI 自包含 bundle：tsc -b（project references）→ tsdown 打平为 lib/bin.js。
+run(process.execPath, [join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc'), '-b', 'tsconfig.json'], cliDir)
+run(process.execPath, [pkgBinInPnpmStore('tsdown', 'dist/run.mjs')], cliDir)
 // Web 静态导出（next build，output: 'export' → apps/web/out）。serve 会托管
 // 该目录；npm 包本身不含它（体积考量），但发布流程要确认导出通路可用。
-run('corepack', ['pnpm', '--filter', 'web', 'run', 'build'], repoRoot)
+run(process.execPath, [pkgBinInPnpmStore('next', 'dist/bin/next'), 'build'], join(repoRoot, 'apps', 'web'))
 
 rmSync(stageDir, { recursive: true, force: true })
 mkdirSync(join(stageDir, 'lib'), { recursive: true })

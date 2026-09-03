@@ -1,0 +1,159 @@
+name: Release
+
+# tag 触发的发布流水线：质量门禁 → 三平台桌面包 → GitHub Release 上传
+# （安装包 + latest*.yml 自动更新元数据）→ npm publish（NPM_TOKEN 就绪时
+# 实发，否则 --dry-run 验证）。发布版本号取自 tag（v0.1.0-beta → 0.1.0-beta），
+# 前提：tag 指向的 commit 中 apps/cli 与 apps/desktop 的 package.json version
+# 已同步（Phase 6 收尾清单项）。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    name: Release gate (typecheck + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node_modules/.bin/tsc -b tsconfig.json
+      # 本机机械盘全量并发会触发 vitest 默认超时（环境噪声），CI 适度放宽。
+      - run: node_modules/.bin/vitest run --testTimeout=60000 --hookTimeout=60000
+      - run: node_modules/.bin/vitest run
+        working-directory: apps/web
+
+  desktop:
+    name: Desktop packages (${{ matrix.os }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win
+            artifact: release-desktop-windows
+            glob: 'dist/*.exe
+                   dist/latest.yml'
+          - os: macos-latest
+            target: mac
+            artifact: release-desktop-macos
+            glob: 'dist/*.dmg
+                   dist/latest-mac.yml'
+          - os: ubuntu-latest
+            target: linux
+            artifact: release-desktop-linux
+            glob: 'dist/*.AppImage
+                   dist/*.deb
+                   dist/latest-linux.yml'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Assemble host sidecar
+        run: node scripts/assemble-host.mjs --build
+        working-directory: apps/desktop
+      - name: electron-builder (--${{ matrix.target }})
+        run: node node_modules/electron-builder/cli.js --${{ matrix.target }}
+        working-directory: apps/desktop
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p packaged
+          for f in ${{ matrix.glob }}; do
+            [ -e "apps/desktop/$f" ] && cp "apps/desktop/$f" packaged/ || true
+          done
+          ls -la packaged/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: packaged/*
+          if-no-files-found: error
+
+  npm:
+    name: npm pack + publish @studyclaw/cli
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 打包（CLI bundle + Web 导出）→ npm pack → 真装一遍并运行 + publint
+      # （与 ci.yml release-gate 同一套门禁，发布前再跑一次锁定 tag 状态）。
+      - run: pnpm run release:pack
+      - run: pnpm run release:verify
+      - run: pnpm run release:publint
+      - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # 凭据就绪 → 实发（scoped 包需 --access public）；预发布版本
+        # （0.1.0-beta 等）打 beta dist-tag，不抢占 latest；
+        # 凭据缺失 → --dry-run 验证发布面，实际发布由维护者本机执行。
+        run: |
+          tgz=$(ls artifacts/studyclaw-cli-*.tgz | head -1)
+          version=$(node -p "require('./apps/cli/package.json').version")
+          tag_args=()
+          if [[ "$version" == *-* ]]; then tag_args+=(--tag beta); fi
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/.npmrc
+            npm publish "$tgz" --access public "${tag_args[@]}"
+          else
+            echo "NPM_TOKEN 未配置——仅 dry-run 验证，不实际发布。"
+            npm publish "$tgz" --access public --dry-run "${tag_args[@]}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-npm-tgz
+          path: artifacts/studyclaw-cli-*.tgz
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Release
+    needs: [desktop, npm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -la artifacts/
+      - name: Create GitHub Release and upload installers
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/latest.yml
+            artifacts/latest-mac.yml
+            artifacts/latest-linux.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -590,6 +590,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       answer: (agentId, answer) => agentService.answer(agentId, answer),
       status: async agentId => agentService.status(agentId),
       cancel: (agentId, keepInbox) => agentService.cancel(agentId, keepInbox),
+      clearQueued: agentId => agentService.clearQueued(agentId),
       whenIdle: agentId => agentService.whenIdle(agentId),
       maintenance: async (agentId, kind, summary) => await agentService.maintenance(agentId, kind, summary) as unknown as Record<string, unknown>,
       maintenanceJobs: async agentId => agentService.maintenanceJobs(agentId) as unknown as Record<string, unknown>[],
@@ -1033,7 +1034,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
 
   /** `POST /api/eval.submit` (SSE): scan / rubric×N / result / sm2 / done frames. */
   async function handleEvalSubmit(response: import('node:http').ServerResponse, body: string): Promise<void> {
-    let input: { courseId?: unknown; taskId?: unknown; answer?: unknown; sessionId?: unknown }
+    let input: { courseId?: unknown; taskId?: unknown; answer?: unknown; sessionId?: unknown; evalId?: unknown }
     try {
       input = JSON.parse(body === '' ? '{}' : body) as typeof input
     } catch {
@@ -1045,6 +1046,8 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const taskId = typeof input.taskId === 'string' ? input.taskId : ''
     const answer = typeof input.answer === 'string' ? input.answer : ''
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : null
+    // UI-7：评测幂等键——同一作答的重试直接重放已结算帧，不重复计分。
+    const evalId = typeof input.evalId === 'string' && input.evalId !== '' ? input.evalId : null
     if (courseId === '' || taskId === '' || answer === '') {
       response.writeHead(400)
       response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'courseId/taskId/answer are required', details: null } }))
@@ -1060,7 +1063,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
     }
     try {
-      for await (const frame of services.courseService.evalSubmit(courseId, taskId, answer, sessionId)) {
+      for await (const frame of services.courseService.evalSubmit(courseId, taskId, answer, sessionId, evalId)) {
         const event = String(frame['event'] ?? '')
         writeFrame(event, frame['data'])
       }
@@ -1185,7 +1188,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const abortController = new AbortController()
     request.once('aborted', () => abortController.abort('client'))
     request.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
-    let input: { agentId?: unknown; answer?: unknown }
+    let input: { agentId?: unknown; answer?: unknown; requestId?: unknown }
     try { input = JSON.parse(body === '' ? '{}' : body) as typeof input } catch {
       response.writeHead(400)
       response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'request body is not valid JSON', details: null } }))
@@ -1193,6 +1196,8 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     }
     const agentId = typeof input.agentId === 'string' ? input.agentId : ''
     const answer = typeof input.answer === 'string' ? input.answer : ''
+    // UI-14：answer 通道幂等键——中断重试时 attach 已落盘 turn 重放。
+    const requestId = typeof input.requestId === 'string' && input.requestId !== '' ? input.requestId : null
     if (agentId === '' || answer.trim() === '') {
       response.writeHead(400)
       response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'agentId and answer are required', details: null } }))
@@ -1208,9 +1213,9 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
     }
     try {
-      const queued = await agentService.answer(agentId, answer)
-      const turnId = String(queued['turnId'] ?? '')
-      for await (const event of agentService.answerEvents(agentId, turnId, abortController.signal)) {
+      const { handle } = await agentService.resolveAnswerTurn(agentId, answer, requestId)
+      for await (const event of handle.events) {
+        if (abortController.signal.aborted) break
         const payload = event.payload ?? {}
         if (event.type === 'session/meta') writeFrame('meta', payload)
         else if (event.type === 'assistant/reasoning') writeFrame('thinking', { delta: String(payload['delta'] ?? '') })
@@ -1223,6 +1228,12 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       }
     } catch (error) {
       writeFrame('error', { code: 'AGENT_ANSWER_FAILED', message: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (abortController.signal.aborted) {
+        // 与 answerEvents 语义一致：客户端断连取消本回合（保留 inbox），
+        // 防止待审批/挂起 turn 带定时器滞留。
+        void agentService.cancel(agentId, true).catch(() => undefined)
+      }
     }
     writeFrame('done', { usage: {}, turnId: agentId })
     response.end()

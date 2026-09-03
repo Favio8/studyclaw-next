@@ -167,6 +167,8 @@ export interface JobView {
 
 interface MutableJob {
   readonly jobId: string
+  /** UI-8：job 所属课程目录，用于同课程在途构建去重。 */
+  readonly courseDir: string
   status: 'queued' | 'running' | 'done' | 'failed'
   progress: { total: number; finished: number; currentFile: string | null }
   result: { syllabusVersion: string; tasksGenerated: number; degraded: string[] } | null
@@ -174,6 +176,11 @@ interface MutableJob {
   /** PERF-10：终结时间戳，用于 TTL 回收。 */
   finishedAtMs: number | null
 }
+
+/** UI-7：评测幂等账本（evalId → 已结算帧）。进程内单例即可——Host 是单进程，
+ * 与 JobManager 同生命周期；TTL 10 分钟，超过 500 条按时间清扫。 */
+const evalLedger = new Map<string, { frames: Array<Record<string, unknown>>; ts: number }>()
+let evalLedgerNextId = 0
 
 /** In-memory async build jobs (progress + polling, Python jobs.py parity). */
 export class JobManager {
@@ -184,8 +191,13 @@ export class JobManager {
 
   start(courseDir: string, courseId: string, ctx: BuildContext): string {
     this.sweep()
+    // UI-8：同课程已有在途构建 → 复用现有 job。并发双跑会造成双倍 LLM
+    // 计费、题卡重复入池与课程文件并发写。
+    for (const job of this.jobs.values()) {
+      if (job.courseDir === courseDir && job.finishedAtMs === null) return job.jobId
+    }
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    this.jobs.set(jobId, { jobId, status: 'queued', progress: { total: 0, finished: 0, currentFile: null }, result: null, error: null, finishedAtMs: null })
+    this.jobs.set(jobId, { jobId, courseDir, status: 'queued', progress: { total: 0, finished: 0, currentFile: null }, result: null, error: null, finishedAtMs: null })
     void this.run(jobId, courseDir, courseId, ctx)
     return jobId
   }
@@ -227,6 +239,172 @@ export class JobManager {
   }
 }
 
+/**
+ * UI-7：evalSubmit 的实际执行体。`record` 由幂等包装器注入——每一帧在
+ * 下发前登记进账本，命中重试时整体重放，SM-2/progress 不会二次 settle。
+ */
+async function* runEvalSubmit(
+  workspaceRoot: string,
+  courseId: string,
+  taskId: string,
+  answer: string,
+  sessionId: string | null,
+  getConfig: () => Promise<ResolvedChatConfig | null>,
+  record: (frame: Record<string, unknown>) => Record<string, unknown>,
+): AsyncGenerator<Record<string, unknown>> {
+    const dir = await requireCourse(workspaceRoot, courseId)
+    const pool = await loadTaskPool(dir)
+    const task = pool.find(candidate => candidate.task_id === taskId)
+    if (task === undefined) throw new Error(`题卡不存在: ${taskId}`)
+    yield record({ event: 'scan', data: { phase: 'rubric' } })
+    // MCQ 快速判分（答案键全有全无，零 LLM）：带 answer_index 的选择题在
+    // 本地毫秒级判完；旧卡与开放题回落 LLM rubric 判分（A 档提速路径）。
+    const answerKeyActive = Array.isArray(task.options)
+      && task.options.length > 0
+      && task.answer_index !== null && task.answer_index !== undefined
+    let result: { score: number; passed: boolean; rubricHits: Record<string, boolean>; feedback: string; misconceptions: string[] }
+    let gradedBy: 'answer_key' | 'rubric'
+    if (answerKeyActive) {
+      const options = task.options ?? []
+      const correctText = options[task.answer_index!] ?? ''
+      const correct = answer === correctText
+      const rationale = task.answer_rationale ?? ''
+      result = {
+        score: correct ? 1 : 0,
+        passed: correct,
+        rubricHits: Object.fromEntries((task.evaluation_criteria.rubric).map(criterion => [criterion, correct])),
+        // FL-27：schema 允许 rubric 2~4 条（learning/index.ts 的 dynamicBatch
+        // `min(2).max(4)`），旧文案硬编码"四个"在 2/3 条时会撒谎。
+        feedback: correct
+          ? (rationale !== '' ? `回答正确。${rationale}` : `回答正确：${task.evaluation_criteria.rubric.length} 个采分点全部命中。`)
+          : (rationale !== ''
+              ? `正确答案：${correctText}。${rationale}`
+              : `正确答案：${correctText}。请对照评分要点，把闭环缺失的环节补进你的理解。`),
+        misconceptions: [],
+      }
+      gradedBy = 'answer_key'
+    } else {
+      // A 档提速：判题走独立路由——专用模型（缺省跟随主模型）、思考缺省
+      // 关闭（判题是二元命中判定，思维链是纯等待）、输出预算收紧。用户可
+      // 用 config.yaml 的 llm.judge_model / llm.judge_reasoning_effort 覆写。
+      // （答案键路径不依赖任何模型配置，未配置 provider 也能判 MCQ。）
+      const config = requireConfig(await configForSession(workspaceRoot, courseId, sessionId, await getConfig()))
+      const judgeModel = config.judgeModel ?? config.model
+      const judgeEffort = config.judgeEffort ?? 'off'
+      const judgeClient = createDeepSeekToolClient({ ...config, model: judgeModel, reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096 })
+      const evaluator = new RubricEvaluator(judgeClient, {
+        model: judgeModel, provider: config.providerId || 'studyclaw', temperature: config.temperature,
+        reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096,
+      })
+      const memory = await readGlobalMemory(workspaceRoot)
+      result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
+      gradedBy = 'rubric'
+    }
+    // FL-27：答案键路径不再把"单一布尔"伪装成 rubric 逐条命中帧（多采分点
+    // 的诊断价值归零）——MCQ 本地快判只发结论，rubric 帧仅属于 LLM 判分路径。
+    if (gradedBy !== 'answer_key') {
+      for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
+        yield record({ event: 'rubric', data: { index, criterion, hit } })
+      }
+    }
+    // Update the task history + progress board (SM-2) under the course lock
+    // (P1-6)：读板→upsert→存板的整个 RMW 在临界区内，避免并发评测丢更新。
+    const boardPath = join(stateDirOf(dir), 'progress.md')
+    const schedule = await withCourseLock(dir, async () => {
+      const board = await loadProgressBoard(boardPath)
+      const record = board.concepts.find(candidate => candidate.conceptId === task.concept_id)
+      const attempts = (record?.evals ?? 0) + 1
+      const passRate = record !== undefined
+        ? (record.passRate * record.evals + (result.passed ? 1 : 0)) / attempts
+        : (result.passed ? 1 : 0)
+      // F-12：SM-2 的 repetitions 入参是"连续成功次数"，失败清零。
+      const priorEf = record?.ef ?? 2.5
+      const priorStreak = result.passed ? record?.streak ?? 0 : 0
+      const nextLocal = reviewSchedule(priorEf, priorStreak, result.score)
+      // FL-34：`Date.now() + days * 86_400_000` 用固定毫秒长累加，跨夏令时切换
+      // 会偏移一小时，配合 `localDateKey` 的本地日期取法可能整体错一天。
+      // 改为按日历天推进，交给 Date 自己处理 DST。
+      const dueDate = new Date()
+      dueDate.setDate(dueDate.getDate() + Math.min(nextLocal.intervalDays, 365))
+      const dueDateKey = localDateKey(dueDate)
+      const updated = upsertProgressRecord(board, {
+        conceptId: task.concept_id,
+        name: record?.name ?? task.concept_id,
+        chapter: record?.chapter ?? '',
+        // FL-25：旧实现失败分支 `Math.min(旧值, score*0.9)` 在 score=0 时把掌握度直接
+        // 归零——学到 80% 的概念一次失误即清零；成功分支 `Math.max` 又只增不减，第二次
+        // 只得 0.65 也锁在 0.95，长期虚高。改为指数平滑：单次最多回退 30%，不再断崖；
+        // 无历史记录（首次评测）时直接用本次得分作为基线。
+        mastery: record === undefined
+          ? result.score
+          : record.mastery * (1 - MASTERY_ALPHA) + result.score * MASTERY_ALPHA,
+        evals: attempts,
+        passRate,
+        streak: nextLocal.repetitions,
+        ef: nextLocal.ef,
+        nextReviewAt: dueDateKey,
+        misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
+      })
+      await saveProgressBoard(boardPath, updated)
+      return { next: nextLocal, nextReviewAt: dueDateKey, priorEf }
+    })
+    const { next, nextReviewAt, priorEf } = schedule
+    // 追加评测审计事件到会话事件流。路径必须与 chat 运行时一致：
+    // `<课程根>/.studyclaw/history`（P1-1——旧代码漏掉 .studyclaw 段，
+    // exists() 恒 false，审计被静默跳过）。评分结果已落 progress.md，
+    // 审计写入失败不阻断 result/sm2/done，但必须以 warning 帧显式告知
+    // 客户端（F-10：静默吞错升级为可见告警）。
+    const historyDir = join(stateDirOf(dir), 'history')
+    const eventStore = new SessionEventStore(historyDir)
+    let auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
+    // 会话是否"存在"以事件流文件（session_<id>.events.jsonl）为准——legacy
+    // SessionStore 的 meta 文件命名是 session_<id>.jsonl，二者不同源。
+    if (auditSessionId !== null && !(await eventStore.exists(auditSessionId))) {
+      // FL-08（V5 同路径）：指定会话的事件流已不存在（fork/归档/清场）→ 不复用。
+      auditSessionId = null
+    }
+    if (auditSessionId === null) {
+      // FL-08：HANDOFF 约定「无会话则 newSession」。旧实现无会话（纯做题用户
+      // 从未聊天）时只 console.warn 后跳过——eval 不进任何 history 行，热力图
+      // /日详情恒为 0。这里就地补一个做题记录会话，保证评分必留痕（评分本身
+      // 已先落 progress.md，不受此处影响）。
+      try {
+        const created = await new SessionStore(historyDir).newSession('quick', `做题记录 ${localDateKey()}`)
+        auditSessionId = created.sessionId
+      } catch (error) {
+        console.warn(`[evalSubmit] 补建做题记录会话失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (auditSessionId !== null) {
+      try {
+        // append 自建事件流文件（SessionEventStore.pathFor 统一命名），刚补建的
+        // 会话无需先有 exists() 为 true 的前置。
+        await eventStore.append(auditSessionId, {
+          ts: utcTs(),
+          type: 'eval',
+          payload: {
+            task_id: taskId,
+            concept_id: task.concept_id,
+            score: result.score,
+            passed: result.passed,
+            rubric_hits: result.rubricHits,
+            misconceptions: result.misconceptions,
+            graded_by: gradedBy,
+          },
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${message}`)
+        yield record({ event: 'warning', data: { code: 'AUDIT_WRITE_FAILED', message: `评分已记录，但审计留痕失败：${message}` } })
+      }
+    } else {
+      console.warn(`[evalSubmit] 无可用审计会话（historyDir=${historyDir}），本条评测未留痕`)
+    }
+    yield record({ event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } })
+    yield record({ event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } })
+    yield record({ event: 'done', data: { taskId } })
+}
+
 export interface CourseService {
   syllabus(workspaceRoot: string, courseId: string): Promise<Syllabus>
   setGranularity(workspaceRoot: string, courseId: string, granularity: 'fine' | 'coarse'): Promise<Syllabus>
@@ -240,7 +418,7 @@ export interface CourseService {
   ingestUrl(workspaceRoot: string, courseId: string, url: string, title: string | null): Promise<Record<string, unknown>>
   createCards(workspaceRoot: string, courseId: string, payload: { content: string; title?: string | null; conceptId?: string | null; count?: number; sessionId?: string | null }): Promise<Record<string, unknown>>
   dynamicCards(workspaceRoot: string, courseId: string, payload: { taskId: string; misconception: string; content?: string | null; targetId?: string | null; count?: number; sessionId?: string | null }): Promise<Record<string, unknown>>
-  evalSubmit(workspaceRoot: string, courseId: string, taskId: string, answer: string, sessionId?: string | null): AsyncGenerator<Record<string, unknown>>
+  evalSubmit(workspaceRoot: string, courseId: string, taskId: string, answer: string, sessionId?: string | null, evalId?: string | null): AsyncGenerator<Record<string, unknown>>
   job(jobId: string): JobView | undefined
   tools(providerStatus?: Record<string, { available: boolean; reason: string | null; installAction: string | null }>): Array<Record<string, unknown>>
   heatmap(workspaceRoot: string, weeks: number): Promise<Record<string, unknown>>
@@ -462,159 +640,36 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       })
       return { courseId, tasks: cards }
     },
-    async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null) {
-      const dir = await requireCourse(workspaceRoot, courseId)
-      const pool = await loadTaskPool(dir)
-      const task = pool.find(candidate => candidate.task_id === taskId)
-      if (task === undefined) throw new Error(`题卡不存在: ${taskId}`)
-      yield { event: 'scan', data: { phase: 'rubric' } }
-      // MCQ 快速判分（答案键全有全无，零 LLM）：带 answer_index 的选择题在
-      // 本地毫秒级判完；旧卡与开放题回落 LLM rubric 判分（A 档提速路径）。
-      const answerKeyActive = Array.isArray(task.options)
-        && task.options.length > 0
-        && task.answer_index !== null && task.answer_index !== undefined
-      let result: { score: number; passed: boolean; rubricHits: Record<string, boolean>; feedback: string; misconceptions: string[] }
-      let gradedBy: 'answer_key' | 'rubric'
-      if (answerKeyActive) {
-        const options = task.options ?? []
-        const correctText = options[task.answer_index!] ?? ''
-        const correct = answer === correctText
-        const rationale = task.answer_rationale ?? ''
-        result = {
-          score: correct ? 1 : 0,
-          passed: correct,
-          rubricHits: Object.fromEntries((task.evaluation_criteria.rubric).map(criterion => [criterion, correct])),
-          // FL-27：schema 允许 rubric 2~4 条（learning/index.ts 的 dynamicBatch
-          // `min(2).max(4)`），旧文案硬编码"四个"在 2/3 条时会撒谎。
-          feedback: correct
-            ? (rationale !== '' ? `回答正确。${rationale}` : `回答正确：${task.evaluation_criteria.rubric.length} 个采分点全部命中。`)
-            : (rationale !== ''
-                ? `正确答案：${correctText}。${rationale}`
-                : `正确答案：${correctText}。请对照评分要点，把闭环缺失的环节补进你的理解。`),
-          misconceptions: [],
-        }
-        gradedBy = 'answer_key'
-      } else {
-        // A 档提速：判题走独立路由——专用模型（缺省跟随主模型）、思考缺省
-        // 关闭（判题是二元命中判定，思维链是纯等待）、输出预算收紧。用户可
-        // 用 config.yaml 的 llm.judge_model / llm.judge_reasoning_effort 覆写。
-        // （答案键路径不依赖任何模型配置，未配置 provider 也能判 MCQ。）
-        const config = requireConfig(await configForSession(workspaceRoot, courseId, sessionId, await getConfig()))
-        const judgeModel = config.judgeModel ?? config.model
-        const judgeEffort = config.judgeEffort ?? 'off'
-        const judgeClient = createDeepSeekToolClient({ ...config, model: judgeModel, reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096 })
-        const evaluator = new RubricEvaluator(judgeClient, {
-          model: judgeModel, provider: config.providerId || 'studyclaw', temperature: config.temperature,
-          reasoningEffort: ReasoningEffortId(judgeEffort), maxTokens: 4_096,
-        })
-        const memory = await readGlobalMemory(workspaceRoot)
-        result = await evaluator.evaluate(task, answer, memory.slice(0, 2000))
-        gradedBy = 'rubric'
-      }
-      // FL-27：答案键路径不再把"单一布尔"伪装成 rubric 逐条命中帧（多采分点
-      // 的诊断价值归零）——MCQ 本地快判只发结论，rubric 帧仅属于 LLM 判分路径。
-      if (gradedBy !== 'answer_key') {
-        for (const [index, [criterion, hit]] of Object.entries(result.rubricHits).entries()) {
-          yield { event: 'rubric', data: { index, criterion, hit } }
+    async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null, evalId: string | null = null) {
+      // UI-7：评测幂等账本。SSE 中断后客户端用手动"重试"重发同一作答——
+      // 若第一次的 settle（SM-2/progress）已落盘，重试就是重复计分。同一
+      // evalId（taskId+会话+作答的稳定指纹）在 TTL 窗口内直接重放已结算帧。
+      if (evalId !== null && evalId !== '') {
+        const prior = evalLedger.get(evalId)
+        if (prior !== undefined) {
+          for (const frame of prior.frames) yield frame
+          return
         }
       }
-      // Update the task history + progress board (SM-2) under the course lock
-      // (P1-6)：读板→upsert→存板的整个 RMW 在临界区内，避免并发评测丢更新。
-      const boardPath = join(stateDirOf(dir), 'progress.md')
-      const schedule = await withCourseLock(dir, async () => {
-        const board = await loadProgressBoard(boardPath)
-        const record = board.concepts.find(candidate => candidate.conceptId === task.concept_id)
-        const attempts = (record?.evals ?? 0) + 1
-        const passRate = record !== undefined
-          ? (record.passRate * record.evals + (result.passed ? 1 : 0)) / attempts
-          : (result.passed ? 1 : 0)
-        // F-12：SM-2 的 repetitions 入参是"连续成功次数"，失败清零。
-        const priorEf = record?.ef ?? 2.5
-        const priorStreak = result.passed ? record?.streak ?? 0 : 0
-        const nextLocal = reviewSchedule(priorEf, priorStreak, result.score)
-        // FL-34：`Date.now() + days * 86_400_000` 用固定毫秒长累加，跨夏令时切换
-        // 会偏移一小时，配合 `localDateKey` 的本地日期取法可能整体错一天。
-        // 改为按日历天推进，交给 Date 自己处理 DST。
-        const dueDate = new Date()
-        dueDate.setDate(dueDate.getDate() + Math.min(nextLocal.intervalDays, 365))
-        const dueDateKey = localDateKey(dueDate)
-        const updated = upsertProgressRecord(board, {
-          conceptId: task.concept_id,
-          name: record?.name ?? task.concept_id,
-          chapter: record?.chapter ?? '',
-          // FL-25：旧实现失败分支 `Math.min(旧值, score*0.9)` 在 score=0 时把掌握度直接
-          // 归零——学到 80% 的概念一次失误即清零；成功分支 `Math.max` 又只增不减，第二次
-          // 只得 0.65 也锁在 0.95，长期虚高。改为指数平滑：单次最多回退 30%，不再断崖；
-          // 无历史记录（首次评测）时直接用本次得分作为基线。
-          mastery: record === undefined
-            ? result.score
-            : record.mastery * (1 - MASTERY_ALPHA) + result.score * MASTERY_ALPHA,
-          evals: attempts,
-          passRate,
-          streak: nextLocal.repetitions,
-          ef: nextLocal.ef,
-          nextReviewAt: dueDateKey,
-          misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
-        })
-        await saveProgressBoard(boardPath, updated)
-        return { next: nextLocal, nextReviewAt: dueDateKey, priorEf }
+      const frames: Array<Record<string, unknown>> = []
+      yield* runEvalSubmit(workspaceRoot, courseId, taskId, answer, sessionId, getConfig, (frame) => {
+        frames.push(frame)
+        return frame
       })
-      const { next, nextReviewAt, priorEf } = schedule
-      // 追加评测审计事件到会话事件流。路径必须与 chat 运行时一致：
-      // `<课程根>/.studyclaw/history`（P1-1——旧代码漏掉 .studyclaw 段，
-      // exists() 恒 false，审计被静默跳过）。评分结果已落 progress.md，
-      // 审计写入失败不阻断 result/sm2/done，但必须以 warning 帧显式告知
-      // 客户端（F-10：静默吞错升级为可见告警）。
-      const historyDir = join(stateDirOf(dir), 'history')
-      const eventStore = new SessionEventStore(historyDir)
-      let auditSessionId = sessionId ?? await new SessionStore(historyDir).latestSessionId()
-      // 会话是否"存在"以事件流文件（session_<id>.events.jsonl）为准——legacy
-      // SessionStore 的 meta 文件命名是 session_<id>.jsonl，二者不同源。
-      if (auditSessionId !== null && !(await eventStore.exists(auditSessionId))) {
-        // FL-08（V5 同路径）：指定会话的事件流已不存在（fork/归档/清场）→ 不复用。
-        auditSessionId = null
-      }
-      if (auditSessionId === null) {
-        // FL-08：HANDOFF 约定「无会话则 newSession」。旧实现无会话（纯做题用户
-        // 从未聊天）时只 console.warn 后跳过——eval 不进任何 history 行，热力图
-        // /日详情恒为 0。这里就地补一个做题记录会话，保证评分必留痕（评分本身
-        // 已先落 progress.md，不受此处影响）。
-        try {
-          const created = await new SessionStore(historyDir).newSession('quick', `做题记录 ${localDateKey()}`)
-          auditSessionId = created.sessionId
-        } catch (error) {
-          console.warn(`[evalSubmit] 补建做题记录会话失败: ${error instanceof Error ? error.message : String(error)}`)
+      evalLedger.set(evalId ?? `anon_${evalLedgerNextId++}`, { frames, ts: Date.now() })
+      if (evalLedger.size > 500) {
+        // 先删过期，再硬截断到 400（A6：原实现只删过期，高频短窗口下可无限增长）。
+        const cutoff = Date.now() - 10 * 60 * 1000
+        for (const [key, entry] of evalLedger) {
+          if (entry.ts < cutoff) evalLedger.delete(key)
+        }
+        if (evalLedger.size > 500) {
+          const oldest = [...evalLedger.entries()].sort((a, b) => a[1].ts - b[1].ts)
+          for (const [key] of oldest.slice(0, evalLedger.size - 400)) evalLedger.delete(key)
         }
       }
-      if (auditSessionId !== null) {
-        try {
-          // append 自建事件流文件（SessionEventStore.pathFor 统一命名），刚补建的
-          // 会话无需先有 exists() 为 true 的前置。
-          await eventStore.append(auditSessionId, {
-            ts: utcTs(),
-            type: 'eval',
-            payload: {
-              task_id: taskId,
-              concept_id: task.concept_id,
-              score: result.score,
-              passed: result.passed,
-              rubric_hits: result.rubricHits,
-              misconceptions: result.misconceptions,
-              graded_by: gradedBy,
-            },
-          })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          console.warn(`[evalSubmit] 评测审计写入失败（不阻断评分下发）: ${message}`)
-          yield { event: 'warning', data: { code: 'AUDIT_WRITE_FAILED', message: `评分已记录，但审计留痕失败：${message}` } }
-        }
-      } else {
-        console.warn(`[evalSubmit] 无可用审计会话（historyDir=${historyDir}），本条评测未留痕`)
-      }
-      yield { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } }
-      yield { event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } }
-      yield { event: 'done', data: { taskId } }
     },
+
     job(jobId) {
       return jobs.get(jobId)
     },

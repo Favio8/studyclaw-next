@@ -75,6 +75,10 @@ export interface SessionEventMap {
    * replay. This keeps a failed-then-retried turn from leaving a duplicate
    * user message behind. */
   'input/voided': { seq: number; reason?: string }
+  /** A5（第三轮审查）：与 input/voided 对称的补偿标记——失败重试新开 turn
+   * 时，旧 turn 已落盘的部分 assistant 输出一并从投影剔除，否则会留下
+   * 没有对应用户消息的孤儿回复，且重连 Last-Event-ID 的序号口径漂移。 */
+  'assistant/voided': { seq: number; reason?: string }
   'assistant/chunk': { delta: string }
   'assistant/reasoning': { delta: string }
   'assistant/message': { content: string; provider?: string; model?: string; interrupted?: true }
@@ -127,6 +131,7 @@ const knownPayloadSchemas: Partial<Record<SessionEventName, z.ZodTypeAny>> = {
   'request/retry': z.object({ message: z.string().min(1), attempt: z.number().int().nonnegative() }).passthrough(),
   'user/input': z.object({ content: z.string() }).passthrough(),
   'input/voided': z.object({ seq: z.number().int().positive() }).passthrough(),
+  'assistant/voided': z.object({ seq: z.number().int().positive() }).passthrough(),
   'assistant/chunk': z.object({ delta: z.string() }).passthrough(),
   'assistant/reasoning': z.object({ delta: z.string() }).passthrough(),
   'assistant/message': z.object({ content: z.string(), provider: z.string().min(1).optional(), model: z.string().min(1).optional(), interrupted: z.literal(true).optional() }).passthrough(),
@@ -434,6 +439,14 @@ export class SessionEventStore {
         const voidedSeq = Number(payload['seq'] ?? 0)
         if (Number.isInteger(voidedSeq) && voidedSeq > 0) {
           const index = messages.findIndex(message => message.role === 'user' && message.seq === voidedSeq)
+          if (index >= 0) messages.splice(index, 1)
+        }
+      } else if (row.type === 'assistant/voided') {
+        // A5：与 input/voided 对称——失败重试新开 turn 时，旧 turn 已落盘的
+        // 部分 assistant 输出一并剔除（孤儿回复 + 重连序号口径漂移修复）。
+        const voidedSeq = Number(payload['seq'] ?? 0)
+        if (Number.isInteger(voidedSeq) && voidedSeq > 0) {
+          const index = messages.findIndex(message => message.role === 'assistant' && message.seq === voidedSeq)
           if (index >= 0) messages.splice(index, 1)
         }
       } else if (row.type === 'assistant/message') {

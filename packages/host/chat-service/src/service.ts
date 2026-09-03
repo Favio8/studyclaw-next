@@ -637,6 +637,34 @@ export class LearningAgentService {
     return { ...agent.status, turnId: handle.turnId }
   }
 
+  /** UI-14：带 requestId 幂等的回答通道。同一 requestId 的重试（SSE 中断后
+   * 客户端重发）attach 已落盘 turn 重放/跟随，而不是再次 agent.send——否则
+   * 第一次回答已消费 pendingAsk，重试必然报"当前没有待回答的问题"，回答
+   * 结果对客户端永久不可见。 */
+  async resolveAnswerTurn(agentId: string, answer: string, requestId?: string | null): Promise<{ handle: AgentTurnHandle; turnId: string; status: Record<string, unknown> }> {
+    const text = answer.trim()
+    if (text === '') throw new SessionError('回答不能为空')
+    const agent = this.registry.get(agentId)
+    if (agent === undefined) throw new SessionError(`Agent 不存在: ${agentId}`)
+    if (typeof requestId === 'string' && requestId !== '') {
+      const rows = await agent.options.events.load(agent.options.sessionId).catch(() => [])
+      const hit = [...rows].reverse().find(
+        row => row.type === 'user/input' && row.payload['requestId'] === requestId && typeof row.payload['turnId'] === 'string',
+      )
+      if (hit !== undefined) {
+        const handle = agent.attach(String(hit.payload['turnId']))
+        if (handle !== undefined) {
+          return { handle, turnId: handle.turnId, status: agent.status as unknown as Record<string, unknown> }
+        }
+      }
+    }
+    const projection = await agent.projection()
+    if (projection.pendingAsk === null) throw new SessionError('当前没有待回答的问题')
+    const handle = agent.send({ content: text, metadata: { resumeAsk: true, ...(requestId ? { requestId } : {}) } })
+    this.noteHandle(this.answerHandles, handle.turnId, handle)
+    return { handle, turnId: handle.turnId, status: agent.status as unknown as Record<string, unknown> }
+  }
+
   /** Persist an inbox message immediately for durable Web/CLI queueing. */
   async send(workspaceRoot: string, courseId: string, sessionId: string, mode: LearningMode, content: string, metadata: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const registered = await this.register(workspaceRoot, courseId, sessionId, mode)
@@ -685,6 +713,12 @@ export class LearningAgentService {
   async cancel(agentId: string, keepInbox = false): Promise<Record<string, unknown>> {
     this.approvals.cancelForAgent(agentId)
     return await this.registry.cancel(agentId, keepInbox) as unknown as Record<string, unknown>
+  }
+
+  /** UI-13：仅清空排队回合（不中止运行中回合，不动审批）。 */
+  async clearQueued(agentId: string): Promise<{ agentId: string; cleared: number }> {
+    const cleared = this.registry.clearInbox(agentId)
+    return { agentId, cleared }
   }
   async whenIdle(agentId: string): Promise<Record<string, unknown>> { return await this.registry.whenIdle(agentId) as unknown as Record<string, unknown> }
   async maintenance(agentId: string, kind: 'checkpoint' | 'compaction' = 'checkpoint', summary: string | null = null): Promise<MaintenanceJobView> {
@@ -1212,6 +1246,26 @@ async function generateLlmSessionTitle(config: ResolvedChatConfig, firstMessage:
  * events. `config` may be null (host without a configured provider) — the
  * resulting stream emits an error event instead of crashing.
  */
+
+/** Agent 事件 → chat/stream SSE 帧的统一映射（主路径与 requestId 幂等重放路径共用，
+ * 避免两份映射漂移）。返回 null 表示该事件不映射为可下发帧（如 turn/end、inbox/* 等）。
+ * A4（第三轮审查）：turn/cancelled 映射为 error 帧——断线重试 attach 到已取消的
+ * turn 时，客户端必须收到显式失败（进入错误态 + 保留重试入口），而不是把半截
+ * 回复当成功渲染。正常用户停止路径客户端已主动 abort，此帧不会到达活客户端。 */
+export function agentEventToFrame(event: AgentEvent): ChatEvent | { kind: 'meta'; payload: Record<string, unknown> } | { kind: 'error'; code: string; message: string } | null {
+  const payload = event.payload ?? {}
+  if (event.type === 'session/meta') return { kind: 'meta', payload }
+  if (event.type === 'assistant/reasoning') return { kind: 'thinking', delta: String(payload['delta'] ?? '') }
+  if (event.type === 'assistant/chunk') return { kind: 'token', delta: String(payload['delta'] ?? '') }
+  if (event.type === 'tool/call') return { kind: 'tool-start', payload: payload as { callId: string; name: string; args: Record<string, unknown>; parentCallId?: string | null } }
+  if (event.type === 'tool/result') return { kind: 'tool', payload }
+  if (event.type === 'ask/pending') return { kind: 'ask', question: String(payload['question'] ?? '') }
+  if (event.type === 'sync/applied') return { kind: 'sync', payload }
+  if (event.type === 'turn/error') return { kind: 'error', code: 'AGENT_TURN_FAILED', message: String(payload['message'] ?? 'Agent turn failed') }
+  if (event.type === 'turn/cancelled') return { kind: 'error', code: 'TURN_CANCELLED', message: '回合已中止（停止或连接中断），请重试' }
+  return null
+}
+
 export async function* chatStream(
   workspaceRoot: string,
   courseId: string,
@@ -1288,6 +1342,60 @@ export async function* chatStream(
   if (input.signal?.aborted) abort()
   else input.signal?.addEventListener('abort', abort, { once: true })
   try {
+    // UI-1 幂等：同一 requestId 的重试（网络断线重连）重放/跟随已存在的 turn，
+    // 绝不再次 agent.send —— 否则每次重试都会落盘一条重复 user/input 并重复计费，
+    // 且被中断的旧 turn 仍在服务端继续跑完（bin.ts 注释 "the turn keeps persisting"）。
+    // requestId 由客户端在重试循环内复用，并随 metadata 写入 user/input 事件的 payload。
+    // UI-15：命中 turn 若已终态失败（turn/error / turn/cancelled），则补写
+    // input/voided 把旧 user/input 从投影剔除后新开 turn（同 requestId）——
+    // 失败重试不应在会话历史里留下重复用户消息；零可见输出的失败由 Agent
+    // 循环自动补偿，这里覆盖"已有部分输出后失败"的另一半。
+    if (typeof input.requestId === 'string' && input.requestId !== '') {
+      const rows = await eventStore.load(session.sessionId)
+      const hit = [...rows].reverse().find(
+        (row) => row.type === 'user/input' && row.payload['requestId'] === input.requestId && typeof row.payload['turnId'] === 'string',
+      )
+      if (hit !== undefined) {
+        const turnId = String(hit.payload['turnId'])
+        const turnRows = rows.filter((row) => row.payload['turnId'] === turnId)
+        const alreadyVoided = turnRows.some(row => row.type === 'input/voided' && Number(row.payload['seq'] ?? 0) === hit.seq)
+        const turnFailed = turnRows.some(row => row.type === 'turn/error' || row.type === 'turn/cancelled')
+        if (turnFailed && !alreadyVoided) {
+          // 终态失败 → 剔除旧输入，落穿到下方 agent.send 新开 turn。
+          await eventStore.append(session.sessionId, {
+            ts: utcTs(),
+            type: 'input/voided',
+            payload: { seq: hit.seq, reason: 'turn-failed-retry' },
+          })
+          // A5：旧 turn 已落盘的部分 assistant 输出一并 void——否则恢复会话
+          // 时出现没有对应用户消息的孤儿回复，且重连 Last-Event-ID 的序号
+          // 口径漂移。重复 void 无害（投影 findIndex 找不到即跳过）。
+          for (const assistantRow of turnRows.filter(row => row.type === 'assistant/message')) {
+            await eventStore.append(session.sessionId, {
+              ts: utcTs(),
+              type: 'assistant/voided',
+              payload: { seq: assistantRow.seq, reason: 'turn-failed-retry' },
+            })
+          }
+        } else {
+          const handle = agent.attach(turnId)
+          if (handle === undefined) {
+            yield { kind: 'error', code: 'TURN_REPLAY_UNAVAILABLE', message: `回合 ${turnId} 无法重放（事件日志可能已损坏），请稍后重试或新建对话` }
+            return
+          }
+          // 重放/跟随路径：先发一个 meta 帧让宿主层（bin.ts）解析出 sessionId 用于收尾 usage，
+          // 再把该 turn 的事件流映射为 SSE 帧。attach 对 pending/active turn 返回实时队列
+          // （AsyncEventQueue 无界缓冲，能拿到从头全部事件），对已完成 turn 走 replayTurn。
+          yield { kind: 'meta', payload: { sessionId: session.sessionId, replayedTurnId: turnId } }
+          for await (const event of handle.events) {
+            if (input.signal?.aborted) break
+            const frame = agentEventToFrame(event)
+            if (frame !== null) yield frame
+          }
+          return
+        }
+      }
+    }
     const handle = agent.send({
       content: input.message,
       ...(input.mode === undefined ? {} : { mode: input.mode }),
@@ -1300,15 +1408,8 @@ export async function* chatStream(
       },
     })
     for await (const event of handle.events) {
-      const payload = event.payload ?? {}
-      if (event.type === 'session/meta') yield { kind: 'meta', payload }
-      else if (event.type === 'assistant/reasoning') yield { kind: 'thinking', delta: String(payload['delta'] ?? '') }
-      else if (event.type === 'assistant/chunk') yield { kind: 'token', delta: String(payload['delta'] ?? '') }
-      else if (event.type === 'tool/call') yield { kind: 'tool-start', payload: payload as { callId: string; name: string; args: Record<string, unknown> } }
-      else if (event.type === 'tool/result') yield { kind: 'tool', payload }
-      else if (event.type === 'ask/pending') yield { kind: 'ask', question: String(payload['question'] ?? '') }
-      else if (event.type === 'sync/applied') yield { kind: 'sync', payload }
-      else if (event.type === 'turn/error') yield { kind: 'error', code: 'AGENT_TURN_FAILED', message: String(payload['message'] ?? 'Agent turn failed') }
+      const frame = agentEventToFrame(event)
+      if (frame !== null) yield frame
     }
     if (firstPrompt) {
       // DSH first-prompt cadence: the LLM rename runs after the stream so the

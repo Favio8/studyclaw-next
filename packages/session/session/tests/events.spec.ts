@@ -192,4 +192,27 @@ describe('SessionEventStore', () => {
     })
     await rm(root, { recursive: true, force: true })
   })
+
+  it('A5: assistant/voided 与 input/voided 对称剔除失败重试的孤儿回复', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-assistant-voided-'))
+    const store = new SessionEventStore(root)
+    // 模拟 service.ts 失败重试补写后的日志形态：旧 turn 部分输出 + 终态失败
+    // → input/voided + assistant/voided → 新 turn 完整落盘。
+    await store.append('s',
+      { ts: '2026-09-03T10:00:00.000Z', type: 'user/input', payload: { content: '解释一下', requestId: 'req_x', turnId: 't1' } },
+      { ts: '2026-09-03T10:00:00.001Z', type: 'assistant/message', payload: { content: '半截回复' }, turnId: 't1' },
+      { ts: '2026-09-03T10:00:00.002Z', type: 'turn/error', payload: { message: '工具失败' }, turnId: 't1' },
+      { ts: '2026-09-03T10:00:00.003Z', type: 'input/voided', payload: { seq: 1, reason: 'turn-failed-retry' } },
+      { ts: '2026-09-03T10:00:00.004Z', type: 'assistant/voided', payload: { seq: 2, reason: 'turn-failed-retry' } },
+      { ts: '2026-09-03T10:00:00.005Z', type: 'user/input', payload: { content: '解释一下', requestId: 'req_x', turnId: 't2' } },
+      { ts: '2026-09-03T10:00:00.006Z', type: 'assistant/message', payload: { content: '完整回复' }, turnId: 't2' },
+    )
+    const projection = await store.project('s')
+    // 旧 turn 的半截回复与用户输入一并剔除：无重复 user、无孤儿 assistant。
+    expect(projection.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', '解释一下'],
+      ['assistant', '完整回复'],
+    ])
+    await rm(root, { recursive: true, force: true })
+  })
 })

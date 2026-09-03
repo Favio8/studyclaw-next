@@ -131,6 +131,7 @@ export interface HostServices {
     answer(agentId: string, answer: string): Promise<Record<string, unknown>>
     status(agentId: string): Promise<Record<string, unknown>>
     cancel(agentId: string, keepInbox?: boolean): Promise<Record<string, unknown>>
+    clearQueued(agentId: string): Promise<{ agentId: string; cleared: number }>
     whenIdle(agentId: string): Promise<Record<string, unknown>>
     maintenance(agentId: string, kind?: 'checkpoint' | 'compaction', summary?: string | null): Promise<Record<string, unknown>>
     maintenanceJobs(agentId: string): Promise<Array<Record<string, unknown>>>
@@ -168,7 +169,7 @@ export interface HostServices {
     ingestUrl(courseId: string, url: string, title: string | null): Promise<Record<string, unknown>>
     createCards(courseId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>
     dynamicCards(courseId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>
-    evalSubmit(courseId: string, taskId: string, answer: string, sessionId?: string | null): AsyncGenerator<Record<string, unknown>>
+    evalSubmit(courseId: string, taskId: string, answer: string, sessionId?: string | null, evalId?: string | null): AsyncGenerator<Record<string, unknown>>
     job(jobId: string): Record<string, unknown> | undefined
     tools(providerStatus?: Record<string, { available: boolean; reason: string | null; installAction: string | null }>): Array<Record<string, unknown>>
     heatmap(weeks: number): Promise<Record<string, unknown>>
@@ -374,6 +375,13 @@ const handlers = {
     payload: z.object({ agentId: z.string().min(1), keepInbox: z.boolean().optional() }),
     async run(payload: { agentId: string; keepInbox?: boolean }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.agentService.cancel(payload.agentId, payload.keepInbox ?? false))
+    },
+  },
+  'agents.clearQueued': {
+    // UI-13：仅清空排队回合，不中止正在运行的回合（QueueDock 取消按钮）。
+    payload: z.object({ agentId: z.string().min(1) }),
+    async run(payload: { agentId: string }, services: HostServices): Promise<RpcResponse<{ agentId: string; cleared: number }>> {
+      return ok(await services.agentService.clearQueued(payload.agentId))
     },
   },
   'agents.whenIdle': {

@@ -609,6 +609,26 @@ export class Agent {
     }
   }
 
+  /** UI-13：仅清空排队/插话回合，绝不触碰正在运行的回合——QueueDock 的
+   * "取消排队回合"语义（cancel({keepInbox:false}) 会连当前回合一起中止）。 */
+  clearInbox(cause: AgentCancelCause = 'user'): number {
+    if (this.disposed) return 0
+    let removed = 0
+    for (const entry of this.pending.splice(0)) {
+      entry.queue.close(new Error('Agent turn cleared'))
+      void this.append('inbox/dropped', { reason: cause }, entry.turnId)
+      removed += 1
+    }
+    for (const entry of this.nextStep.splice(0)) {
+      entry.queue.close(new Error('Agent turn cleared'))
+      void this.append('inbox/dropped', { reason: cause }, entry.turnId)
+      removed += 1
+    }
+    this.wakeRequested = false
+    this.resolveIdle()
+    return removed
+  }
+
   /** Resolve once no active or queued work remains. */
   whenIdle(): Promise<void> {
     return this.waitForActivity()
@@ -1145,6 +1165,13 @@ export class AgentRegistry {
     if (agent === undefined) throw new Error(`Agent 不存在: ${agentId}`)
     agent.cancel({ keepInbox })
     return agent.status
+  }
+
+  /** UI-13：仅清空排队回合，不中止当前回合。 */
+  clearInbox(agentId: string): number {
+    const agent = this.agents.get(agentId)
+    if (agent === undefined) throw new Error(`Agent 不存在: ${agentId}`)
+    return agent.clearInbox()
   }
 
   async whenIdle(agentId: string): Promise<AgentStatus> {

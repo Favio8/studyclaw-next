@@ -8,6 +8,10 @@
 
 import { describe, expect, it } from 'vitest'
 import { agentEventToFrame } from '../src/service.ts'
+// H-1 回归：bin.ts 的 queuedEvents 队列消费路径与 ask 幂等重放路径从包入口
+// 导入 agentEventToFrame（此前两处内联 if 链缺 turn/cancelled → TURN_CANCELLED，
+// 取消回合被 done 帧错误闭环为成功）。此导入锁定入口导出不被删除。
+import { agentEventToFrame as agentEventToFrameFromEntry } from '../src/index.ts'
 import type { AgentEvent } from '@studyclaw/agent'
 
 function ev(type: string, payload: Record<string, unknown> = {}): AgentEvent {
@@ -35,5 +39,10 @@ describe('agentEventToFrame（A4）', () => {
     expect(agentEventToFrame(ev('turn/end', { reason: { kind: 'completed' } }))).toBeNull()
     expect(agentEventToFrame(ev('inbox/queued', {}))).toBeNull()
     expect(agentEventToFrame(ev('input/voided', { seq: 3 }))).toBeNull()
+  })
+
+  it('H-1：入口（index.ts）导出与内部实现同一且 cancelled 契约可用（bin.ts 队列/answer 路径依赖）', () => {
+    expect(agentEventToFrameFromEntry).toBe(agentEventToFrame)
+    expect(agentEventToFrameFromEntry(ev('turn/cancelled', { reason: 'user' }))).toMatchObject({ kind: 'error', code: 'TURN_CANCELLED' })
   })
 })

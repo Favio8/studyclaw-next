@@ -46,6 +46,7 @@ import {
   setCredential,
   settingsPayload,
   updateSettings,
+  agentEventToFrame,
   LearningAgentService,
 } from '@studyclaw/chat-service'
 import { migrateLegacySession } from '@studyclaw/session'
@@ -153,6 +154,17 @@ function requestToken(request: import('node:http').IncomingMessage, url: URL): s
   const header = request.headers['x-studyclaw-token']
   if (typeof header === 'string' && header.trim() !== '') return header.trim()
   return url.searchParams.get('token')?.trim() ?? ''
+}
+
+/** H-1：agentEventToFrame 的产物 → SSE（帧名，data 负载）。chat/stream 的
+ * 三条事件源（chatStream 主路径、queuedEvents 队列消费、ask 幂等重放）共用
+ * 这一个形状函数，杜绝内联 if 链副本再漂移（此前两份副本缺 turn/cancelled
+ * → TURN_CANCELLED，取消回合被 done 帧错误闭环为成功）。 */
+function frameToSseData(frame: NonNullable<ReturnType<typeof agentEventToFrame>>): { event: string; data: unknown } {
+  if (frame.kind === 'thinking' || frame.kind === 'token') return { event: frame.kind, data: { delta: frame.delta } }
+  if (frame.kind === 'ask') return { event: 'ask', data: { question: frame.question } }
+  if (frame.kind === 'error') return { event: 'error', data: { code: frame.code, message: frame.message } }
+  return { event: frame.kind, data: frame.payload }
 }
 
 interface StartupRegistry {
@@ -1124,16 +1136,14 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const fileRefs = Array.isArray(input.fileRefs) ? input.fileRefs.filter((ref): ref is string => typeof ref === 'string') : []
     if (queuedTurnId !== '') {
       if (sessionId === null) { writeFrame('error', { code: 'invalid-request', message: 'queued turn requires sessionId' }); writeFrame('done', { usage: {}, turnId: sessionId }); response.end(); return }
+      // H-1：帧映射统一走 chat-service 的 agentEventToFrame——此前这里内联的
+      // if 链缺 turn/cancelled → TURN_CANCELLED，取消的队列回合会被下方 done
+      // 帧错误闭环为成功（半截回复当成功渲染）。
       for await (const event of agentService.queuedEvents(`study-${sessionId}`, queuedTurnId, abortController.signal)) {
-        const payload = event.payload ?? {}
-        if (event.type === 'session/meta') writeFrame('meta', payload)
-        else if (event.type === 'assistant/reasoning') writeFrame('thinking', { delta: String(payload['delta'] ?? '') })
-        else if (event.type === 'assistant/chunk') writeFrame('token', { delta: String(payload['delta'] ?? '') })
-        else if (event.type === 'tool/call') writeFrame('tool-start', payload)
-        else if (event.type === 'tool/result') writeFrame('tool', payload)
-        else if (event.type === 'ask/pending') writeFrame('ask', { question: String(payload['question'] ?? '') })
-        else if (event.type === 'sync/applied') writeFrame('sync', payload)
-        else if (event.type === 'turn/error') writeFrame('error', { code: 'AGENT_TURN_FAILED', message: String(payload['message'] ?? '') })
+        const frame = agentEventToFrame(event)
+        if (frame === null) continue
+        const mapped = frameToSseData(frame)
+        writeFrame(mapped.event, mapped.data)
       }
       const usage = await agentService.projection(`study-${sessionId}`).then(projection => projection.usage).catch(() => ({}))
       writeFrame('done', { usage, turnId: queuedTurnId }); response.end(); return
@@ -1152,22 +1162,14 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         ...(typeof input.requestId === 'string' ? { requestId: input.requestId } : {}),
         signal: abortController.signal,
       }, config, agentRegistry, agentService.approvals)) {
+        // H-1：主路径与队列/重放路径共用 frameToSseData（chatStream 事件的
+        // kind 集合与 agentEventToFrame 的返回同构）。meta 帧仍需就地解析
+        // sessionId 供 done 帧收尾取 usage。
         if (event.kind === 'meta') {
           resolvedSessionId = String(event.payload['sessionId'] ?? resolvedSessionId ?? '') || null
-          writeFrame('meta', event.payload)
-        } else if (event.kind === 'error') {
-          writeFrame('error', { code: event.code, message: event.message })
-        } else if (event.kind === 'sync') {
-          writeFrame('sync', event.payload)
-        } else if (event.kind === 'tool-start') {
-          writeFrame('tool-start', event.payload)
-        } else if (event.kind === 'tool') {
-          writeFrame('tool', event.payload)
-        } else if (event.kind === 'ask') {
-          writeFrame('ask', { question: event.question })
-        } else {
-          writeFrame(event.kind, { delta: event.delta })
         }
+        const mapped = frameToSseData(event)
+        writeFrame(mapped.event, mapped.data)
       }
     } catch (error) {
       if (abortController.signal.aborted) { response.end(); return }
@@ -1216,15 +1218,13 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       const { handle } = await agentService.resolveAnswerTurn(agentId, answer, requestId)
       for await (const event of handle.events) {
         if (abortController.signal.aborted) break
-        const payload = event.payload ?? {}
-        if (event.type === 'session/meta') writeFrame('meta', payload)
-        else if (event.type === 'assistant/reasoning') writeFrame('thinking', { delta: String(payload['delta'] ?? '') })
-        else if (event.type === 'assistant/chunk') writeFrame('token', { delta: String(payload['delta'] ?? '') })
-        else if (event.type === 'tool/call') writeFrame('tool-start', payload)
-        else if (event.type === 'tool/result') writeFrame('tool', payload)
-        else if (event.type === 'ask/pending') writeFrame('ask', { question: String(payload['question'] ?? '') })
-        else if (event.type === 'sync/applied') writeFrame('sync', payload)
-        else if (event.type === 'turn/error') writeFrame('error', { code: 'AGENT_TURN_FAILED', message: String(payload['message'] ?? '') })
+        // H-1：此前内联的映射缺 turn/cancelled → TURN_CANCELLED——ask 幂等
+        // 重放 attach 到已取消回合时半截回复会被 done 帧闭环为成功。统一走
+        // agentEventToFrame 与主路径/队列路径同一语义。
+        const frame = agentEventToFrame(event)
+        if (frame === null) continue
+        const mapped = frameToSseData(frame)
+        writeFrame(mapped.event, mapped.data)
       }
     } catch (error) {
       writeFrame('error', { code: 'AGENT_ANSWER_FAILED', message: error instanceof Error ? error.message : String(error) })

@@ -36,6 +36,7 @@ export {
   createLearningAgent,
   LearningAgentService,
   chatStream,
+  agentEventToFrame,
   fileContextOf,
 } from './service.ts'
 export type { SessionSummaryView, SessionSearchView, RestoredSessionView, SessionModelDirectory, SessionModelSelection, SessionModelGroup, LearningAgentOptions, AgentRuntimeConfig, SessionEventView, MaintenanceJobView } from './service.ts'

@@ -38,6 +38,19 @@ child.stderr.on('data', d => { out += d })
 
 const hostJsonPath = join(userData, 'host-home', 'host.json')
 
+// 跨平台进程树终止与存活探测：taskkill/tasklist 是 Windows 专属命令，
+// 非 Windows 平台用 kill/--kill 及 kill(pid, 0)。方案面向 win/mac/linux。
+const killTree = pid => {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+  } else {
+    try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch {} }
+  }
+}
+const pidAlive = pid => {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
 const t0 = Date.now()
 while (Date.now() - t0 < 20000) {
   if (existsSync(hostJsonPath)) break
@@ -45,7 +58,7 @@ while (Date.now() - t0 < 20000) {
 }
 if (!existsSync(hostJsonPath)) {
   console.error('[smoke] FAIL: host.json not found in 20s\n', out.slice(-1500))
-  spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+  killTree(child.pid)
   process.exit(1)
 }
 const cfg = JSON.parse(readFileSync(hostJsonPath, 'utf8'))
@@ -66,13 +79,9 @@ const html = await ui.text()
 console.log('[smoke] GET / via sidecar →', ui.status, 'token-injected:', html.includes('__STUDYCLAW__'))
 
 // 退出：杀整棵树（模拟 window close → app.quit 路径之后的进程消失断言）。
-spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+killTree(child.pid)
 await new Promise(r => setTimeout(r, 1500))
-let residue = 0
-try {
-  const taskOut = spawnSync('tasklist', ['/FI', `PID eq ${cfg.pid}`], { encoding: 'utf8' })
-  residue = (taskOut.stdout ?? '').includes(String(cfg.pid)) ? 1 : 0
-} catch { /* tasklist 不可用时跳过 */ }
+const residue = pidAlive(cfg.pid) ? 1 : 0
 console.log('[smoke] sidecar residue after kill:', residue)
 rmSync(userData, { recursive: true, force: true })
 

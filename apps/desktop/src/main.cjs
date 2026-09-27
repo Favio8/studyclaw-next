@@ -5,7 +5,7 @@
 // DESKTOP_SHELL_PLAN_studyclaw-next.md 第 4/7 节。
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const { spawn } = require('node:child_process')
-const { existsSync, readFileSync, mkdirSync } = require('node:fs')
+const { existsSync, readFileSync, mkdirSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
 
 // 开发联调模式：设置 STUDYCLAW_DESKTOP_DEV_URL 后不拉起 sidecar，
@@ -53,6 +53,13 @@ function startHost() {
     return
   }
   if (!existsSync(hostHome)) mkdirSync(hostHome, { recursive: true })
+  // 残留 host.json 竞态：正常退出路径就是强杀（taskkill /F），Host 只在优雅
+  // 退出时删 host.json——每次退出后都残留上一会话的死 pid/死端口配置。
+  // waitForHost 首个 tick 在新 Host 写出配置前执行，若读到残留文件（仅校验
+  // port 为正整数）就会 loadURL 死端口 → ERR_CONNECTION_REFUSED。spawn 前
+  // 先删掉，保证 waitForHost 只可能读到本次进程写出的配置；waitForHost 里
+  // 再按 pid 复核兜底。
+  try { rmSync(hostJsonPath, { force: true }) } catch {}
   // ELECTRON_RUN_AS_NODE=1：让应用可执行文件本身充当纯 Node.js 运行时跑
   // Host bundle——壳不需要额外分发 Node 安装包（零额外运行时体积）。
   const env = {
@@ -81,7 +88,21 @@ function startHost() {
     }
     lastRestartWindow.push(now)
     const wait = RESTART_BACKOFF_MS[Math.min(restartIdx++, RESTART_BACKOFF_MS.length - 1)]
-    setTimeout(startHost, wait)
+    setTimeout(() => {
+      startHost()
+      // Host 以 --port 0 启动，每次重启都是新端口；崩溃时存活（或新开）的
+      // 窗口必须跟随新端口，否则继续连已死的旧端口。pid 复核的 waitForHost
+      // 保证读到的是本次重启写出的配置。
+      waitForHost().then(cfg => {
+        const target = `http://127.0.0.1:${cfg.port}/`
+        const existing = BrowserWindow.getAllWindows()
+        if (existing.length > 0) {
+          for (const w of existing) void w.loadURL(target)
+        } else {
+          void createMainWindow()
+        }
+      }).catch(() => fatal('本地服务重启失败，请查看日志：' + join(hostHome, 'logs')))
+    }, wait)
   })
 }
 
@@ -118,7 +139,9 @@ function waitForHost() {
   return new Promise((resolve, reject) => {
     const tick = () => {
       const cfg = readHostConfig()
-      if (cfg) return resolve(cfg)
+      // pid 复核兜底（与 smoke-sidecar 同法）：host.json 是跨会话残留文件，
+      // 只有本次 spawn 的 Host 写出的配置才能用于握手。
+      if (cfg && (host === null || cfg.pid === host.pid)) return resolve(cfg)
       if (Date.now() - t0 > START_TIMEOUT_MS) return reject(new Error('host-start-timeout'))
       setTimeout(tick, 150)
     }
@@ -204,7 +227,16 @@ if (!gotLock) { app.quit() } else {
     } catch (e) {
       fatal(`无法连接本地学习服务（${String(e && e.message || e)}）。数据目录：${hostHome}`)
     }
-    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createMainWindow() })
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length > 0) return
+      // darwin 关窗只停 Host 不退应用（window-all-closed 置了 quitting）；
+      // 重新激活必须复位退出标记并重启 Host（新进程新端口），否则窗口会
+      // 在死端口上等到超时。catch 落 fatal：吞掉 rejection 就是静默僵死。
+      quitting = false
+      restartIdx = 0
+      if (host === null && !isDev) startHost()
+      void createMainWindow().catch(e => fatal(`无法连接本地学习服务（${String(e && e.message || e)}）。数据目录：${hostHome}`))
+    })
   })
 
   app.on('before-quit', () => { quitting = true; stopHost() })

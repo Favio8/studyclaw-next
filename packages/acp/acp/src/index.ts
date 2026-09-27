@@ -173,7 +173,11 @@ export class AcpRouter {
         }
         return { jsonrpc: '2.0', id, result }
       }
-      const method = methodAliases[request.method!]
+      // method 名是外部输入：普通对象会把 `constructor`/`toString` 等解析到
+      // Object.prototype 上的成员，绕过 -32601 校验后被当作 host 方法调用。
+      // hasOwn 守卫后只可能命中本表登记的别名。
+      const name = request.method!
+      const method = Object.hasOwn(methodAliases, name) ? methodAliases[name] : undefined
       if (method === undefined || this.host[method] === undefined) return this.error(id, new AcpProtocolError(-32601, `Method not found: ${request.method}`))
       const params = paramsOf(request.params)
       let result: unknown

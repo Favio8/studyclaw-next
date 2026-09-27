@@ -863,12 +863,16 @@ export class Agent {
       this.activeInjected = this.injected.splice(0)
       for (const context of this.activeInjected) {
         await context.persisted
+        // 以 context 自己的 turnId 落账（而非主回合的）：restore 按
+        // payload.turnId 分组清理，若挂在主回合名下，已消费上下文的
+        // inbox/queued 行永不被剔除——重启后该上下文会被重复注入下一个
+        // 无关回合；而主回合的恢复条目反被这条事件误删，中断回合不再续跑。
         await this.append('agent/context', {
           content: context.input.content,
           mode: context.input.mode ?? null,
           metadata: context.input.metadata ?? {},
           contextOnly: true,
-        }, entry.turnId)
+        }, context.turnId)
         context.queue.close()
       }
       if (entry.recovered) {
@@ -883,14 +887,16 @@ export class Agent {
         userInputSeq = userInputRow.seq
         await this.append('turn/start', { mode: entry.input.mode ?? 'socratic', target: entry.target }, entry.turnId)
       }
-      let blockedByAsk = false
-      let blockedByApproval = false
-      // DSH treats steering admitted while a turn is active as another step
-      // of that same turn. Keep the original turn boundary and only append a
-      // new inbox/user input boundary for the steering item. This also keeps
-      // queued steering handles useful to transports without creating a
-      // second synthetic turn.
-      let currentInput = entry.input
+    let blockedByAsk = false
+    let blockedByApproval = false
+    // DSH treats steering admitted while a turn is active as another step
+    // of that same turn. Keep the original turn boundary and only append a
+    // new inbox/user input boundary for the steering item. This also keeps
+    // queued steering handles useful to transports without creating a
+    // second synthetic turn.
+    // L3 口径说明：本回合的 inputTokens/outputTokens 是 length/4 的**粗估**
+    // （事件流里拿不到上游真实用量），仅供 UI 展示相对规模，非精确计费数字。
+    let currentInput = entry.input
       let continueTurn = true
       while (continueTurn) {
         let attempt = 0

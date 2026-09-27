@@ -14,6 +14,7 @@ import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, dirname, resolve } from 'node:path'
 import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -85,6 +86,8 @@ function requireWorkspaceRootForSettings(root: string, action: string): void {
  * 存活 → 拒绝启动并给出可读提示；进程已死（崩溃残留）→ 自愈抢走。 */
 interface HostInstanceLock {
   release(): void
+  /** C-11：listen 后用实际端口回填锁内容（--port 0 时锁里原记的是 0）。 */
+  noteActualPort(actualPort: number): void
 }
 
 async function acquireHostInstanceLock(port: number): Promise<HostInstanceLock> {
@@ -123,9 +126,28 @@ async function acquireHostInstanceLock(port: number): Promise<HostInstanceLock> 
     } finally {
       await handle.close().catch(() => undefined)
     }
-    const release = (): void => { void rm(lockPath, { force: true }).catch(() => undefined) }
+    const release = (): void => {
+      // C-1：同步删除——'exit' 处理器路径同样要真正生效（异步 rm 在
+      // process.exit 前完不成）。只删自己仍持有的锁（pid 比对防误删）。
+      try {
+        if (readFileSync(lockPath, 'utf8').includes(String(process.pid))) rmSync(lockPath, { force: true })
+      } catch {
+        // 锁不存在/已易主/不可读：无需动作。
+      }
+    }
+    const noteActualPort = (actualPort: number): void => {
+      // C-11：--port 0 时锁里记的是请求端口 0，与 host.json 的实际端口不一致，
+      // 多开冲突提示显示"端口 0"。listen 后用实际端口重写锁内容。
+      try {
+        if (readFileSync(lockPath, 'utf8').includes(String(process.pid))) {
+          writeFileSync(lockPath, JSON.stringify({ pid: process.pid, port: actualPort }), 'utf8')
+        }
+      } catch {
+        // 锁已被夺走或不可写：冲突提示降级为无端口信息。
+      }
+    }
     process.on('exit', release)
-    return { release }
+    return { release, noteActualPort }
   }
 }
 
@@ -141,7 +163,15 @@ async function writeHostConfig(port: number, token: string | null): Promise<void
 }
 
 function removeHostConfig(): void {
-  void import('node:fs/promises').then(({ rm }) => rm(join(hostHome(), 'host.json'), { force: true }).catch(() => undefined))
+  // C-1：必须同步删除——shutdown 里 process.exit(0) 紧随其后，异步 rm 的
+  // unlink 未完成即被放弃：host.json（含明文访问 token）与 host.lock 每次
+  // 优雅退出都必然残留（代理实测 5/5），bin.ts:112-118 注释声称的"Host 只在
+  // 优雅退出时删 host.json"实际为假，CLI discoverHost 之后连的是死端口。
+  try {
+    rmSync(join(hostHome(), 'host.json'), { force: true })
+  } catch {
+    // 清理失败不阻塞关停（磁盘异常时重启路径有 spawn 前 rmSync 兜底）。
+  }
 }
 
 /** 常数时间比较（先定长哈希，规避长度/时序侧信道）。 */
@@ -282,6 +312,9 @@ async function browseWorkspaceChildren(
 /** 单文件/单次上传的体积与数量上限（P1-5：此前完全无上限，10MB body 直接吃进内存）。 */
 const UPLOAD_FILE_LIMIT_BYTES = 25 * 1024 * 1024
 const UPLOAD_MAX_FILES = 10
+/** C-2：上传 handler 的 stall 兜底——busboy 的 'close' 在客户端 RST 时永不
+ *  触发（Writable 语义），请求 'close' 是主结算路径，这是半开连接的兜底。 */
+const UPLOAD_STALL_TIMEOUT_MS = 120_000
 
 /**
  * 在 dir 内为 filename 找一个不冲突的名字：重名追加 -1/-2 序号而不是覆盖。
@@ -1043,6 +1076,20 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       destroy: () => void
     }> = []
     let busboyError: Error | null = null
+    // C-2：客户端断连（RST/导航离开）必须结算——busboy@1.6.0 的 Multipart 是
+    // Writable(emitClose)，只在 finish/destroy 时发 'close'；pipe 在源 'close'
+    // （无 'end'）时只 unpipe 不 end 目标 → 'close' 永不触发，handler 闭包、
+    // WriteStream fd 与 .upload-*.tmp 全部静默泄漏（该路径是唯一没有 aborted
+    // 监听/超时保护的入口；代理实测复现）。双路结算 + 掐断在途写流。
+    let clientGone = false
+    const abortPending = (reason: string): void => {
+      for (const entry of pending) {
+        if (entry.skipReason === null) entry.skipReason = reason
+        entry.destroy()
+      }
+    }
+    let settleBusboy!: () => void
+    const busboyDone = new Promise<void>(resolve => { settleBusboy = resolve })
     try {
       const busboy = Busboy({
         headers: request.headers,
@@ -1085,13 +1132,26 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       })
       busboy.on('error', (error: Error) => {
         busboyError = error
-        for (const entry of pending) {
-          if (entry.skipReason === null) entry.skipReason = `上传中断: ${error.message}`
-          entry.destroy()
-        }
+        abortPending(`上传中断: ${error.message}`)
       })
+      busboy.on('close', () => settleBusboy())
+      request.once('close', () => {
+        // 客户端已消失：掐断 busboy 与在途写流后结算——响应无人接收，跳过后续
+        // 构建/响应（临时文件由下方收尾循环清理）。
+        clientGone = true
+        abortPending('上传中断: 客户端断连')
+        busboy.destroy()
+        settleBusboy()
+      })
+      const stallTimer = setTimeout(() => {
+        clientGone = true
+        abortPending('上传中断: 超过 stall 上限')
+        busboy.destroy()
+        settleBusboy()
+      }, UPLOAD_STALL_TIMEOUT_MS)
       request.pipe(busboy)
-      await new Promise<void>(resolve => busboy.on('close', resolve))
+      await busboyDone
+      clearTimeout(stallTimer)
       await Promise.allSettled(pending.map(entry => entry.settled))
     } catch (error) {
       busboyError = error instanceof Error ? error : new Error(String(error))
@@ -1099,6 +1159,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     // 落盘收尾：放弃的（截断/出错/中断）临时文件就地清理；成功的原子改名到
     // 唯一目标名（重名追加 -1/-2 序号，不再静默互相覆盖）。响应在全部落盘
     // 结算后才发出，杜绝 fire-and-forget 式写盘失败既不进响应也无日志。
+    // 客户端已断连时收尾照跑（清理优先），只是不再触发构建/写响应。
     for (const entry of pending) {
       if (entry.skipReason !== null) {
         await rm(entry.tmpPath, { force: true }).catch(() => undefined)
@@ -1120,6 +1181,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         rejected.push({ file: entry.safe, reason: error instanceof Error ? error.message : String(error) })
       }
     }
+    if (clientGone) return
     if (busboyError !== null) {
       response.writeHead(400)
       response.end(JSON.stringify({ error: { code: 'invalid-request', message: `上传失败: ${busboyError.message}`, details: null } }))
@@ -1361,6 +1423,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       // 连同 token 写入 host.json 供 CLI/桌面端握手发现。
       const address = server.address()
       const actualPort = typeof address === 'object' && address !== null ? address.port : port
+      instanceLock.noteActualPort(actualPort)
       void writeHostConfig(actualPort, token).then(() => {
         console.log(`[studyclaw] host listening on http://127.0.0.1:${actualPort} (home: ${hostHome()}, logs: ${hostLogger.logDir}${token === null ? ', auth: DISABLED' : ''})`)
         if (options.open === true) void openBrowser(`http://127.0.0.1:${actualPort}`)
@@ -1465,9 +1528,16 @@ async function main(): Promise<void> {
   const command = args[0]
   if (command === 'serve') {
     const portFlag = args.indexOf('--port')
-    const port = portFlag >= 0 && args[portFlag + 1] ? Number(args[portFlag + 1]) : Number(process.env.PORT ?? 8080)
+    const rawPort = portFlag >= 0 && args[portFlag + 1] ? args[portFlag + 1] : (process.env.PORT ?? '8080')
+    // C-11：`--port abc` 旧实现 Number('abc')=NaN 后被 isFinite 假值静默回退
+    // 8080（用户以为指定了端口）；`--port 99999` 把裸 ERR_SOCKET_BAD_PORT 栈
+    // 抛到用户脸上。统一整数+范围校验，给出可读错误。
+    const port = Number(rawPort)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error(`无效端口: ${rawPort}（--port 需 0~65535 的整数，0 表示由内核分配随机端口）`)
+    }
     // FL-30/35/21：serve 旗标——token 逃生口、随机端口（--port 0）、自动开浏览器。
-    await serve(Number.isFinite(port) ? port : 8080, {
+    await serve(port, {
       insecureNoToken: args.includes('--insecure-no-token'),
       open: args.includes('--open'),
     })

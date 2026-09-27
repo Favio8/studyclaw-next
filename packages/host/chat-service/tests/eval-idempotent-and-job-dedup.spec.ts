@@ -125,6 +125,44 @@ describe('UI-7：evalSubmit evalId 幂等', () => {
     expect(evalsOfCmcq(content)).toBe(2)
     await cleanup()
   })
+
+  it('M4：跨 service 实例（宿主重启模拟）同 evalId 仍重放，不二次计分', async () => {
+    const { ws, service, courseId, cleanup } = await setup()
+    const evalId = 'ev_restart_replay_001'
+    const answer = '连接模型与真实环境的控制系统'
+    await collect(service.evalSubmit(ws, courseId, 't_mcq_001', answer, null, evalId))
+    const progressPath = join(ws, '.studyclaw', 'progress.md')
+    expect(evalsOfCmcq(await readFile(progressPath, 'utf8'))).toBe(1)
+    // 账本已持久化到 .studyclaw/eval-ledger/：新实例（模拟宿主重启）同键重试
+    // 直接重放已结算帧，SM-2/progress 不再二次 settle。
+    const revived = createCourseService(async () => null)
+    const retry = await collect(revived.evalSubmit(ws, courseId, 't_mcq_001', answer, null, evalId))
+    expect(retry.filter(f => f.event === 'result')).toHaveLength(1)
+    expect(retry.at(-1)?.event).toBe('done')
+    expect(evalsOfCmcq(await readFile(progressPath, 'utf8'))).toBe(1)
+    await cleanup()
+  })
+})
+
+describe('H6：sm2 帧携带真实掌握度差值', () => {
+  it('masteryDelta 与指数平滑更新一致（旧实现硬编码 ±0.1）', async () => {
+    const { root, ws, service, courseId, cleanup } = await setup()
+    // 预置 c_mcq 掌握度 50% 的历史记录。
+    await writeFile(join(ws, '.studyclaw', 'progress.md'), [
+      '# 学习进度', '',
+      '- **总体掌握度**：50%', '- **待复习卡片数**：0', '- **最后更新时间**：2026-08-20 10:00', '',
+      '| concept_id | name | chapter | mastery | evals | pass_rate | ef | next_review_at | misattribution | streak |',
+      '|---|---|---|---|---|---|---|---|---|---|',
+      '| `c_mcq` | 测试概念 | 第一章 | 🟡 50% | 1 | 100% | 2.50 | - | none | 1 |', '',
+    ].join('\n'), 'utf8')
+    const frames = await collect(service.evalSubmit(ws, courseId, 't_mcq_001', '连接模型与真实环境的控制系统', null))
+    const sm2 = frames.find(f => f.event === 'sm2')
+    expect(sm2).toBeDefined()
+    // newMastery = 0.5*0.7 + 1*0.3 = 0.65 → delta = 0.15（旧实现固定给 0.1）。
+    expect(Number((sm2!.data as { masteryDelta: number }).masteryDelta)).toBeCloseTo(0.15, 6)
+    void root
+    await cleanup()
+  })
 })
 
 describe('UI-8：JobManager 同课程在途构建去重', () => {

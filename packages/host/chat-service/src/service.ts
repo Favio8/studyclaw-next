@@ -7,7 +7,7 @@
 
 import { readFile, readdir } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import { AgentLoop, ApprovalQueue, type AgentCapability, type AgentEvent, type AgentModelSelection, type AgentPreset, type AgentRegistry, type ApprovalDecision, type ApprovalRequest, type AgentTurnHandle } from '@studyclaw/agent'
+import { AgentLoop, ApprovalQueue, type Agent, type AgentCapability, type AgentEvent, type AgentModelSelection, type AgentPreset, type AgentRegistry, type ApprovalDecision, type ApprovalRequest, type AgentTurnHandle } from '@studyclaw/agent'
 import {
   agentToolRegistry,
   resolveSourceRef,
@@ -84,11 +84,39 @@ export interface SessionEventView {
 
 const PROVIDER_OUTPUT_LIMIT = 1024 * 1024
 
+/** 边读边截断的受限抓取：`response.text()` 会把整个响应体读入内存后才开始
+ * slice，输出上限形同虚设——大文件（agent 的 fetch 可指向任意 URL）会全量
+ * 缓冲。按字节从 ReadableStream 读取，达到上限即取消连接。中止由传给
+ * fetch 的 signal 负责（abort 会让 reader.read() 直接 reject）。 */
+async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  const reader = response.body?.getReader()
+  if (reader === undefined) return ''
+  const decoder = new TextDecoder('utf-8')
+  let text = ''
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      text += decoder.decode(value, { stream: true })
+      if (total >= maxBytes) {
+        void reader.cancel().catch(() => undefined)
+        break
+      }
+    }
+  } finally {
+    decoder.decode(); // flush 终态，避免多字节字符被截在边界
+    reader.releaseLock()
+  }
+  return text.slice(0, maxBytes)
+}
+
 /** Credential-free URL provider. Redirects are rejected to avoid leaking keys. */
 async function localFetch(input: { url: string; signal?: AbortSignal }): Promise<{ status: number; contentType: string; body: string }> {
   const response = await fetch(input.url, { redirect: 'manual', ...(input.signal === undefined ? {} : { signal: input.signal }) })
   if (response.status >= 300 && response.status < 400) throw new Error('网络重定向已拒绝')
-  const body = (await response.text()).slice(0, PROVIDER_OUTPUT_LIMIT)
+  const body = await readBodyCapped(response, PROVIDER_OUTPUT_LIMIT)
   return { status: response.status, contentType: response.headers.get('content-type') ?? '', body }
 }
 
@@ -99,7 +127,7 @@ async function localWebSearch(input: { query: string; signal?: AbortSignal }): P
   const response = await fetch(endpoint, { redirect: 'manual', ...(input.signal === undefined ? {} : { signal: input.signal }) })
   if (response.status >= 300 && response.status < 400) throw new Error('网络重定向已拒绝')
   if (!response.ok) throw new Error(`搜索服务返回 HTTP ${response.status}`)
-  const html = (await response.text()).slice(0, PROVIDER_OUTPUT_LIMIT * 2)
+  const html = await readBodyCapped(response, PROVIDER_OUTPUT_LIMIT * 2)
   const results: Array<{ title: string; url: string; snippet: string }> = []
   const pattern = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi
   for (const match of html.matchAll(pattern)) {
@@ -309,7 +337,9 @@ export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
     ...(options.agentRegistry === undefined ? {} : {
       subagent: async (input: { task: string; cwd: string; signal?: AbortSignal }) => {
         if (input.signal?.aborted) throw new Error('subagent cancelled')
-        const childSessionId = `${options.sessionId}-child-${Date.now().toString(36)}`
+        // 随机后缀：同毫秒内两次 spawn 会生成相同 childSessionId，registry.register
+        // 以「Agent 已存在」拒绝第二个；事件 id 校验（SEC-6）允许字母数字与连字符。
+        const childSessionId = `${options.sessionId}-child-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
         const child = createLearningAgent({
           ...options,
           sessionId: childSessionId,
@@ -1303,38 +1333,57 @@ export async function* chatStream(
     persistLegacy: false,
     eventStore: new SessionEventStore(join(stateDirOf(courseDir), 'history')),
   })
-  await session.init()
-  const eventStore = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
-  if (!(await eventStore.exists(session.sessionId))) {
-    await eventStore.append(session.sessionId, { ts: utcTs(), type: 'session/create', payload: { mode: input.mode ?? 'socratic', agentId: `study-${session.sessionId}` } })
+  // SSE 前置守卫：session.init / 事件落盘 / ensureAgentRuntimeConfig 里的
+  // loadChatConfig（用户手改 config.yaml 语法错误即抛）/ agent.restore 等
+  // 都在发出任何帧之前执行——生成器在这一段 throw 会穿透宿主 HTTP 层打崩
+  // 进程（与本函数顶部 courseDirOf 转 error 帧同一约束），统一转 error 帧收尾。
+  interface ChatSetup {
+    agent: Agent
+    eventStore: SessionEventStore
+    historyStore: SessionStore
+    modelSelection: SessionModelSelection | null
+    firstPrompt: boolean
   }
-  const runtimeConfig = await ensureAgentRuntimeConfig(eventStore, session.sessionId, inputConfig ?? await loadChatConfig(workspaceRoot))
-  const modelSelection = await ensureSessionModel(workspaceRoot, courseId, session.sessionId)
-  // DSH ensureFallback: the deterministic first-prompt title lands at send
-  // time (independent of turn outcome) so the sidebar drops the blank
-  // "新对话" placeholder as soon as the first message exists.
-  const historyStore = new SessionStore(join(stateDirOf(courseDir), 'history'))
-  let firstPrompt = false
-  const fallbackTitle = studyclawFallbackTitle(input.message)
-  if (fallbackTitle !== '') {
-    firstPrompt = await historyStore.applyAutoTitle(session.sessionId, fallbackTitle, 'fallback').catch(() => false)
+  const setup: ChatSetup | { error: unknown } = await (async (): Promise<ChatSetup> => {
+    await session.init()
+    const store = new SessionEventStore(join(stateDirOf(courseDir), 'history'))
+    if (!(await store.exists(session.sessionId))) {
+      await store.append(session.sessionId, { ts: utcTs(), type: 'session/create', payload: { mode: input.mode ?? 'socratic', agentId: `study-${session.sessionId}` } })
+    }
+    const runtimeConfig = await ensureAgentRuntimeConfig(store, session.sessionId, inputConfig ?? await loadChatConfig(workspaceRoot))
+    const modelSelection = await ensureSessionModel(workspaceRoot, courseId, session.sessionId)
+    // DSH ensureFallback: the deterministic first-prompt title lands at send
+    // time (independent of turn outcome) so the sidebar drops the blank
+    // "新对话" placeholder as soon as the first message exists.
+    const history = new SessionStore(join(stateDirOf(courseDir), 'history'))
+    let firstPrompt = false
+    const fallbackTitle = studyclawFallbackTitle(input.message)
+    if (fallbackTitle !== '') {
+      firstPrompt = await history.applyAutoTitle(session.sessionId, fallbackTitle, 'fallback').catch(() => false)
+    }
+    const agent = agentRegistry?.get(`study-${session.sessionId}`) ?? createLearningAgent({
+      workspaceRoot,
+      courseId,
+      sessionId: session.sessionId,
+      mode: input.mode ?? 'socratic',
+      conceptId: input.conceptId ?? null,
+      inputConfig,
+      modelSelection,
+      ...(agentRegistry === undefined ? {} : { agentRegistry }),
+      ...(approvals === undefined ? {} : { approvals }),
+      runtimeConfig,
+    })
+    if (agentRegistry?.get(agent.options.agentId) === undefined) {
+      agentRegistry?.register(agent)
+      await agent.restore()
+    }
+    return { agent, eventStore: store, historyStore: history, modelSelection, firstPrompt }
+  })().catch((error: unknown) => ({ error }))
+  if (!('agent' in setup)) {
+    yield { kind: 'error', code: 'CHAT_SETUP_FAILED', message: `会话初始化失败: ${setup.error instanceof Error ? setup.error.message : String(setup.error)}` }
+    return
   }
-  const agent = agentRegistry?.get(`study-${session.sessionId}`) ?? createLearningAgent({
-    workspaceRoot,
-    courseId,
-    sessionId: session.sessionId,
-    mode: input.mode ?? 'socratic',
-    conceptId: input.conceptId ?? null,
-    inputConfig,
-    modelSelection,
-    ...(agentRegistry === undefined ? {} : { agentRegistry }),
-    ...(approvals === undefined ? {} : { approvals }),
-    runtimeConfig,
-  })
-  if (agentRegistry?.get(agent.options.agentId) === undefined) {
-    agentRegistry?.register(agent)
-    await agent.restore()
-  }
+  const { agent, eventStore, historyStore, modelSelection, firstPrompt } = setup
   const abort = (): void => {
     approvals?.cancelForAgent(agent.options.agentId)
     agent.cancel({ keepInbox: true, cause: 'system' })

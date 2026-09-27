@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, relative } from 'node:path'
 import {
   CourseBuilder,
@@ -177,10 +177,61 @@ interface MutableJob {
   finishedAtMs: number | null
 }
 
-/** UI-7：评测幂等账本（evalId → 已结算帧）。进程内单例即可——Host 是单进程，
- * 与 JobManager 同生命周期；TTL 10 分钟，超过 500 条按时间清扫。 */
+/**
+ * UI-7：评测幂等账本（evalId → 已结算帧）。M4：真实 evalId 持久化到
+ * `.studyclaw/eval-ledger/<id>.json`——旧实现纯内存，宿主在 SM-2 已落盘、
+ * 账本登记前崩溃后，同 evalId 重试会二次计分。TTL 10 分钟，超过 500 个文件
+ * 按 mtime 清扫。匿名（无 evalId）提交仅进程内记账（客户端无从重放）。
+ */
 const evalLedger = new Map<string, { frames: Array<Record<string, unknown>>; ts: number }>()
 let evalLedgerNextId = 0
+const EVAL_LEDGER_TTL_MS = 10 * 60 * 1000
+const EVAL_LEDGER_MAX_FILES = 500
+const EVAL_LEDGER_ID_RE = /^[A-Za-z0-9._-]+$/
+
+function evalLedgerFile(workspaceRoot: string, evalId: string): string {
+  const safe = EVAL_LEDGER_ID_RE.test(evalId) ? evalId : createHash('sha256').update(evalId).digest('hex')
+  return join(stateDirOf(workspaceRoot), 'eval-ledger', `${safe}.json`)
+}
+
+async function loadLedgerFrames(workspaceRoot: string, evalId: string): Promise<Array<Record<string, unknown>> | null> {
+  const raw = await readFile(evalLedgerFile(workspaceRoot, evalId), 'utf8').catch(() => null)
+  if (raw === null) return null
+  try {
+    const parsed = JSON.parse(raw) as { frames?: unknown; ts?: unknown }
+    if (!Array.isArray(parsed.frames) || typeof parsed.ts !== 'number') return null
+    if (Date.now() - parsed.ts > EVAL_LEDGER_TTL_MS) return null
+    return parsed.frames as Array<Record<string, unknown>>
+  } catch {
+    return null
+  }
+}
+
+async function saveLedgerFrames(workspaceRoot: string, evalId: string, frames: Array<Record<string, unknown>>): Promise<void> {
+  const ledgerDir = join(stateDirOf(workspaceRoot), 'eval-ledger')
+  await mkdir(ledgerDir, { recursive: true })
+  const path = evalLedgerFile(workspaceRoot, evalId)
+  const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`
+  await writeFile(tmp, JSON.stringify({ frames, ts: Date.now() }), 'utf8')
+  try {
+    await rename(tmp, path)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined)
+    throw error
+  }
+  const names = await readdir(ledgerDir).catch(() => [])
+  if (names.length <= EVAL_LEDGER_MAX_FILES) return
+  const cutoff = Date.now() - EVAL_LEDGER_TTL_MS
+  const infos = await Promise.all(names.map(async name => {
+    const info = await stat(join(ledgerDir, name)).catch(() => null)
+    return { name, mtimeMs: info?.mtimeMs ?? 0 }
+  }))
+  const keep = infos.filter(item => item.mtimeMs >= cutoff).sort((a, b) => a.mtimeMs - b.mtimeMs)
+  const expired = infos.filter(item => item.mtimeMs < cutoff)
+  for (const item of expired) await rm(join(ledgerDir, item.name), { force: true }).catch(() => undefined)
+  const excess = keep.length - EVAL_LEDGER_MAX_FILES
+  for (const item of keep.slice(0, Math.max(0, excess))) await rm(join(ledgerDir, item.name), { force: true }).catch(() => undefined)
+}
 
 /** In-memory async build jobs (progress + polling, Python jobs.py parity). */
 export class JobManager {
@@ -239,6 +290,12 @@ export class JobManager {
   }
 }
 
+/** M1：模块级单例——Agent runner 每个 turn 都新建 createCourseService，
+ * 实例级 jobs 表会让 UI sync 与 Agent syncSources 工具的同课程去重互相
+ * 失明（双跑构建 = 双倍 LLM 计费 + 并发写课程文件）。跨实例共享后 UI-8
+ * 去重对全部入口生效。 */
+const jobs = new JobManager()
+
 /**
  * UI-7：evalSubmit 的实际执行体。`record` 由幂等包装器注入——每一帧在
  * 下发前登记进账本，命中重试时整体重放，SM-2/progress 不会二次 settle。
@@ -251,6 +308,7 @@ async function* runEvalSubmit(
   sessionId: string | null,
   getConfig: () => Promise<ResolvedChatConfig | null>,
   record: (frame: Record<string, unknown>) => Record<string, unknown>,
+  onSettled?: (tailFrames: Array<Record<string, unknown>>) => Promise<void>,
 ): AsyncGenerator<Record<string, unknown>> {
     const dir = await requireCourse(workspaceRoot, courseId)
     const pool = await loadTaskPool(dir)
@@ -327,6 +385,12 @@ async function* runEvalSubmit(
       const dueDate = new Date()
       dueDate.setDate(dueDate.getDate() + Math.min(nextLocal.intervalDays, 365))
       const dueDateKey = localDateKey(dueDate)
+      // H6：真实掌握度差值（旧实现 sm2 帧硬编码 ±0.1，与指数平滑的实际更新
+      // 完全脱节，前端展示的变化量是假的）。
+      const priorMastery = record?.mastery ?? 0
+      const newMastery = record === undefined
+        ? result.score
+        : record.mastery * (1 - MASTERY_ALPHA) + result.score * MASTERY_ALPHA
       const updated = upsertProgressRecord(board, {
         conceptId: task.concept_id,
         name: record?.name ?? task.concept_id,
@@ -335,9 +399,7 @@ async function* runEvalSubmit(
         // 归零——学到 80% 的概念一次失误即清零；成功分支 `Math.max` 又只增不减，第二次
         // 只得 0.65 也锁在 0.95，长期虚高。改为指数平滑：单次最多回退 30%，不再断崖；
         // 无历史记录（首次评测）时直接用本次得分作为基线。
-        mastery: record === undefined
-          ? result.score
-          : record.mastery * (1 - MASTERY_ALPHA) + result.score * MASTERY_ALPHA,
+        mastery: newMastery,
         evals: attempts,
         passRate,
         streak: nextLocal.repetitions,
@@ -346,9 +408,20 @@ async function* runEvalSubmit(
         misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
       })
       await saveProgressBoard(boardPath, updated)
-      return { next: nextLocal, nextReviewAt: dueDateKey, priorEf }
+      // 圆整到 3 位小数：指数平滑的浮点噪声（0.14700000000000002）不出线。
+      return { next: nextLocal, nextReviewAt: dueDateKey, priorEf, masteryDelta: Math.round((newMastery - priorMastery) * 1000) / 1000 }
     })
-    const { next, nextReviewAt, priorEf } = schedule
+    const { next, nextReviewAt, priorEf, masteryDelta } = schedule
+    // M4 窗口修复：result/sm2/done 三帧只依赖此刻已就绪的本地数据，settle 一
+    // 完成就构造并交给 onSettled 持久化幂等账本。账本若等整条流被消费完才落
+    // 盘，SSE 中断/宿主崩溃把生成器悬停在某个 yield 上时账本永不落盘，同
+    // evalId 重试会二次 settle（SM-2/掌握度重复计分）。
+    const tailFrames: Array<Record<string, unknown>> = [
+      { event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } },
+      { event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta } },
+      { event: 'done', data: { taskId } },
+    ]
+    if (onSettled !== undefined) await onSettled(tailFrames)
     // 追加评测审计事件到会话事件流。路径必须与 chat 运行时一致：
     // `<课程根>/.studyclaw/history`（P1-1——旧代码漏掉 .studyclaw 段，
     // exists() 恒 false，审计被静默跳过）。评分结果已落 progress.md，
@@ -400,9 +473,9 @@ async function* runEvalSubmit(
     } else {
       console.warn(`[evalSubmit] 无可用审计会话（historyDir=${historyDir}），本条评测未留痕`)
     }
-    yield record({ event: 'result', data: { score: result.score, passed: result.passed, feedback: result.feedback, misconceptions: result.misconceptions } })
-    yield record({ event: 'sm2', data: { ef: priorEf, efNew: next.ef, nextReviewAt, masteryDelta: result.passed ? 0.1 : -0.1 } })
-    yield record({ event: 'done', data: { taskId } })
+    // tailFrames 在 settle 时已构造（可能已被 onSettled 写进账本快照）；这里
+    // 经 record 按自然帧序登记+下发，正常完成路径的整流落盘保持原帧序。
+    for (const frame of tailFrames) yield record(frame)
 }
 
 export interface CourseService {
@@ -431,7 +504,6 @@ export interface CourseService {
 
 /** Assemble the course service for the active workspace. */
 export function createCourseService(getConfig: () => Promise<ResolvedChatConfig | null>): CourseService {
-  const jobs = new JobManager()
   return {
     async syllabus(workspaceRoot, courseId) {
       const dir = await requireCourse(workspaceRoot, courseId)
@@ -641,13 +713,14 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       return { courseId, tasks: cards }
     },
     async *evalSubmit(workspaceRoot, courseId, taskId, answer, sessionId = null, evalId: string | null = null) {
-      // UI-7：评测幂等账本。SSE 中断后客户端用手动"重试"重发同一作答——
+      // UI-7 + M4：评测幂等账本。SSE 中断后客户端用手动"重试"重发同一作答——
       // 若第一次的 settle（SM-2/progress）已落盘，重试就是重复计分。同一
-      // evalId（taskId+会话+作答的稳定指纹）在 TTL 窗口内直接重放已结算帧。
+      // evalId（taskId+会话+作答的稳定指纹）在 TTL 窗口内直接重放已结算帧；
+      // 真实 evalId 走磁盘（宿主重启后仍可重放），匿名键留内存。
       if (evalId !== null && evalId !== '') {
-        const prior = evalLedger.get(evalId)
-        if (prior !== undefined) {
-          for (const frame of prior.frames) yield frame
+        const prior = await loadLedgerFrames(workspaceRoot, evalId)
+        if (prior !== null) {
+          for (const frame of prior) yield frame
           return
         }
       }
@@ -655,11 +728,17 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       yield* runEvalSubmit(workspaceRoot, courseId, taskId, answer, sessionId, getConfig, (frame) => {
         frames.push(frame)
         return frame
-      })
-      evalLedger.set(evalId ?? `anon_${evalLedgerNextId++}`, { frames, ts: Date.now() })
+      }, evalId !== null && evalId !== ''
+        ? tail => saveLedgerFrames(workspaceRoot, evalId, [...frames, ...tail]).catch(() => undefined)
+        : undefined)
+      if (evalId !== null && evalId !== '') {
+        await saveLedgerFrames(workspaceRoot, evalId, frames).catch(() => undefined)
+        return
+      }
+      evalLedger.set(`anon_${evalLedgerNextId++}`, { frames, ts: Date.now() })
       if (evalLedger.size > 500) {
         // 先删过期，再硬截断到 400（A6：原实现只删过期，高频短窗口下可无限增长）。
-        const cutoff = Date.now() - 10 * 60 * 1000
+        const cutoff = Date.now() - EVAL_LEDGER_TTL_MS
         for (const [key, entry] of evalLedger) {
           if (entry.ts < cutoff) evalLedger.delete(key)
         }
@@ -710,10 +789,11 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         // keep the whole path as the file name and make the copy target invalid.
         const name = source.split(/[\\/]/).pop() ?? 'import.txt'
         // FL-07：copyFile 直写目标会覆盖项目根同名文件；与上传路径同语义，
-        // 重名自动加序号落盘。
+        // 重名自动加序号落盘（L10：目标名已被独占预留，失败需清理空文件）。
         const target = await uniqueDestinationPathIn(dir, name)
         const copied = await copyFile(source, target).then(() => true).catch(() => false)
         if (copied) ingested += 1
+        else await rm(target, { force: true }).catch(() => undefined)
       }
       const config = await getConfig()
       const generator = generatorOf({ workspaceRoot, config }, dir)
@@ -786,18 +866,32 @@ function slugId(title: string): string {
   return `c_${base !== '' ? base : createHash('md5').update(title).digest('hex').slice(0, 8)}`
 }
 
-/** FL-07：在 dir 内为 filename 找不冲突的唯一名（重名追加 -1/-2，与上传路径同语义）。 */
+/**
+ * FL-07：在 dir 内为 filename 找不冲突的唯一名（重名追加 -1/-2，与上传路径同语义）。
+ * L10：目标名以 `wx` 独占创建空文件预留——旧「readdir 查重 → rename」的检查-使用
+ * 窗口内，并发导入可能选中同一名字并静默互覆；预留后并发方立刻 EEXIST 递增序号。
+ * 返回后目标名已预留：调用方必须向其写入（copyFile/rename 覆盖空文件），失败时
+ * 自行清理该空文件。
+ */
 async function uniqueDestinationPathIn(dir: string, filename: string): Promise<string> {
-  const { readdir } = await import('node:fs/promises')
-  const taken = new Set((await readdir(dir).catch(() => [] as string[])).map(entry => entry.toLowerCase()))
+  const { open } = await import('node:fs/promises')
   const dot = filename.lastIndexOf('.')
   const stem = dot > 0 ? filename.slice(0, dot) : filename
   const ext = dot > 0 ? filename.slice(dot) : ''
   let candidate = filename
-  for (let index = 1; taken.has(candidate.toLowerCase()); index += 1) {
+  let index = 1
+  for (;;) {
+    const probe = join(dir, candidate)
+    try {
+      const handle = await open(probe, 'wx')
+      await handle.close()
+      return probe
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
     candidate = `${stem}-${index}${ext}`
+    index += 1
   }
-  return join(dir, candidate)
 }
 
 export { createUserMessage }

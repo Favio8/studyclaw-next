@@ -125,7 +125,11 @@ export async function computeChecksums(
 async function atomicWrite(path: string, content: string): Promise<void> {
   // v2 布局：产物在 .studyclaw/ 下，首次写入前目录可能还不存在。
   await mkdir(dirname(path), { recursive: true })
-  const tmp = path + '.tmp'
+  // T-3：固定 `path + '.tmp'` 在并发写（跨进程 regenerateSyllabus / 同进程双
+  // regenerate / 与 progress.ts 同目录写）时互踩——两个写流交错写同一 tmp，
+  // rename 出混合内容（syllabus.json 损坏 → loadSyllabus 回退空大纲）或
+  // ENOENT。加 pid + 随机后缀（progress.ts / storage-json atomic.ts 同口径）。
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   await writeFile(tmp, content, 'utf8')
   await rename(tmp, path)
 }
@@ -204,16 +208,25 @@ function bumpPatch(version: string): string {
 }
 
 /** PERF-1：有界并发池——按 limit 起固定数量的 worker 顺序认领队列项，
- * 结果按下标回填，顺序与输入一致；失败向上冒泡（与旧串行行为一致）。 */
+ * 结果按下标回填，顺序与输入一致；失败向上冒泡（与旧串行行为一致）。
+ *  T-6：首败即停——旧实现 Promise.all 拒绝后其余 worker 仍把剩余队列全部跑完
+ *  才弃结果，批量出题里一个单元失败会白烧完全部剩余 LLM 调用（计费+耗时）；
+ *  在途单元跑完自然结算，但不再认领新项。 */
 async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
   const width = Math.max(1, Math.min(Math.floor(limit), items.length))
   const results = new Array<R>(items.length)
   let cursor = 0
+  let failed = false
   const workers = Array.from({ length: Math.max(width, items.length === 0 ? 0 : 1) }, async () => {
-    while (cursor < items.length) {
+    while (cursor < items.length && !failed) {
       const index = cursor
       cursor += 1
-      results[index] = await worker(items[index]!)
+      try {
+        results[index] = await worker(items[index]!)
+      } catch (error) {
+        failed = true
+        throw error
+      }
     }
   })
   await Promise.all(workers)
@@ -395,7 +408,16 @@ export class CourseBuilder {
     })
     const existing = await loadSyllabus(this.courseDir)
     if (existing.granularity !== granularity) {
-      await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify({ ...existing, granularity }, null, 2) + '\n')
+      // T-3：granularity 覆写此前的锁外写——与并发 build/regenerate 的
+      // mergeSyllabus（上方锁内）竞争同一 syllabus.json，陈旧全量写会覆盖
+      // 合并结果。小写段无 LLM，包进课程锁；锁内重读最新版再覆写，避免
+      // 用锁外读到的旧快照覆盖并发合并。
+      await withCourseLock(this.courseDir, async () => {
+        const latest = await loadSyllabus(this.courseDir)
+        if (latest.granularity !== granularity) {
+          await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify({ ...latest, granularity }, null, 2) + '\n')
+        }
+      })
       report.version = existing.version
     }
     return report

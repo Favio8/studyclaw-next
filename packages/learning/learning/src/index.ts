@@ -16,6 +16,7 @@ import { dynamicCardUser } from '@studyclaw/course-builder'
 import { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 import { loadTaskPool } from '@studyclaw/course-builder'
+import { enforceTaskQuality } from '@studyclaw/course-builder'
 import { loadProgressBoard, dueRecords } from '@studyclaw/course-builder'
 import { localDateKey } from '@studyclaw/course-builder'
 
@@ -228,6 +229,19 @@ const dynamicBatch = z.object({
       keywords: z.array(z.string()).default([]),
       misattribution_options: z.array(z.string()).default([]),
     }),
+    // T-5：对齐 builder models.ts 的 generatedTask 校验——此前动态卡完全绕过
+    // 该 superRefine，越界/缺失 answer_index 的选择题入池后 MCQ 快判
+    // `options[i] ?? ''` 恒不匹配，该卡永无法通过（静默坏卡）。
+  }).superRefine((task, ctx) => {
+    if (Array.isArray(task.options) && task.options.length > 0) {
+      if (task.answer_index === null || task.answer_index >= task.options.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `选择题必须给出 answer_index（0~${task.options.length - 1}）`,
+          path: ['answer_index'],
+        })
+      }
+    }
   })).min(1),
 })
 
@@ -238,6 +252,10 @@ export async function generateDynamicCards(
   misconception: string,
   count = 1,
   targetId: string | null = null,
+  // T-6：取消信号缝——GenerateOptions 原生支持 signal，透传给 client.stream
+  // 后适配器可中止在途 LLM 流。工具边界的完整穿线（ToolActionContext →
+  // CourseService → 生成器）属后续重构，此处先把缝留好。
+  signal?: AbortSignal,
 ): Promise<HarnessTask[]> {
   const batch = await structuredCall(
     client,
@@ -247,10 +265,11 @@ export async function generateDynamicCards(
       model: options.model,
       system: DYNAMIC_CARD_SYSTEM.replace('{misconception}', misconception),
       messages: [createUserMessage({ content: [{ type: 'text', text: dynamicCardUser(sourceTask.question, sourceTask.evaluation_criteria.rubric, misconception) }], source: { kind: 'user' } })],
+      ...(signal === undefined ? {} : { signal }),
     },
     options.maxRetries ?? 3,
   )
-  return batch.tasks.slice(0, count).map((task, index) => ({
+  const candidates = batch.tasks.slice(0, count).map((task, index) => ({
     ...task,
     task_id: `${sourceTask.concept_id.replace(/^c_/, '')}_dyn${Date.now()}${index}`,
     concept_id: sourceTask.concept_id,
@@ -260,6 +279,10 @@ export async function generateDynamicCards(
     dynamic: true,
     target_id: targetId ?? `dynamic:${sourceTask.task_id}`,
   }))
+  // T-5：动态卡与生成批同一道质量闸——此前动态卡完全不过闸，越界答案键 /
+  // 选项长度失衡的坏卡直接入池（永无法通过或正确项可被猜中）。闸掉的卡不进池，
+  // 由调用方按数量缺口决定是否重试。
+  return enforceTaskQuality(candidates).kept
 }
 
 // ---------------------------------------------------------------------------

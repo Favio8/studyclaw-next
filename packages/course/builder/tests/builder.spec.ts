@@ -5,7 +5,7 @@
  * generator (offline).
  */
 
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CourseBuilder, loadSyllabus, loadTaskPool, type TaskGenerator } from '../src/builder.ts'
@@ -135,6 +135,62 @@ describe('CourseBuilder', () => {
     const poolAfter = await loadTaskPool(courseDir)
     expect(poolAfter).toHaveLength(poolBefore.length)
     expect(await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')).toBe(checksumsBefore)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-3：并发 regenerateSyllabus 不互踩临时文件（随机 tmp + granularity 写段上锁）', async () => {
+    const { root, courseDir, generator } = await setup()
+    const builder = new CourseBuilder(courseDir, generator)
+    await builder.build(1)
+    // 两个并发粒度重切：旧实现固定 `path+'.tmp'` 名，两个写流交错写同一 tmp →
+    // rename 出混合内容（syllabus.json 损坏 → loadSyllabus 回退空大纲）或 ENOENT。
+    await Promise.all([builder.regenerateSyllabus('coarse'), builder.regenerateSyllabus('coarse')])
+    const syllabus = await loadSyllabus(courseDir)
+    expect(syllabus.granularity).toBe('coarse')
+    expect(syllabus.chapters.length).toBeGreaterThan(0)
+    // 无临时文件残留（旧实现竞态下 rename 失败会留下 .tmp）。
+    const stateFiles = await readdir(join(courseDir, '.studyclaw'))
+    expect(stateFiles.some(name => name.includes('.tmp'))).toBe(false)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-6：批量生成首个失败即停止认领（在途单元结算后不再起新 LLM 调用）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-failfast-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    // 三个切片 → 三个生成单元；并发 2。第 2 个调用早失败，成功的调用慢——
+    // 旧实现失败后其余 worker 仍把剩余队列跑完（白烧 LLM 调用）。
+    for (const name of ['a.md', 'b.md', 'c.md']) {
+      await writeFile(join(courseDir, 'sources', name), `# 主题\n\n## ${name} 概念\n\n内容。\n`, 'utf8')
+    }
+    let calls = 0
+    const generator: TaskGenerator = {
+      async generateTasks(chunk, count) {
+        calls += 1
+        const mine = calls
+        await new Promise(resolve => setTimeout(resolve, mine === 2 ? 5 : 30))
+        if (mine === 2) throw new Error('LLM rate limited')
+        return Array.from({ length: count }, (_, index) => ({
+          task_id: `${chunk.concept_id.replace(/^c_/, '')}_00${index + 1}`,
+          concept_id: chunk.concept_id,
+          source_ref: chunk.source_ref,
+          type: 'concept' as const,
+          difficulty: 2,
+          question: `关于「${chunk.title}」的问题 ${index + 1}`,
+          options: null,
+          evaluation_criteria: { rubric: ['要点一', '要点二'], keywords: [chunk.title] },
+          history: { attempts: 0, last_score: null, pass_count: 0, last_review_at: null, next_review_at: null, ef: 2.5 },
+          deprecated: false,
+          dynamic: false,
+          target_id: null,
+        }))
+      },
+    }
+    const builder = new CourseBuilder(courseDir, generator)
+    await expect(builder.build(1, undefined, undefined, 2)).rejects.toThrow('LLM rate limited')
+    // 等在途单元结算完毕：失败已发生时不再认领第 3 个单元（旧实现会）。
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(calls).toBe(2)
     await rm(root, { recursive: true, force: true })
   })
 })

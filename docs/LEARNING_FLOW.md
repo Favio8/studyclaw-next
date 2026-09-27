@@ -1,6 +1,6 @@
 # StudyClaw 学习流程总览（studyclaw-next）
 
-> 适用版本：`studyclaw-next` monorepo（唯一活跃主线）。旧 Python 实现在 `../studyclaw/`，已于 2026-08-24 冻结。
+> 适用版本：`studyclaw-next` monorepo（唯一活跃主线）。旧 Python 实现已于 2026-08-24 冻结，不再维护。
 > 本文同时是端到端验收清单：每一步都标注了涉及代码与落盘文件，出问题时可逐段排查。
 
 ## 0. 进程与端口

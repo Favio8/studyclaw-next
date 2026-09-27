@@ -1,9 +1,11 @@
 /**
  * One opened JSON unit. The in-memory state is authoritative; every write
- * primitive mutates it and republishes the whole file atomically. Writes are
- * NOT queued here — per the backend contract, write ordering belongs to the
- * caller (the domain layer's write chain); this unit only guarantees that
- * each single call publishes a complete, durable file.
+ * primitive mutates it and republishes the whole file atomically. The ORDER
+ * of individual write calls belongs to the caller (the domain layer's write
+ * chain), but file publishes themselves are serialized internally — with
+ * concurrent callers the last rename must be the one that saw every
+ * committed mutation, or a resolved write could be silently overwritten by
+ * an older whole-file snapshot (breaking "resolved == durable").
  * @module @deepseek-ai/dsh-storage-json/src/unit
  */
 
@@ -13,6 +15,42 @@ import type { KvUnit, KvUnitDescriptor } from '@deepseek-ai/dsh-storage'
 import { writeAtomic } from './atomic.ts'
 import { parse, serialize } from './format.ts'
 import type { UnitState } from './format.ts'
+
+/**
+ * Reject values `JSON.stringify` would silently mangle: `NaN`/`Infinity`
+ * become `null`, `undefined`/function fields are dropped, `Date`/`Map`/`Set`
+ * change shape. Such a write would resolve "durable" yet only fail the
+ * domain's schema validation on reopen — bricking the unit with no recovery
+ * path. Failing at the write boundary keeps memory and medium consistent.
+ */
+function assertJsonSafe(unit: string, value: unknown, path = 'value'): void {
+  if (value === null) return
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return
+    case 'number':
+      if (!Number.isFinite(value)) {
+        throw new StorageError('malformed-medium', `unit '${unit}': ${path} is not JSON-safe (NaN/Infinity serializes to null)`)
+      }
+      return
+    case 'object':
+      if (Array.isArray(value)) {
+        value.forEach((entry, index) => assertJsonSafe(unit, entry, `${path}[${index}]`))
+        return
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        const label = (value as { constructor?: { name?: string } }).constructor?.name ?? 'non-plain object'
+        throw new StorageError('malformed-medium', `unit '${unit}': ${path} is not JSON-safe (${label} does not round-trip)`)
+      }
+      // Object.entries mirrors JSON.stringify exactly: own enumerable keys only.
+      for (const [key, entry] of Object.entries(value)) assertJsonSafe(unit, entry, `${path}.${key}`)
+      return
+    default:
+      throw new StorageError('malformed-medium', `unit '${unit}': ${path} has JSON-unrepresentable type '${typeof value}'`)
+  }
+}
 
 /**
  * Open (load or lazily create) one unit backed by `path`.
@@ -48,6 +86,8 @@ class JsonKvUnit implements KvUnit {
   private closed = false
   /** In-flight publishes; close() drains them before releasing the unit. */
   private readonly inFlight = new Set<Promise<void>>()
+  /** Serialization chain for whole-file publishes (see publish()). */
+  private writeChain: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly descriptor: KvUnitDescriptor,
@@ -68,6 +108,7 @@ class JsonKvUnit implements KvUnit {
 
   async putRecord(table: string, key: string, value: unknown): Promise<void> {
     this.assertOpen()
+    assertJsonSafe(this.descriptor.name, value)
     const records = this.records(table)
     const hadKey = records.has(key)
     const previous = records.get(key)
@@ -98,6 +139,7 @@ class JsonKvUnit implements KvUnit {
     if (!this.descriptor.hasGlobal) {
       throw new Error(`unit '${this.descriptor.name}' does not declare a global slot`)
     }
+    assertJsonSafe(this.descriptor.name, value, 'global')
     const previous = this.state.global
     this.state.global = value
     await this.publish().catch((error: unknown) => {
@@ -131,7 +173,17 @@ class JsonKvUnit implements KvUnit {
   }
 
   private publish(): Promise<void> {
-    const write = writeAtomic(this.path, serialize(this.descriptor.name, this.state))
+    // Serialize the atomic replacements: concurrent callers each snapshot the
+    // authoritative in-memory state, but rename order is uncontrollable —
+    // the last rename must be the one that saw every committed mutation,
+    // otherwise an older whole-file snapshot can overwrite a newer one after
+    // both writes resolved (silent loss under a success receipt). Serializing
+    // also means each snapshot is taken at turn start, so it always includes
+    // every mutation that happened before it.
+    const write = this.writeChain
+      .catch(() => undefined)
+      .then(() => writeAtomic(this.path, serialize(this.descriptor.name, this.state)))
+    this.writeChain = write
     this.inFlight.add(write)
     // Swallow only on the tracking branch: the caller still awaits `write`
     // itself, so rejections stay observed exactly once.

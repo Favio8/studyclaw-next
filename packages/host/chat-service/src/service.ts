@@ -960,6 +960,28 @@ export async function searchSessions(
   return matches
 }
 
+/**
+ * RV-15：chatStream 的 requestId 幂等段（load→turnFailed 检查→input/voided→
+ * 新开 turn）按 session 串行。两个并发同 requestId 调用（SSE 断连自动重试与
+ * 手动重试重叠、双击重试）会基于同一份旧 rows 快照都通过"未 void"检查
+ * （alreadyVoided 看不见对方刚 append 的行），随后都 agent.send 新 turn：
+ * 重复 user/input 落盘、双倍 LLM 计费、历史出现重复用户消息。只串行这一小段
+ * 判定+新发，流本体（可能很长）不在链上。锁序无嵌套（内层不再取任何锁）。
+ */
+const requestIdLocks = new Map<string, Promise<unknown>>()
+
+function withRequestIdLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = requestIdLocks.get(sessionId) ?? Promise.resolve()
+  const current = previous.then(fn, fn)
+  requestIdLocks.set(sessionId, current)
+  // 清理链自己消化两端拒绝（void 直挂会在 fn 抛错时升级 unhandledRejection）。
+  void current.then(
+    () => { if (requestIdLocks.get(sessionId) === current) requestIdLocks.delete(sessionId) },
+    () => { if (requestIdLocks.get(sessionId) === current) requestIdLocks.delete(sessionId) },
+  )
+  return current
+}
+
 /** Create a fresh session (meta line written immediately). */
 export async function createSession(
   workspaceRoot: string,
@@ -1403,53 +1425,11 @@ export async function* chatStream(
     // input/voided 把旧 user/input 从投影剔除后新开 turn（同 requestId）——
     // 失败重试不应在会话历史里留下重复用户消息；零可见输出的失败由 Agent
     // 循环自动补偿，这里覆盖"已有部分输出后失败"的另一半。
-    if (typeof input.requestId === 'string' && input.requestId !== '') {
-      const rows = await eventStore.load(session.sessionId)
-      const hit = [...rows].reverse().find(
-        (row) => row.type === 'user/input' && row.payload['requestId'] === input.requestId && typeof row.payload['turnId'] === 'string',
-      )
-      if (hit !== undefined) {
-        const turnId = String(hit.payload['turnId'])
-        const turnRows = rows.filter((row) => row.payload['turnId'] === turnId)
-        const alreadyVoided = turnRows.some(row => row.type === 'input/voided' && Number(row.payload['seq'] ?? 0) === hit.seq)
-        const turnFailed = turnRows.some(row => row.type === 'turn/error' || row.type === 'turn/cancelled')
-        if (turnFailed && !alreadyVoided) {
-          // 终态失败 → 剔除旧输入，落穿到下方 agent.send 新开 turn。
-          await eventStore.append(session.sessionId, {
-            ts: utcTs(),
-            type: 'input/voided',
-            payload: { seq: hit.seq, reason: 'turn-failed-retry' },
-          })
-          // A5：旧 turn 已落盘的部分 assistant 输出一并 void——否则恢复会话
-          // 时出现没有对应用户消息的孤儿回复，且重连 Last-Event-ID 的序号
-          // 口径漂移。重复 void 无害（投影 findIndex 找不到即跳过）。
-          for (const assistantRow of turnRows.filter(row => row.type === 'assistant/message')) {
-            await eventStore.append(session.sessionId, {
-              ts: utcTs(),
-              type: 'assistant/voided',
-              payload: { seq: assistantRow.seq, reason: 'turn-failed-retry' },
-            })
-          }
-        } else {
-          const handle = agent.attach(turnId)
-          if (handle === undefined) {
-            yield { kind: 'error', code: 'TURN_REPLAY_UNAVAILABLE', message: `回合 ${turnId} 无法重放（事件日志可能已损坏），请稍后重试或新建对话` }
-            return
-          }
-          // 重放/跟随路径：先发一个 meta 帧让宿主层（bin.ts）解析出 sessionId 用于收尾 usage，
-          // 再把该 turn 的事件流映射为 SSE 帧。attach 对 pending/active turn 返回实时队列
-          // （AsyncEventQueue 无界缓冲，能拿到从头全部事件），对已完成 turn 走 replayTurn。
-          yield { kind: 'meta', payload: { sessionId: session.sessionId, replayedTurnId: turnId } }
-          for await (const event of handle.events) {
-            if (input.signal?.aborted) break
-            const frame = agentEventToFrame(event)
-            if (frame !== null) yield frame
-          }
-          return
-        }
-      }
-    }
-    const handle = agent.send({
+    // RV-15：上述判定+新发整段按 session 串行——两个并发同 requestId 调用
+    // （断连自动重试与手动重试重叠）曾基于同一份旧 rows 快照都通过"未 void"
+    // 检查并各自 agent.send：重复 user/input、双倍计费。发送也放进临界区，
+    // 让链上后到的并发重试命中新 turn 并 attach 跟随，不再双发。
+    const sendNewTurn = (): AgentTurnHandle => agent.send({
       content: input.message,
       ...(input.mode === undefined ? {} : { mode: input.mode }),
       metadata: {
@@ -1460,10 +1440,69 @@ export async function* chatStream(
         ...(input.requestId === undefined || input.requestId === null ? {} : { requestId: input.requestId }),
       },
     })
+    type RequestIdOutcome =
+      | { kind: 'none' }
+      | { kind: 'fresh'; handle: AgentTurnHandle }
+      | { kind: 'replay'; handle: AgentTurnHandle; turnId: string }
+      | { kind: 'replay-unavailable'; turnId: string }
+    let outcome: RequestIdOutcome = { kind: 'none' }
+    const requestId = typeof input.requestId === 'string' && input.requestId !== '' ? input.requestId : null
+    if (requestId !== null) {
+      outcome = await withRequestIdLock(session.sessionId, async (): Promise<RequestIdOutcome> => {
+        const rows = await eventStore.load(session.sessionId)
+        const hit = [...rows].reverse().find(
+          (row) => row.type === 'user/input' && row.payload['requestId'] === requestId && typeof row.payload['turnId'] === 'string',
+        )
+        if (hit === undefined) return { kind: 'none' }
+        const turnId = String(hit.payload['turnId'])
+        const turnRows = rows.filter((row) => row.payload['turnId'] === turnId)
+        const alreadyVoided = turnRows.some(row => row.type === 'input/voided' && Number(row.payload['seq'] ?? 0) === hit.seq)
+        const turnFailed = turnRows.some(row => row.type === 'turn/error' || row.type === 'turn/cancelled')
+        if (turnFailed && !alreadyVoided) {
+          // 终态失败 → 剔除旧输入，新开 turn（落穿到 sendNewTurn）。
+          // RV-15：void 行必须带 turnId——turnRows 按 payload.turnId 过滤，
+          // 不带 turnId 的 void 行永远进不了 turnRows，alreadyVoided 恒为
+          // false：锁串行化之后，链上后到的并发重试仍会通过"未 void"检查再次
+          // 双发。投影侧按 payload.seq 匹配，turnId 是附加字段，不影响语义。
+          await eventStore.append(session.sessionId, {
+            ts: utcTs(),
+            type: 'input/voided',
+            payload: { seq: hit.seq, reason: 'turn-failed-retry', turnId },
+          })
+          // A5：旧 turn 已落盘的部分 assistant 输出一并 void——否则恢复会话
+          // 时出现没有对应用户消息的孤儿回复，且重连 Last-Event-ID 的序号
+          // 口径漂移。重复 void 无害（投影 findIndex 找不到即跳过）。
+          for (const assistantRow of turnRows.filter(row => row.type === 'assistant/message')) {
+            await eventStore.append(session.sessionId, {
+              ts: utcTs(),
+              type: 'assistant/voided',
+              payload: { seq: assistantRow.seq, reason: 'turn-failed-retry', turnId },
+            })
+          }
+          return { kind: 'fresh', handle: sendNewTurn() }
+        }
+        const handle = agent.attach(turnId)
+        if (handle === undefined) return { kind: 'replay-unavailable', turnId }
+        return { kind: 'replay', handle, turnId }
+      })
+    }
+    if (outcome.kind === 'replay-unavailable') {
+      yield { kind: 'error', code: 'TURN_REPLAY_UNAVAILABLE', message: `回合 ${outcome.turnId} 无法重放（事件日志可能已损坏），请稍后重试或新建对话` }
+      return
+    }
+    const handle = outcome.kind === 'none' ? sendNewTurn() : outcome.handle
+    if (outcome.kind === 'replay') {
+      // 重放/跟随路径：先发一个 meta 帧让宿主层（bin.ts）解析出 sessionId 用于收尾 usage，
+      // 再把该 turn 的事件流映射为 SSE 帧。attach 对 pending/active turn 返回实时队列
+      // （AsyncEventQueue 无界缓冲，能拿到从头全部事件），对已完成 turn 走 replayTurn。
+      yield { kind: 'meta', payload: { sessionId: session.sessionId, replayedTurnId: outcome.turnId } }
+    }
     for await (const event of handle.events) {
+      if (outcome.kind === 'replay' && input.signal?.aborted) break
       const frame = agentEventToFrame(event)
       if (frame !== null) yield frame
     }
+    if (outcome.kind === 'replay') return
     if (firstPrompt) {
       // DSH first-prompt cadence: the LLM rename runs after the stream so the
       // done frame is not delayed; it only upgrades the fallback written at

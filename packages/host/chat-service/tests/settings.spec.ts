@@ -128,6 +128,24 @@ describe('settings domain', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('RV-17：legacy 明文 + setCredential 不死锁，密封后新 key 生效（迁移写与持锁 RMW 串行）', async () => {
+    const { root, ws } = await setup()
+    await writeFile(join(ws, '.studyclaw', 'credentials.json'), JSON.stringify({ MOCK_KEY: 'sk-legacy' }), 'utf8')
+    // setCredential 持 config→credential 锁；若 readCredentials 的迁移写也去取
+    // 凭据锁（不可重入的 promise 链），这里会死锁挂起（本用例即回归网）。
+    await setCredential(ws, 'mock', 'sk-new')
+    const raw = await readFile(join(ws, '.studyclaw', 'credentials.json'), 'utf8')
+    const unsealed = await unsealCredentials(raw)
+    expect(unsealed.wasPlaintext).toBe(false)
+    // 新 key 落盘且配置指向它——迁移写若锁外竞速覆盖，这里会退回 sk-legacy 或丢失。
+    expect(unsealed.data['MOCK_API_KEY']).toBe('sk-new')
+    const config = await loadChatConfig(ws)
+    expect(config.apiKey).toBe('sk-new')
+    process.env.STUDYCLAW_HOME = ''
+    delete process.env.STUDYCLAW_HOME
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('deleteProvider removes the record, credential, and clears the active pointer (no phantom route)', async () => {
     const { root, ws } = await setup()
     await setCredential(ws, 'mock', 'sk-test-123')

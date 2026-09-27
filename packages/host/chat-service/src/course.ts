@@ -181,10 +181,8 @@ interface MutableJob {
  * UI-7：评测幂等账本（evalId → 已结算帧）。M4：真实 evalId 持久化到
  * `.studyclaw/eval-ledger/<id>.json`——旧实现纯内存，宿主在 SM-2 已落盘、
  * 账本登记前崩溃后，同 evalId 重试会二次计分。TTL 10 分钟，超过 500 个文件
- * 按 mtime 清扫。匿名（无 evalId）提交仅进程内记账（客户端无从重放）。
+ * 按 mtime 清扫。匿名（无 evalId）提交无法被客户端重放匹配，不做记账。
  */
-const evalLedger = new Map<string, { frames: Array<Record<string, unknown>>; ts: number }>()
-let evalLedgerNextId = 0
 const EVAL_LEDGER_TTL_MS = 10 * 60 * 1000
 const EVAL_LEDGER_MAX_FILES = 500
 const EVAL_LEDGER_ID_RE = /^[A-Za-z0-9._-]+$/
@@ -729,24 +727,21 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
         frames.push(frame)
         return frame
       }, evalId !== null && evalId !== ''
-        ? tail => saveLedgerFrames(workspaceRoot, evalId, [...frames, ...tail]).catch(() => undefined)
+        ? tail => saveLedgerFrames(workspaceRoot, evalId, [...frames, ...tail]).catch(error => {
+          // RV-18：尾帧账本落盘失败同样留告警（静默吞掉会让重试二次计分且无迹可查）。
+          console.warn(`[studyclaw] eval 幂等账本（尾帧）落盘失败（evalId=${evalId}）:`, error instanceof Error ? error.message : String(error))
+        })
         : undefined)
       if (evalId !== null && evalId !== '') {
-        await saveLedgerFrames(workspaceRoot, evalId, frames).catch(() => undefined)
+        // RV-18：账本落盘失败不能静默——settle（SM-2/progress）已写盘而账本
+        // 缺失时，同 evalId 重试会二次计分。留告警让运维可见（客户端无从感知）。
+        await saveLedgerFrames(workspaceRoot, evalId, frames).catch(error => {
+          console.warn(`[studyclaw] eval 幂等账本落盘失败（evalId=${evalId}），重试将二次结算:`, error instanceof Error ? error.message : String(error))
+        })
         return
       }
-      evalLedger.set(`anon_${evalLedgerNextId++}`, { frames, ts: Date.now() })
-      if (evalLedger.size > 500) {
-        // 先删过期，再硬截断到 400（A6：原实现只删过期，高频短窗口下可无限增长）。
-        const cutoff = Date.now() - EVAL_LEDGER_TTL_MS
-        for (const [key, entry] of evalLedger) {
-          if (entry.ts < cutoff) evalLedger.delete(key)
-        }
-        if (evalLedger.size > 500) {
-          const oldest = [...evalLedger.entries()].sort((a, b) => a[1].ts - b[1].ts)
-          for (const [key] of oldest.slice(0, evalLedger.size - 400)) evalLedger.delete(key)
-        }
-      }
+      // RV-14：匿名提交的进程内账本已删除——键为自增 anon_N，无任何读取路径
+      // （重放只走磁盘 loadLedgerFrames），纯 write-only 死状态。
     },
 
     job(jobId) {

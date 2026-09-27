@@ -181,12 +181,14 @@ async function withConfigLock<T>(workspaceRoot: string, fn: () => Promise<T>): P
 }
 
 /**
- * Read `.studyclaw/credentials.json`. Legacy plaintext files are transparently
- * re-sealed on first successful read so the migration needs no explicit step.
+ * Read `.studyclaw/credentials.json` without the legacy re-seal migration.
+ * Callers that already hold the credential lock (setCredential / deleteProvider
+ * must use this variant: their own writeCredentials seals the file anyway, and
+ * taking the non-reentrant lock again from inside it would deadlock (RV-17).
  */
-async function readCredentials(workspaceRoot: string): Promise<Record<string, string>> {
+async function readCredentialsRaw(workspaceRoot: string): Promise<Awaited<ReturnType<typeof unsealCredentials>>> {
   const raw = await readFile(credentialsPath(workspaceRoot), 'utf8').catch(() => null)
-  if (raw === null || raw.trim() === '') return {}
+  if (raw === null || raw.trim() === '') return { data: {}, wasPlaintext: false }
   let parsed: Awaited<ReturnType<typeof unsealCredentials>>
   try {
     parsed = await unsealCredentials(raw)
@@ -194,8 +196,22 @@ async function readCredentials(workspaceRoot: string): Promise<Record<string, st
     // 密钥不匹配或文件损坏时宁可报错也不能当作“未配置密钥”静默继续。
     throw new Error('credentials.json 解密失败（master.key 与该工作区凭据不匹配？）')
   }
+  return parsed
+}
+
+/**
+ * Read `.studyclaw/credentials.json`. Legacy plaintext files are transparently
+ * re-sealed on first successful read so the migration needs no explicit step.
+ * RV-17：迁移写必须在凭据锁内——锁外全量写回会与持锁 setCredential 的 RMW
+ * 竞争，用旧快照覆盖刚落地的 key（config.yaml 指向 api_key_env 但
+ * credentials.json 无值，界面显示“未配置”）。
+ */
+async function readCredentials(workspaceRoot: string): Promise<Record<string, string>> {
+  const parsed = await readCredentialsRaw(workspaceRoot)
   if (parsed.wasPlaintext && Object.keys(parsed.data).length > 0) {
-    await writeCredentials(workspaceRoot, parsed.data).catch(() => undefined)
+    await withCredentialLock(workspaceRoot, async () => {
+      await writeCredentials(workspaceRoot, parsed.data)
+    })
   }
   return parsed.data
 }
@@ -498,7 +514,9 @@ export async function deleteProvider(workspaceRoot: string, providerId: string):
     if (existing === undefined) throw new Error(`Provider ${providerId} 不存在`)
     if (existing.api_key_env !== null && existing.api_key_env !== undefined) {
       await withCredentialLock(workspaceRoot, async () => {
-        const credentials = await readCredentials(workspaceRoot)
+        // RV-17：已在凭据锁内，用 raw 读取（下方 writeCredentials 即密封迁移），
+        // 不能再走会取锁的 readCredentials（promise 链锁不可重入 → 死锁）。
+        const credentials = (await readCredentialsRaw(workspaceRoot)).data
         delete credentials[existing.api_key_env!]
         await writeCredentials(workspaceRoot, credentials)
       })
@@ -547,7 +565,9 @@ export async function setCredential(workspaceRoot: string, providerId: string, a
     if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
     const ref = deriveKeyRef(providerId)
     await withCredentialLock(workspaceRoot, async () => {
-      const credentials = await readCredentials(workspaceRoot)
+      // RV-17：锁内用 raw 读取（下方 writeCredentials 即密封迁移）——readCredentials
+      // 的迁移写也要取这把锁，不可重入的 promise 链会死锁。
+      const credentials = (await readCredentialsRaw(workspaceRoot)).data
       credentials[ref] = apiKey
       await writeCredentials(workspaceRoot, credentials)
     })

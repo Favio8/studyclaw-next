@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { chatStream, listSessions } from '../src/service.ts'
 import type { ResolvedChatConfig } from '../src/config.ts'
+import { AgentRegistry } from '@studyclaw/agent'
+import { SessionEventStore } from '@studyclaw/session'
 
 
 
@@ -199,6 +201,77 @@ describe('chatStream requestId 幂等（UI-1）', () => {
     const sessions = await listSessions(ws, courseId)
     expect(sessions).toHaveLength(1)
     expect(sessions[0]!.turns).toBe(2)
+
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('RV-15：并发同 requestId 重试只新开一个 turn（旧实现双发：重复 user/input + 双倍计费）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-idempotent-race-'))
+    const ws = join(root, 'ws')
+    await mkdir(join(ws, '.studyclaw'), { recursive: true })
+    await writeFile(join(ws, 'overview.md'), '# 多态\n\n重载与覆写。\n', 'utf8')
+    await writeFile(join(ws, 'syllabus.json'), JSON.stringify({
+      course_id: basename(ws), title: '多态', version: '1.0.0',
+      chapters: [{ id: 'chap_1', title: '继承', concepts: [{ id: 'c_1', name: '重载与覆写' }] }],
+    }), 'utf8')
+    await writeFile(join(ws, '.studyclaw', 'config.yaml'), [
+      'version: 1',
+      'llm:',
+      '  provider: mock',
+      '  model: mock-model',
+      '  api_key_env: MOCK_KEY',
+      `  api_base: ${baseUrl}`,
+      '  temperature: 0.3',
+      '  max_concurrency: 1',
+      'ui:',
+      '  default_mode: socratic',
+      '',
+    ].join('\n'), 'utf8')
+
+    process.env.MOCK_KEY = 'test-key'
+    const config = await (await import('../src/config.ts')).loadChatConfig(ws)
+    delete process.env.MOCK_KEY
+
+    const courseId = basename(ws)
+    const requestId = 'req_race_test_001'
+    // 共享 registry：并发调用复用同一 Agent，排除"各自 restore 重泵"的干扰。
+    const registry = new AgentRegistry()
+
+    // 预置「有部分可见输出的取消回合」事件日志：Agent 只对零可见输出的失败
+    // 回合自动 input/voided，取消回合保留 assistant/message 且不 void——重试
+    // 因此走 chatStream 的 UI-15 新开路径，RV-15 的并发双发竞态在该形态下
+    // 真实存在（直接预置比驱动真实取消更确定，不受适配器 abort 语义影响）。
+    const sid = '20260927-120000'
+    const seedStore = new SessionEventStore(join(ws, '.studyclaw', 'history'))
+    const ts = (offset: number): string => new Date(Date.UTC(2026, 8, 27, 12, 0, offset)).toISOString()
+    await seedStore.append(sid,
+      { ts: ts(0), type: 'session/create', payload: { mode: 'socratic', agentId: `study-${sid}` } },
+      { ts: ts(1), type: 'inbox/queued', payload: { turnId: 'turn-1', target: 'next-turn', content: '解释覆写' } },
+      { ts: ts(2), type: 'inbox/dequeued', payload: { turnId: 'turn-1', target: 'next-turn', content: '解释覆写' } },
+      { ts: ts(3), type: 'user/input', payload: { content: '解释覆写', requestId, turnId: 'turn-1' } },
+      { ts: ts(4), type: 'turn/start', payload: { mode: 'socratic', target: 'next-turn', turnId: 'turn-1' } },
+      { ts: ts(5), type: 'assistant/message', payload: { content: '部分输出', turnId: 'turn-1' } },
+      { ts: ts(6), type: 'turn/cancelled', payload: { reason: 'user', turnId: 'turn-1' } },
+    )
+    const callsBefore = llmCallCount
+
+    // 两个并发同 requestId 重试（模拟 SSE 断连自动重试与手动重试重叠）。
+    const drain = async (): Promise<void> => {
+      for await (const _event of chatStream(ws, courseId, { message: '解释覆写', mode: 'socratic', requestId, sessionId: sid }, config, registry)) {
+        void _event
+      }
+    }
+    await Promise.all([drain(), drain()])
+
+    // LLM 侧：最多 2 次（1 次新 turn + 1 次 firstPrompt 的 LLM 标题生成）。
+    // 旧实现两个并发都 agent.send → 至少 3 次（双 turn + 标题）。
+    expect(llmCallCount).toBeLessThanOrEqual(callsBefore + 2)
+    // 精确断言在事件日志：该 requestId 的 user/input 共 2 条（取消原帖 + 重试
+    // 新帖）；input/voided 只补写 1 次（旧实现两个并发都基于同一旧快照通过
+    // "未 void" 检查 → 双发双计费 + 双 void）。
+    const rows = await new SessionEventStore(join(ws, '.studyclaw', 'history')).load(sid)
+    expect(rows.filter(row => row.type === 'user/input' && row.payload['requestId'] === requestId)).toHaveLength(2)
+    expect(rows.filter(row => row.type === 'input/voided')).toHaveLength(1)
 
     await rm(root, { recursive: true, force: true })
   })

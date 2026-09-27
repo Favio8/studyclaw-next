@@ -577,23 +577,27 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   }, [courses, orderBy]);
 
   async function openSearchResult(result: SessionSearchResult) {
-    // P1-1：跨项目打开是左栏唯一未捕获 adoptWorkspace 的路径——目标目录被删/
-    // 无权限时旧实现留下 unhandled rejection 且界面零反馈。失败时保持搜索打开
-    // （用户可换其他结果），成功后再关闭走原流程。
+    // P1-1/N-2：整链路兜底——adoptWorkspace（项目打开失败）与 selectSession
+    // （会话已被删/归档）都可能 reject；旧实现两者都裸奔，留下 unhandled
+    // rejection 且界面零反馈。任一失败都横幅提示并保持搜索打开。
     try {
       if (result.workspacePath !== workspacePath) await adoptWorkspace(result.workspacePath);
     } catch (cause) {
       flashStatusBanner(`✗ 打开项目失败：${cause instanceof Error ? cause.message : String(cause)}`);
       return;
     }
-    closeSearch();
-    // UI-9：本次交互明确了目标会话——抑制自动选会话，防止"列表第一条"
-    // 的恢复晚到覆盖显式选择。
-    if (result.courseId !== useAppStore.getState().activeCourseId) {
-      suppressAutoSelectOnce(result.courseId);
-      setActiveCourse(result.courseId);
+    try {
+      closeSearch();
+      // UI-9：本次交互明确了目标会话——抑制自动选会话，防止"列表第一条"
+      // 的恢复晚到覆盖显式选择。
+      if (result.courseId !== useAppStore.getState().activeCourseId) {
+        suppressAutoSelectOnce(result.courseId);
+        setActiveCourse(result.courseId);
+      }
+      await selectSession(result.sessionId, result.courseId);
+    } catch (cause) {
+      flashStatusBanner(`✗ 打开对话失败：${cause instanceof Error ? cause.message : String(cause)}`);
     }
-    await selectSession(result.sessionId, result.courseId);
   }
 
   function toggleExpandedGroup(courseId: string) {

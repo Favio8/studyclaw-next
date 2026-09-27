@@ -772,21 +772,18 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     }
   }
 
-  /** 用户在确认框点「覆盖」：带 overwrite 重发。 */
+  /** 用户在确认框点「覆盖」：带 overwrite 重发。
+   *  N-1：委托 handleSave（而非自链两步保存）——自链版本在 setProviderCredential
+   *  失败时不刷新 payload、错误闷在确认框里，正是 P1-4 的同类问题；委托后
+   *  credential 失败走统一的「配置已保存 + 补救横幅」路径，确认框正常关闭。 */
   async function handleOverwrite() {
     if (!conflict) return;
     setBusy(true);
     setError(null);
     try {
       const { profile, apiKey } = conflict;
-      let saved = await api.saveProvider({ ...profile, overwrite: true });
-      if (apiKey) {
-        saved = await api.setProviderCredential(profile.id, apiKey);
-      }
-      setPayload(saved);
+      await handleSave({ ...profile, overwrite: true }, apiKey);
       setConflict(null);
-      closeAllCards();
-      flashStatusBanner(`已覆盖 ${profile.name || profile.id} 的配置`);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {

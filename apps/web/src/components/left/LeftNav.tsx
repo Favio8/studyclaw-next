@@ -202,9 +202,12 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       setWsCourses(coursesMap);
       setWsMissing(missingMap);
     } catch {
-      setWsItems([]);
+      // P1-2：瞬时失败（宿主重启/请求超时）不清空列表——旧实现直接
+      // setWsItems([])，用户视角是「项目全丢了」。保留上次的列表 + 横幅，
+      // effect 会在 workspacePath 变化时重试。
+      flashStatusBanner("✗ 项目列表加载失败，显示的是上次的列表");
     }
-  }, []);
+  }, [flashStatusBanner]);
 
   // 挂载即载；切换项目后（workspacePath 变化）重载以同步注册表/课程。
   useEffect(() => {
@@ -226,6 +229,26 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [wsMenuOpen]);
+
+  // P2：对话操作菜单与 wsMenu 同款的外点/Escape 关闭——旧实现菜单会一直挂看，
+  // 只能点其他菜单项才消失。
+  useEffect(() => {
+    if (sessionMenuId === null) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-session-menu]")) return;
+      setSessionMenuId(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSessionMenuId(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [sessionMenuId]);
 
   async function switchWorkspace(item: WorkspaceItem) {
     if (switchingWs) return;
@@ -256,6 +279,11 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         delete next[item.path];
         return next;
       });
+      // P2：清掉被移除项目的会话缓存——courseSessions 按 courseId 缓存，
+      // 不清则重新添加同一目录时旧会话列表短暂复现。
+      for (const course of wsCourses[item.path] ?? []) {
+        useAppStore.getState().setCourseSessions(course.id, []);
+      }
       if (item.path === workspacePath) {
         // UI-17：activeCourseId→null 时 useSessionActions/QuizTab 的 effect
         // 都会早退，不会中止在途流——chat 与评测必须在这里显式停止，
@@ -295,6 +323,13 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
 
   async function commitRename(item: WorkspaceItem) {
     const title = renameDraft.trim();
+    // P2：冲突前置阻断——renameConflict 依赖 editingWsId 非空，必须在清空之前
+    // 判断；旧实现明知重名仍发请求，靠后端报错兜底。
+    if (renameConflict) {
+      setEditingWsId(null);
+      flashStatusBanner("✗ 已存在同名项目，请换一个名称");
+      return;
+    }
     setEditingWsId(null);
     if (title === "" || title === item.title) return;
     try {
@@ -542,8 +577,16 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   }, [courses, orderBy]);
 
   async function openSearchResult(result: SessionSearchResult) {
+    // P1-1：跨项目打开是左栏唯一未捕获 adoptWorkspace 的路径——目标目录被删/
+    // 无权限时旧实现留下 unhandled rejection 且界面零反馈。失败时保持搜索打开
+    // （用户可换其他结果），成功后再关闭走原流程。
+    try {
+      if (result.workspacePath !== workspacePath) await adoptWorkspace(result.workspacePath);
+    } catch (cause) {
+      flashStatusBanner(`✗ 打开项目失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      return;
+    }
     closeSearch();
-    if (result.workspacePath !== workspacePath) await adoptWorkspace(result.workspacePath);
     // UI-9：本次交互明确了目标会话——抑制自动选会话，防止"列表第一条"
     // 的恢复晚到覆盖显式选择。
     if (result.courseId !== useAppStore.getState().activeCourseId) {
@@ -713,12 +756,31 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   }
 
 
+  /** P1-3：项目的全部课程（激活项目读 store，其余读并列树缓存）。 */
+  function coursesOfWorkspace(item: WorkspaceItem): CourseSummary[] {
+    return item.path === workspacePath ? courses : (wsCourses[item.path] ?? []);
+  }
+
+  /** P1-3：项目的「当前课程」——激活项目跟随 activeCourseId（多课程可在左栏
+   *  切换），非激活项目取第一个（仅作标题/徽标展示）。旧实现两处都写死
+   *  `[0]`，多课程项目的其余课程在左栏完全不可达。 */
+  function primaryCourseOf(item: WorkspaceItem): CourseSummary | null {
+    const list = coursesOfWorkspace(item);
+    if (list.length === 0) return null;
+    if (item.path === workspacePath) {
+      const active = list.find((c) => c.id === activeCourseId);
+      if (active !== undefined) return active;
+    }
+    return list[0]!;
+  }
+
   function renderWorkspaceHeader(item: WorkspaceItem) {
     const active = item.path === workspacePath;
     const collapsed = collapsedWs.has(item.id);
     const missing = wsMissing[item.path] ?? false;
     // 项目即课程：项目行的标题取该校验课程摘要（fallback 项目标题）。
-    const course = (active ? courses : (wsCourses[item.path] ?? []))[0] ?? null;
+    const course = primaryCourseOf(item);
+    const projectCourses = coursesOfWorkspace(item);
     const title = course?.title ?? item.title;
     return (
       <div
@@ -794,6 +856,16 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
               {course.dueToday > 0 ? (
                 <span className="rounded-full border border-border-line px-1 py-px text-accent-warn">到期 {course.dueToday}</span>
               ) : null}
+              {/* P1-3：多课程项目的可发现性——旧实现只渲染第一个课程，其余课程
+                  在左栏无任何入口（只能 /switch-course 盲切）。 */}
+              {projectCourses.length > 1 ? (
+                <span
+                  className="rounded-full border border-border-line px-1 py-px"
+                  title={`该项目包含 ${projectCourses.length} 个课程：${projectCourses.map((c) => c.title).join('、')}`}
+                >
+                  {projectCourses.length} 课程
+                </span>
+              ) : null}
             </span>
           ) : null}
           </>
@@ -854,7 +926,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     const missing = wsMissing[item.path] ?? false;
     // 项目即课程：项目行即课程行，其下直接挂对话树（当前项目显示已加载对话；
     // 其他项目点击行即切换，切换后加载其对话）。
-    const course = (active ? courses : (wsCourses[item.path] ?? []))[0] ?? null;
+    // P1-3：会话树跟随「当前课程」（激活项目 = activeCourseId），不再写死第一个。
+    const projectCourses = coursesOfWorkspace(item);
+    const course = primaryCourseOf(item);
     const loaded = course !== null
       ? sortedVisibleSessions(sessionsByCourse[course.id] ?? [], activeSessionId, orderBy)
       : [];
@@ -862,6 +936,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     const courseMatches = course !== null && (matches(query, course.title, course.id) || matches(query, item.title));
     if (searching && !courseMatches && sessionHits.length === 0) return null;
     const expanded = searching || (active && !collapsed);
+    const otherCourses = projectCourses.filter((c) => c.id !== course?.id);
 
     return (
       <div key={item.id} className="mb-0.5" role="treeitem" aria-expanded={expanded} aria-selected={active}>
@@ -871,7 +946,34 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             {course === null ? (
               <p className="px-2 py-1 text-[12px] leading-5 text-text-faint">还没有学习项目</p>
             ) : (
-              renderSessions(course, searching ? sessionHits : loaded)
+              <>
+                {renderSessions(course, searching ? sessionHits : loaded)}
+                {/* P1-3：多课程项目的其余课程切换行——点击即切换激活课程
+                    （与 CommandPalette 的 switch-course 同语义）。 */}
+                {!searching && otherCourses.length > 0 ? (
+                  <div className="mt-1 border-t border-border-faint pt-1">
+                    <p className="px-2 py-0.5 text-[11px] text-text-faint">切换课程（共 {projectCourses.length} 个）</p>
+                    {otherCourses.map((other) => (
+                      <button
+                        key={other.id}
+                        type="button"
+                        title={`切换到 ${other.title}`}
+                        onClick={() => {
+                          setActiveCourse(other.id);
+                          flashStatusBanner(`switch → ${other.title}`);
+                        }}
+                        className="flex h-8 w-full items-center gap-1.5 rounded-lg px-2 text-left text-[13px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+                      >
+                        <Folder size={13} strokeWidth={1.7} aria-hidden />
+                        <span className="min-w-0 flex-1 truncate">{other.title}</span>
+                        {other.dueToday > 0 ? (
+                          <span className="shrink-0 text-[11px] text-accent-warn">到期 {other.dueToday}</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
         ) : null}

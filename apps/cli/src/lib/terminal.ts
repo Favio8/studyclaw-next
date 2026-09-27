@@ -115,6 +115,14 @@ function onSigint(): void {
   process.kill(process.pid, 'SIGINT')
 }
 
+/** C-7：确保 SIGINT 监听器在位——空闲态 Ctrl-C 会摘掉它并重发信号，若当时
+ *  还有其他处理器（如 serve 的优雅关停）吃掉该信号、进程存活，随后又进入
+ *  prompt 态（命令尚未结束），没有监听器会让 prompt 态 Ctrl-C 直接默认终止：
+ *  当轮评测的磁盘写入被放弃。每次 prompt 前幂等重装。 */
+function ensureSigintListener(): void {
+  if (!process.listeners('SIGINT').includes(onSigint)) process.on('SIGINT', onSigint)
+}
+
 function wireStdin(): void {
   if (stdinWired) return
   stdinWired = true
@@ -147,6 +155,11 @@ function wireStdin(): void {
   ;(process.stdin as { unref?: () => void }).unref?.()
 }
 
+/** 管道整体灌入时的行数上限——无上界会让 `type big.txt | studyclaw quiz`
+ *  把整个文件常驻内存（C-8）。超出部分丢弃并告警（每轮超限只告警一次）。 */
+const STDIN_QUEUE_MAX_LINES = 1000
+let stdinQueueWarned = false
+
 function deliverLine(line: string): void {
   const pending = pendingPrompt
   if (pending !== null) {
@@ -154,12 +167,21 @@ function deliverLine(line: string): void {
     pending.resolve(line)
     return
   }
+  if (stdinQueued.length >= STDIN_QUEUE_MAX_LINES) {
+    if (!stdinQueueWarned) {
+      stdinQueueWarned = true
+      process.stderr.write(`[studyclaw] 管道输入超过 ${STDIN_QUEUE_MAX_LINES} 行上限，多余内容已丢弃\n`)
+    }
+    return
+  }
+  stdinQueueWarned = false
   stdinQueued.push(line)
 }
 
 /** 读取一行：EOF / Ctrl-C 抛 EndOfInput。 */
 async function defaultPrompt(question: string): Promise<string> {
   wireStdin()
+  ensureSigintListener()
   process.stdout.write(question)
   const queued = stdinQueued.shift()
   if (queued !== undefined) return queued

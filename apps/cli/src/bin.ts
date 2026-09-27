@@ -874,6 +874,9 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
             return
           }
           response.setHeader('Content-Type', hit.contentType)
+          // C-12：透出静态托管的缓存/安全响应头（no-cache HTML / immutable
+          // hash 资产 / nosniff）。
+          for (const [name, value] of Object.entries(hit.headers ?? {})) response.setHeader(name, value)
           response.writeHead(hit.status)
           response.end(request.method === 'HEAD' ? undefined : hit.body)
         })()
@@ -1022,24 +1025,29 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       })
     }
     const updates: AcpNotification[] = []
-    const routed = await acpRouter.handle(rpcRequest, {
-      signal: abortController.signal,
-      emit: notification => {
-        if (stream && !response.writableEnded && !response.destroyed) {
-          response.write(`${JSON.stringify(notification)}\n`)
-        } else updates.push(notification)
-      },
-    })
-    if (requestKey !== null) acpRequests.delete(requestKey)
-    if (stream) {
-      if (!response.writableEnded && !response.destroyed) response.end(`${JSON.stringify(routed)}\n`)
-      return
+    try {
+      const routed = await acpRouter.handle(rpcRequest, {
+        signal: abortController.signal,
+        emit: notification => {
+          if (stream && !response.writableEnded && !response.destroyed) {
+            response.write(`${JSON.stringify(notification)}\n`)
+          } else updates.push(notification)
+        },
+      })
+      if (stream) {
+        if (!response.writableEnded && !response.destroyed) response.end(`${JSON.stringify(routed)}\n`)
+        return
+      }
+      const responseWithUpdates = !isPrompt || routed.error !== undefined
+        ? routed
+        : { ...routed, result: { ...(typeof routed.result === 'object' && routed.result !== null ? routed.result as Record<string, unknown> : {}), updates } }
+      response.writeHead(200)
+      response.end(JSON.stringify(responseWithUpdates))
+    } finally {
+      // C-9：路由抛错（prompt 执行失败）时旧实现跳过 delete——条目永久残留：
+      // 内存泄漏 + 后续同 id 的 cancel 打到已死的 controller。finally 保证清理。
+      if (requestKey !== null) acpRequests.delete(requestKey)
     }
-    const responseWithUpdates = !isPrompt || routed.error !== undefined
-      ? routed
-      : { ...routed, result: { ...(typeof routed.result === 'object' && routed.result !== null ? routed.result as Record<string, unknown> : {}), updates } }
-    response.writeHead(200)
-    response.end(JSON.stringify(responseWithUpdates))
   }
 
   /** `POST /api/courses/<id>/sources` (multipart): save files into sources/, then sync-build. */

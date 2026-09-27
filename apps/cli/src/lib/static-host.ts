@@ -21,6 +21,8 @@ export interface StaticHit {
   status: number
   body: Buffer | string
   contentType: string
+  /** C-12：附加响应头（缓存策略 / 安全头）。 */
+  headers?: Record<string, string>
 }
 
 export interface StaticHost {
@@ -108,7 +110,19 @@ export async function createStaticHost(options: StaticHostOptions): Promise<Stat
         }
         body = injected
       }
-      return { status: 200, body, contentType: contentTypeOf(filePath) }
+      // C-12：缓存与安全响应头——旧实现完全缺失：① HTML 不缓存（tap 注入的
+      // token 每次启动都可能变，缓存会让旧 token 复用）；② 带 hash 的静态资产
+      // 长缓存（Next export 的 chunk 名含内容 hash，内容变则名变）；③ 全局禁
+      // MIME 嗅探（.svg 等内联场景的纵深防御）。
+      const headers: Record<string, string> = { 'X-Content-Type-Options': 'nosniff' }
+      if (filePath.toLowerCase().endsWith('.html')) {
+        headers['Cache-Control'] = 'no-cache, must-revalidate'
+      } else if (/-[0-9a-zA-Z_-]{8,}\.(?:js|css|woff2?)$/.test(filePath)) {
+        headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+      } else {
+        headers['Cache-Control'] = 'public, max-age=3600'
+      }
+      return { status: 200, body, contentType: contentTypeOf(filePath), headers }
     },
   }
 }

@@ -32,4 +32,21 @@ describe('terminal stdin 生命周期（C-6）', () => {
       }
     },
   )
+
+  it('C-8：管道行数超过上限时截断且只告警一次（无上界会常驻整个文件）', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      // 自备接线（prompt 挂起 → wireStdin），不依赖其他用例的模块级状态。
+      const terminal = makeTerminal({ tty: false, sink: { write: () => undefined, line: () => undefined } })
+      const first = terminal.prompt('Q: ')
+      const payload = Array.from({ length: 1200 }, (_, index) => `line-${index}\n`).join('')
+      process.stdin.emit('data', payload)
+      // 首行结算挂起的 prompt，其余进队列；超过 1000 行上限丢弃且只告警一次。
+      await expect(first).resolves.toBe('line-0')
+      const warnings = stderr.mock.calls.filter(call => String(call[0]).includes('超过 1000 行上限'))
+      expect(warnings).toHaveLength(1)
+    } finally {
+      stderr.mockRestore()
+    }
+  })
 })

@@ -77,4 +77,21 @@ describe('createStaticHost', () => {
     const host = (await createStaticHost({ root, bootstrap: null }))!
     expect(String((await host.respond('/'))?.body)).not.toContain('__STUDYCLAW__')
   })
+
+  it('C-12：HTML no-cache、hash 资产 immutable、全局 nosniff', async () => {
+    const root = await makeDist({
+      'index.html': '<html><head></head><body></body></html>',
+      '_next/static/chunks/main-1a2b3c4d5e.js': 'console.log(1)',
+      'plain.js': 'console.log(2)',
+    })
+    const host = (await createStaticHost({ root, bootstrap: { token: 'tk' } }))!
+    const html = (await host.respond('/'))!
+    expect(html.headers?.['Cache-Control']).toBe('no-cache, must-revalidate')
+    expect(html.headers?.['X-Content-Type-Options']).toBe('nosniff')
+    const hashed = (await host.respond('/_next/static/chunks/main-1a2b3c4d5e.js'))!
+    expect(hashed.headers?.['Cache-Control']).toBe('public, max-age=31536000, immutable')
+    expect(hashed.headers?.['X-Content-Type-Options']).toBe('nosniff')
+    const plain = (await host.respond('/plain.js'))!
+    expect(plain.headers?.['Cache-Control']).toBe('public, max-age=3600')
+  })
 })

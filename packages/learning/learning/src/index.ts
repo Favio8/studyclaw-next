@@ -168,7 +168,10 @@ export class RubricEvaluator {
 
 /** Pick review/new tasks (Python `_select` parity): due-first with unjudged
  *  (attempts=0) card fill for the review mode; `dueOnly` pins the strict
- *  due-only queue used by the `review` command. */
+ *  due-only queue used by the `review` command.
+ *  T-4：同排序键（attempts/difficulty）内随机洗牌——旧实现完全确定性，
+ *  同一概念每次出同一张卡，学生可记忆题面与答案位。rng 可注入（测试用
+ *  常量函数即恢复确定性），默认 Math.random。 */
 export async function pickTasks(
   courseDir: string,
   mode: 'review' | 'new',
@@ -176,6 +179,7 @@ export async function pickTasks(
   count: number,
   today: string = localDateKey(),
   dueOnly = false,
+  rng: () => number = Math.random,
 ): Promise<HarnessTask[]> {
   const pool = (await loadTaskPool(courseDir)).filter(task => !task.deprecated)
   // T-16：进度板路径回退（v2 布局优先、旧布局根目录兜底）——硬编码
@@ -193,10 +197,12 @@ export async function pickTasks(
 
   if (mode === 'review') {
     // 到期卡优先，最短尝试（attempts 升序）先出，未评测新卡在 due 不足时补位。
+    // T-4：同 (attempts, difficulty) 内以随机键打乱（确定性主序不变）。
+    const jitter = new Map(pool.map(task => [task, rng()] as const))
     const ordered = [...pool].sort((a, b) =>
       attemptsOf(a) - attemptsOf(b)
       || a.difficulty - b.difficulty
-      || a.task_id.localeCompare(b.task_id),
+      || jitter.get(a)! - jitter.get(b)!,
     )
     // 概念聚焦：只看目标概念，忽略到期/补位语义（Python `_select` parity）。
     if (conceptId !== null) {
@@ -235,7 +241,10 @@ export async function pickTasks(
   let candidates = pool.filter(task => !due.has(task.concept_id))
   if (conceptId !== null) candidates = candidates.filter(task => task.concept_id === conceptId)
   // Stability: sort by concept then difficulty so picks are reproducible.
-  candidates.sort((a, b) => a.concept_id.localeCompare(b.concept_id) || a.difficulty - b.difficulty)
+  // T-4：同 (concept, difficulty) 内随机（rng 可注入恢复确定性）。
+  const jitter = new Map(candidates.map(task => [task, rng()] as const))
+  candidates.sort((a, b) => a.concept_id.localeCompare(b.concept_id) || a.difficulty - b.difficulty
+    || jitter.get(a)! - jitter.get(b)!)
   return candidates.slice(0, Math.max(1, count))
 }
 

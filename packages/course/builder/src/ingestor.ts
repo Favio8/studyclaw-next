@@ -334,6 +334,14 @@ export class MarkdownIngestor {
     return this.parseText(text, basename(sourcePath), courseId)
   }
 
+  /**
+   * T-20：slug 去重集提升为实例级——一个 ingestor 实例服务一次 build 的
+   * 全部文件，跨文件同名章节得到 _2 后缀（旧实现按文件隔离，两个讲义的
+   * 「概述」共享同一 concept id，掌握度跨资料混用）。测试均为单实例单
+   * 文件，行为不变。
+   */
+  private readonly seenIds = new Set<string>()
+
   parseText(text: string, sourceName: string, courseId = 'course'): IngestArtifact {
     const processed = preprocessMarkdown(text, sourceName)
     const pdfMode = preprocessModeFor(sourceName) === 'pdf'
@@ -349,15 +357,14 @@ export class MarkdownIngestor {
 
     const chapters: Syllabus['chapters'] = []
     const chunks: ConceptChunk[] = []
-    const seenIds = new Set<string>()
     let chunkSeq = 0
 
     for (const draft of this.chapterDrafts(title, lines, headings, bodyStart)) {
-      const chapterId = slug(draft.title, 'chap_', seenIds)
+      const chapterId = slug(draft.title, 'chap_', this.seenIds)
       const concepts: Syllabus['chapters'][number]['concepts'] = []
       const sections = this.absorbCodeLabelSections(this.conceptSections(draft, lines, headings), lines, draft.title, labelAbsorbEnabled)
       for (const section of sections) {
-        const conceptId = slug(section.title, 'c_', seenIds)
+        const conceptId = slug(section.title, 'c_', this.seenIds)
         const [sectionChunks, nextSeq] = this.chunkSection(lines, section, sourceName, conceptId, chapterId, chunkSeq)
         chunkSeq = nextSeq
         if (sectionChunks.length === 0) continue

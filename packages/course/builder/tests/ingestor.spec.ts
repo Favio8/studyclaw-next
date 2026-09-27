@@ -175,4 +175,20 @@ describe('MarkdownIngestor', () => {
     const art = new MarkdownIngestor().parseText(pdf, 'lecture.pdf', 'c1')
     expect(art.syllabus.chapters[0]!.title).toBe('抓取并理解 Claude Code 的运行轨迹')
   })
+
+  it('T-20：同一 ingestor 实例跨文件解析时，同名章节得到不同 id', () => {
+    // 旧实现 seen 按文件隔离：两个讲义都有「概述」→ 同一 concept id →
+    // 掌握度跨资料共享。实例级 seen 后第二个得 _2 后缀（build 全程单实例）。
+    const ingestor = new MarkdownIngestor()
+    const docA = '# 讲义A\n\n## 概述\n\nA 的概述内容。\n'
+    const docB = '# 讲义B\n\n## 概述\n\nB 的概述内容。\n'
+    const artA = ingestor.parseText(docA, 'a.md', 'c1')
+    const artB = ingestor.parseText(docB, 'b.md', 'c1')
+    const idA = artA.syllabus.chapters[0]!.concepts[0]!.id
+    const idB = artB.syllabus.chapters[0]!.concepts[0]!.id
+    expect(idA).not.toBe(idB)
+    expect(idB).toBe(`${idA}_2`)
+    // chunk 的 concept_id 跟随各自章节，不串资料。
+    expect(artB.chunks[0]!.concept_id).toBe(idB)
+  })
 })

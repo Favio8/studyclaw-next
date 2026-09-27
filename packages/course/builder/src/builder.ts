@@ -343,6 +343,11 @@ export class CourseBuilder {
 
     const artifacts: IngestArtifact[] = []
     const changedFiles = [...report.added, ...report.modified]
+    // T-20：slug 去重集提升为整个 build 全局（单 ingestor 实例）——旧实现
+    // 每文件新建 ingestor、seen 按文件隔离，两个讲义的「概述」会得同一
+    // concept id，掌握度跨资料共享。注意一次性迁移效果：既有课程重建时
+    // 原合并概念会拆分，历史掌握度留在第一个 id 上。
+    const ingestor = new MarkdownIngestor(undefined, this.granularity)
     // PERF-1 重构：摄取（本地解析，快）保持按文件串行；LLM 生成（慢）
     // 扁平化为 chunk 粒度的任务队列后按 max_concurrency 有界并行消费——
     // 旧实现双层全串行，56 chunk × ~10s 就是分钟级空白等待。
@@ -353,7 +358,6 @@ export class CourseBuilder {
       if (onProgress !== undefined) onProgress(index, changedFiles.length, name)
       const path = join(sourcesDir, name)
       const ext = name.toLowerCase().match(/\.[^.]*$/)?.[0] ?? ''
-      const ingestor = new MarkdownIngestor(undefined, this.granularity)
       let artifact: IngestArtifact
       try {
         if (ext === '.md' || ext === '.txt') {

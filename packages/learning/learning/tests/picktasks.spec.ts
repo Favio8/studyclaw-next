@@ -71,6 +71,10 @@ function makeTask(taskId: string, conceptId: string, attempts: number, difficult
 }
 
 describe('pickTasks', () => {
+  // T-4：同 (attempts, difficulty) 内随机洗牌；并列顺序断言传确定性 rng
+  // （常量 → 抖动全相等 → 稳定排序保持写入序）。
+  const fixedRng = (): number => 0.5
+
   it('review：到期概念优先，到期不足时用未评测新卡补位', async () => {
     const course = await makeCourse()
     await writeTaskPool(course, [
@@ -78,7 +82,7 @@ describe('pickTasks', () => {
       makeTask('t_b01', 'c_b', 0),
       makeTask('t_c01', 'c_c', 0),
     ])
-    const picked = await pickTasks(course, 'review', null, 3, '2026-08-21')
+    const picked = await pickTasks(course, 'review', null, 3, '2026-08-21', false, fixedRng)
     expect(picked.map(task => task.task_id)).toEqual(['t_a01', 't_b01', 't_c01'])
   })
 
@@ -187,10 +191,28 @@ describe('pickTasks', () => {
       makeTask('t_c01', 'c_c', 5),
     ])
     // count=2：两概念各一张（旧实现会给出同一概念的两张）。
-    const spread = await pickTasks(course, 'review', null, 2, '2026-08-21')
+    const spread = await pickTasks(course, 'review', null, 2, '2026-08-21', false, fixedRng)
     expect(spread.map(task => task.task_id)).toEqual(['t_a01', 't_c01'])
     // count=3：概念去重后不足，用同概念其余到期卡补位（不少题）。
-    const topped = await pickTasks(course, 'review', null, 3, '2026-08-21')
+    const topped = await pickTasks(course, 'review', null, 3, '2026-08-21', false, fixedRng)
     expect(topped.map(task => task.task_id)).toEqual(['t_a01', 't_c01', 't_a02'])
+  })
+
+  it('T-4：同排序键内随机洗牌（确定性 rng 保序，递次 rng 改变并列顺序）', async () => {
+    const course = await makeCourse()
+    await writeTaskPool(course, [
+      makeTask('t_x01', 'c_x', 0),
+      makeTask('t_x02', 'c_x', 0),
+      makeTask('t_x03', 'c_x', 0),
+    ])
+    // 概念聚焦路径不受 due/补位逻辑影响，ordered 即 (attempts,difficulty,jitter)
+    // 全序；常量 rng → 抖动全相等 → 稳定排序保持写入序。
+    const fixed = await pickTasks(course, 'review', 'c_x', 3, '2026-08-21', false, () => 0.5)
+    expect(fixed.map(task => task.task_id)).toEqual(['t_x01', 't_x02', 't_x03'])
+    // 递次 rng（3,2,1 按池序分配）→ 抖动升序即池序倒置。
+    let n = 3
+    const descRng = (): number => n--;
+    const shuffled = await pickTasks(course, 'review', 'c_x', 3, '2026-08-21', false, descRng)
+    expect(shuffled.map(task => task.task_id)).toEqual(['t_x03', 't_x02', 't_x01'])
   })
 })

@@ -38,18 +38,23 @@ describe('withCourseLock', () => {
   it('不同 key 并不互斥', async () => {
     const [dirA, dirB] = [await makeCourseDir(), await makeCourseDir()]
     try {
-      let running = 0
-      let concurrentSeen = false
-      const barrier = new Promise<void>(resolve => {
-        setTimeout(resolve, 30)
-      })
-      await Promise.all([dirA, dirB].map(key => withCourseLock(key, async () => {
-        running += 1
-        if (running > 1) concurrentSeen = true
-        await barrier
-        running -= 1
+      // 事件驱动断言（旧实现用 30ms 固定 barrier：全量负载下第二个锁的获取
+      // 会被推迟越过 barrier，concurrentSeen 偶发 false——今天两次全量跑连抖）。
+      // 现在：双方都进入临界区才放行；若锁错误地串行了不同 key，门永远不开，
+      // 由 5s 超时兜底为显式失败而非静默错值。
+      let entered = 0
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const both = Promise.all([dirA, dirB].map(key => withCourseLock(key, async () => {
+        entered += 1
+        if (entered === 2) release()
+        await gate
       })))
-      expect(concurrentSeen).toBe(true)
+      await Promise.race([
+        both,
+        new Promise((_, reject) => { setTimeout(() => reject(new Error('不同 key 的临界区未并发执行（被错误串行化）')), 5_000) }),
+      ])
+      expect(entered).toBe(2)
     } finally {
       await rm(dirA, { recursive: true, force: true })
       await rm(dirB, { recursive: true, force: true })

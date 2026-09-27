@@ -190,6 +190,11 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
           : []),
         ...(buildError !== undefined ? ["", `✗ 构建失败：${buildError}`] : []),
         ...(buildError === undefined && buildJobId !== null ? ["", "后台开始构建课程索引…"] : []),
+        // W-9：未配置模型时旧实现只显示"✓ 已归档 N 份"——不告知没有启动构建
+        // （静默部分失败），用户以为课程已在索引。显式给出下一步。
+        ...(buildError === undefined && buildJobId === null
+          ? ["", "⚠ 尚未配置模型：资料已归档，但未自动构建课程索引。在设置中配置模型后发送 /build。"]
+          : []),
       ];
       setNotice(noticeLines.join("\n"));
       setPickedFiles([]);

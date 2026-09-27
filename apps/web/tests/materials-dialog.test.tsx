@@ -106,6 +106,24 @@ describe("MaterialsDialog 上传补充", () => {
     });
   });
 
+  it("W-9：未配置模型（buildJobId=null）时明确告知未启动构建", async () => {
+    apiMocks.uploadSources.mockResolvedValue({
+      added: ["guide.md"],
+      buildJobId: null,
+    });
+    render(<MaterialsDialog onClose={vi.fn()} />);
+
+    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    fireEvent.change(input, { target: { files: [file("guide.md")] } });
+    fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/尚未配置模型/)).toBeInTheDocument();
+    });
+    // 不得谎称"后台开始构建"。
+    expect(screen.queryByText(/后台开始构建课程索引/)).not.toBeInTheDocument();
+  });
+
   it("inplace 课程拒绝上传：INPLACE_SOURCE_BOUND 错误原样呈现", async () => {
     apiMocks.uploadSources.mockRejectedValue(
       new ApiError("INPLACE_SOURCE_BOUND", "当前项目直接扫描所选目录；请把补充资料放入该目录后执行同步", 409),

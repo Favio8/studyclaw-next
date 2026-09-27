@@ -61,7 +61,11 @@ export function useKeyboardShortcuts() {
       if (mod && !alt && !event.shiftKey) {
         const key = event.key.toLowerCase();
         if (key === "k") {
-          // Command Palette（互斥弹层：先关向导）
+          // Command Palette（互斥弹层：先关向导）。
+          // 加固7a：设置弹层打开时 Ctrl+K 不再叠开 Palette——此前 z-90 的设置层
+          // 被 z-100 的 Palette 盖住但焦点在 Palette 输入框，用户面对"焦点在
+          // 看不见的面板里打字"的半叠加状态。设置层让位给 ESC/关闭钮处理。
+          if (state.settingsOpen) return;
           event.preventDefault();
           if (state.wizardOpen) state.setWizardOpen(false);
           state.setPaletteOpen(!state.paletteOpen);

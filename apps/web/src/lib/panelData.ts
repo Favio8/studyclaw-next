@@ -66,6 +66,10 @@ export async function refreshCourseList(): Promise<void> {
     const workspacePath = useAppStore.getState().workspacePath;
     if (!workspacePath) return;
     const { courses } = await api.courseList(workspacePath);
+    // W-6：切工作区的在途响应不得覆盖新工作区的课程列表——chat sync/done 触发
+    // 的 refresh 与用户切项目竞态时，旧项目 courses 晚到会显示错项目且不自愈
+    // （Console effect 已先跑完）。与 runPanelRefresh 的课程守卫同口径。
+    if (useAppStore.getState().workspacePath !== workspacePath) return;
     useAppStore.getState().setCourses(courses);
   } catch (error) {
     // PERF-6：不再完全静默——横幅一次性提示；左栏下次装载仍会重试。

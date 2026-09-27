@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, CalendarDays, Check, Flame, History, MousePointer2, X } from "lucide-react";
 import { api } from "@/src/lib/api";
 import { buildHeatmapGrid } from "@/src/lib/heatmapGrid";
@@ -24,9 +24,16 @@ const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
 export default function HeatmapTab() {
   const heatmap = useAppStore((s) => s.heatmap);
+  const activeCourseId = useAppStore((s) => s.activeCourseId);
   const [hoverDate, setHoverDate] = useState<string | null>(null);
   const [detail, setDetail] = useState<HeatmapDayDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // W-7：回放详情归属打开时的课程——切项目后旧课程的回放不得继续渲染在新
+  // 课程下（新 heatmap 到达时旧 detail 会重新挂载出现）。
+  useEffect(() => {
+    setDetail(null);
+  }, [activeCourseId]);
 
   if (!heatmap) return <PanelSkeleton lines={3} />;
 

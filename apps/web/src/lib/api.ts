@@ -182,13 +182,8 @@ export async function* streamSse<T extends { event: string }>(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // UI-28：SSE 规范允许 CRLF 行终止；服务端当前输出 LF，这里统一归一化，
-    // 防止跨实现（代理/其他宿主）用 \r\n 时帧边界永远匹配不到。
-    if (buffer.includes("\r")) buffer = buffer.replace(/\r\n/g, "\n");
+  // W-5：块边界消费抽成闭包（decoder flush 后复用同一套边界逻辑）。
+  function* drainBlocks(): Generator<T> {
     let boundary = buffer.indexOf("\n\n");
     while (boundary >= 0) {
       const block = buffer.slice(0, boundary);
@@ -198,6 +193,20 @@ export async function* streamSse<T extends { event: string }>(
       boundary = buffer.indexOf("\n\n");
     }
   }
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // UI-28：SSE 规范允许 CRLF 行终止；服务端当前输出 LF，这里统一归一化，
+    // 防止跨实现（代理/其他宿主）用 \r\n 时帧边界永远匹配不到。
+    // W-5：规范同样允许孤立 \r 作为行终止符（旧实现只处理 \r\n）。
+    if (buffer.includes("\r")) buffer = buffer.replace(/\r\n?/g, "\n");
+    yield* drainBlocks();
+  }
+  // W-5：flush 解码器——跨 chunk 的多字节 UTF-8 尾字节不再被静默丢弃。
+  buffer += decoder.decode();
+  if (buffer.includes("\r")) buffer = buffer.replace(/\r\n?/g, "\n");
+  yield* drainBlocks();
   const tail = parseSseBlock<T>(buffer);
   if (tail) yield tail;
 }
@@ -207,13 +216,28 @@ function parseSseBlock<T extends { event: string }>(block: string): T | null {
   let event = "";
   let id: string | undefined;
   for (const line of block.split("\n")) {
-    if (line.startsWith("event: ")) event = line.slice(7).trim();
-    else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
-    else if (line.startsWith("id: ")) id = line.slice(4).trim();
+    // W-5：SSE 规范行形态是 `field: value`（冒号后单个空格可选）——旧实现要求
+    // "event: " 带空格，规范允许的 "event:value" 无空格形态会被漏掉。
+    const colon = line.indexOf(":");
+    if (colon < 0) continue;
+    const field = line.slice(0, colon);
+    let value = line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") event = value.trim();
+    else if (field === "data") dataLines.push(value);
+    else if (field === "id") id = value.trim();
   }
   if (!event) return null;
-  const data = dataLines.length ? JSON.parse(dataLines.join("")) : {};
-  return { event, data, ...(id ? { id } : {}) } as unknown as T;
+  if (dataLines.length === 0) {
+    return { event, data: {}, ...(id ? { id } : {}) } as unknown as T;
+  }
+  // W-5：多 data 行按规范用 \n 连接（旧实现 join("") 会把多行 JSON 粘成坏帧）；
+  // JSON.parse 包 try/catch——单个坏帧不再炸整条流并白耗 3 次网络重试。
+  try {
+    return { event, data: JSON.parse(dataLines.join("\n")), ...(id ? { id } : {}) } as unknown as T;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

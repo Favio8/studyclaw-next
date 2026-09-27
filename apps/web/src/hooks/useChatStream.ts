@@ -136,6 +136,27 @@ export function useChatStream() {
     scheduleDeferred(() => { void sendRef.current(next.text, { queuedTurnId: next.turnId }); }, 0);
   }, [flashStatusBanner, scheduleDeferred]);
 
+  /** W-8：abort 路径的陈旧队列清理——排队时的会话已切换且队列非空时静默清掉，
+   * 否则残留会在下次 drain 时弹"已切换会话，丢弃旧队列消息"的误导横幅。 */
+  const clearStaleQueue = useCallback(() => {
+    const state = useAppStore.getState();
+    if (state.queuedMessages.length === 0) return;
+    const sameOwner = (state.activeCourseId ?? null) === queueOwner.courseId
+      && (state.activeSessionId ?? null) === queueOwner.sessionId;
+    if (!sameOwner) useAppStore.setState({ queuedMessages: [] });
+  }, []);
+
+  /** W-11：流式收尾提交必须带会话归属——abort/切课后旧流的尾部帧不得写进新
+   * 恢复会话的最后一条 agent 消息（updateLastAgent 按"当前最后一条 agent
+   * 消息"定位，无归属校验；窗口=切课后的 abort 收尾帧）。 */
+  const commitLastAgent = useCallback((patch: Parameters<typeof updateLastAgent>[0]) => {
+    const state = useAppStore.getState();
+    const sameOwner = (state.activeCourseId ?? null) === queueOwner.courseId
+      && (state.activeSessionId ?? null) === queueOwner.sessionId;
+    if (!sameOwner) return;
+    updateLastAgent(patch);
+  }, [updateLastAgent]);
+
   const refreshSessions = useCallback(
     async (courseId: string, sessionId?: string) => {
       try {
@@ -494,7 +515,12 @@ export function useChatStream() {
           if (abortedMidStream) {
             // 用户停止/切换对话：定格占位卡并退出；FE-2：不 drain 队列。
             cancelPendingFlush();
-            updateLastAgent({ streaming: false });
+            // W-8：abort 路径也要恢复 syncState（done/error 都恢复了，唯独漏
+            // 这两条 → 切课/停止后左栏与爪爪永久卡"同步中"）。
+            setSyncState("synced");
+            clearStaleQueue();
+            // W-11：归属校验后的收尾提交。
+            commitLastAgent({ streaming: false });
             setStreamPhase(null);
             useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
             lastFailure = null; // 用户主动停止，不构成可重试失败
@@ -525,7 +551,11 @@ export function useChatStream() {
             // 用户停止/切换对话：定格占位卡（切换方随后可能清空消息）；
             // FE-2：不走 drain——旧会话的排队文本绝不能发进当前会话。
             cancelPendingFlush();
-            updateLastAgent({ streaming: false });
+            // W-8：同另一条 abort 路径——恢复 syncState、清陈旧队列。
+            setSyncState("synced");
+            clearStaleQueue();
+            // W-11：归属校验后的收尾提交。
+            commitLastAgent({ streaming: false });
             setStreamPhase(null);
             useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 爪爪退出流式姿态
             setStreaming(false);
@@ -535,7 +565,8 @@ export function useChatStream() {
           }
           if (attempt < MAX_ATTEMPTS - 1) continue;
           cancelPendingFlush();
-          updateLastAgent({
+          // W-11：归属校验后的收尾提交。
+          commitLastAgent({
             streaming: false,
             error: errorMessage(exc),
           });
@@ -643,7 +674,7 @@ export function useChatStream() {
       unregisterActiveChat(abort);
       return false;
     }
-  }, [appendMessage, cancelPendingFlush, drainQueueIfOwned, flashStatusBanner, handleEvent, setPendingAsk, setStreamPhase, setStreaming, setSyncState, updateLastAgent]);
+  }, [appendMessage, cancelPendingFlush, clearStaleQueue, commitLastAgent, drainQueueIfOwned, flashStatusBanner, handleEvent, setPendingAsk, setStreamPhase, setStreaming, setSyncState, updateLastAgent]);
 
   /** 重试一条失败的消息（不重复追加用户消息）。
    * UI-6：`text` 指定要重发的文本（来自对应消息卡），不再依赖全局

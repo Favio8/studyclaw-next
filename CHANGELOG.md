@@ -8,6 +8,23 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+设计决策项收尾（2026-09-27，第五轮审查遗留的三项 T 编号）：
+
+### 修复
+
+- T-4：pickTasks 同 (attempts, difficulty) 内完全确定性导致可记忆题面——
+  同键内随机排序（rng 可注入，测试传常量恢复确定性）；
+- T-11：storage-domain 写时不校验让坏记录 brick 整个 domain——put/update/
+  setGlobal 前 safeParse 拒绝，open 时坏记录隔离登记 domain.quarantined 并
+  warn（其余记录照常可用）；
+- T-20：slug 去重集按文件隔离导致跨讲义同名章节共享 concept id（掌握度跨
+  资料混用）——提升为 ingestor 实例级（build 单实例），第二个得 _2 后缀。
+
+### 文档
+
+- 新增 docs/RELEASE_RUNBOOK.md：npm 发布（registry 切换/NPM_TOKEN/beta
+  dist-tag/发布后验证/回滚）与 GitHub Release 的可复现步骤。
+
 性能优化（2026-09-27）：
 
 ### 性能

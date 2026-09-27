@@ -64,14 +64,19 @@ export class LlmTaskGenerator {
   ) {}
 
   async generateTasks(chunk: IngestArtifact['chunks'][number], count = 2): Promise<HarnessTask[]> {
-    const targets = generationTargets(count)
+    // offset 的读取与计数器推进必须同步完成（await 之前）：build 以
+    // maxConcurrency=4 并发跑批，若沿用"成功后才递增"，同一并发窗口内的
+    // 各批会读到相同 offset，type/difficulty/答案位轮换在并发下整体失效。
+    // 失败批次会跳过若干轮换槽位——对多样性无影响，可接受。
+    const offset = generationCounter
+    generationCounter += count
+    const targets = generationTargets(count, offset)
     const batch = await structuredCall(
       this.client,
       generatedTaskBatch,
       this.generateOptions(chunk.title, chunk.content, count, targets),
       this.options.maxRetries ?? DEFAULT_MAX_RETRIES,
     )
-    generationCounter += count
     return batch.tasks.map((task, index) => ({
       ...task,
       // F-14：批内唯一编号（_001/_002…），不再整批共用 _001——否则评测

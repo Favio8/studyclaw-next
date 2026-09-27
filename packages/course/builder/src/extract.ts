@@ -66,8 +66,14 @@ async function extractPdfToMarkdown(sourcePath: string): Promise<string> {
   try {
     return (await parser.getText()).text
   } finally {
-    // pdfjs 文档句柄必须显式释放，长跑构建才不累积内存。
-    await parser.destroy().catch(() => undefined)
+    // pdfjs 文档句柄必须显式释放，长跑构建才不累积内存。BUG-002：destroy
+    // 同步抛出会穿透 finally 并覆盖 getText 的原始异常——就地吞掉清理错误，
+    // 资源交给 GC/进程退出兜底，业务异常照常传播。
+    try {
+      await parser.destroy()
+    } catch {
+      // 释放失败不必上抛。
+    }
   }
 }
 

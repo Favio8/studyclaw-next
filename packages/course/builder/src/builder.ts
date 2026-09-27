@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
+import { withCourseLock } from '@studyclaw/tools'
 import { MarkdownIngestor } from './ingestor.ts'
 import { extractSourceText } from './extract.ts'
 import { graphAdjacency, projectChapterDependencies, type DependencyInferrerLike } from './dep-infer.ts'
@@ -278,11 +279,10 @@ export class CourseBuilder {
       // builds (e.g. orphaned Response/Anthropic rows before ingestor fix),
       // (b) a deleted/empty progress.md that needs re-seeding, (c) chapter
       // titles that were refreshed without any source file changing.
-      report.conceptsSeeded = await this.seedProgress()
+      report.conceptsSeeded = await withCourseLock(this.courseDir, () => this.seedProgress())
       return report
     }
 
-    await this.updateTaskPool([...report.added, ...report.modified], report)
     const artifacts: IngestArtifact[] = []
     const changedFiles = [...report.added, ...report.modified]
     // PERF-1 重构：摄取（本地解析，快）保持按文件串行；LLM 生成（慢）
@@ -337,13 +337,22 @@ export class CourseBuilder {
     for (const drop of gate.dropped) report.degraded.push(`${drop.taskId}：${drop.reason}`)
     const skew = answerPositionSkewWarning(gate.answerPositionHistogram)
     if (skew !== null) console.warn(`[quality-gate] ${skew}`)
-    report.tasksGenerated = await this.mergeTasks(gate.kept)
+    // M2：旧卡退役移到生成成功之后——旧实现先删后生成，生成失败（LLM 报错/
+    // 限流）时旧卡已被删且 checksums 未保存，连续失败会把题池越削越空。
+    // 课程锁只包无 LLM 的写段（快），生成与依赖推断留在锁外——文件锁的
+    // 30s 超时不会误伤并发评测。
+    await withCourseLock(this.courseDir, async () => {
+      await this.updateTaskPool([...report.added, ...report.modified], report)
+      report.tasksGenerated = await this.mergeTasks(gate.kept)
+      await this.mergeSyllabus(artifacts, report)
+    })
     if (onProgress !== undefined) onProgress(changedFiles.length, changedFiles.length, '')
 
-    await this.mergeSyllabus(artifacts, report)
     await this.applyDependencyInference(artifacts, report)
-    report.conceptsSeeded = await this.seedProgress()
-    await this.saveChecksums(current)
+    await withCourseLock(this.courseDir, async () => {
+      report.conceptsSeeded = await this.seedProgress()
+      await this.saveChecksums(current)
+    })
     return report
   }
 
@@ -353,6 +362,9 @@ export class CourseBuilder {
     const sourcesDir = this.sourcesDir()
     const current = await computeChecksums(sourcesDir, this.extensions, this.excludedSourceDirs, this.skipHiddenSourceDirs, this.excludedSourceFiles)
     const report = emptyReport()
+    // L6：无变更路径此前沿用 emptyReport 的 '1.0.0' 假版本——以磁盘上的
+    // 当前版本为基线，mergeSyllabus 增长时再自行 bump。
+    report.version = (await loadSyllabus(this.courseDir)).version
     const artifacts: IngestArtifact[] = []
     const ingestor = new MarkdownIngestor(undefined, granularity)
     for (const name of Object.keys(current).sort()) {
@@ -375,10 +387,12 @@ export class CourseBuilder {
         report.degraded.push(name)
       }
     }
-    await this.mergeSyllabus(artifacts, report)
+    await withCourseLock(this.courseDir, () => this.mergeSyllabus(artifacts, report))
     await this.applyDependencyInference(artifacts, report)
-    report.conceptsSeeded = await this.seedProgress()
-    await this.saveChecksums(current)
+    await withCourseLock(this.courseDir, async () => {
+      report.conceptsSeeded = await this.seedProgress()
+      await this.saveChecksums(current)
+    })
     const existing = await loadSyllabus(this.courseDir)
     if (existing.granularity !== granularity) {
       await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify({ ...existing, granularity }, null, 2) + '\n')
@@ -479,31 +493,39 @@ export class CourseBuilder {
       return
     }
     const byId = new Map(result.dependencies.map(entry => [entry.conceptId, entry.prerequisites]))
-    let changed = false
-    const chapters = existing.chapters.map(chapter => ({
-      ...chapter,
-      concepts: chapter.concepts.map(concept => {
-        const inferred = byId.get(concept.id)
-        if (inferred === undefined) return concept // LLM 未覆盖 → 保留既有
-        const next = [...new Set(inferred)]
-        if (next.length === concept.prerequisites.length && next.every(id => concept.prerequisites.includes(id))) return concept
-        changed = true
-        return { ...concept, prerequisites: next }
-      }),
-    }))
-    if (!changed) return
-    const project = projectChapterDependencies(chapters)
-    const updated: Syllabus = {
-      ...existing,
-      version: bumpPatch(existing.version),
-      chapters: chapters.map(chapter => ({
+    // 并发丢失更新修复：LLM 推断在锁外跑（数十秒不能占课程锁，见上方的锁
+    // 粒度取舍），但"读 syllabus → 合并 → 写回"必须整体进锁、且基于锁时刻
+    // 从磁盘重读的最新版做合并——否则与并发 build/regenerateSyllabus 的锁内
+    // mergeSyllabus 互相整文件覆盖，后写者静默丢掉先写者的章节/概念。
+    // 推断结果按 conceptId 键控，对锁内新出现的概念自然落空（保留既有依赖）。
+    await withCourseLock(this.courseDir, async () => {
+      const fresh = await loadSyllabus(this.courseDir)
+      let changed = false
+      const chapters = fresh.chapters.map(chapter => ({
         ...chapter,
-        dependencies: project[chapter.id] ?? chapter.dependencies,
-      })),
-      adjacency: graphAdjacency(chapters),
-    }
-    await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify(updated, null, 2) + '\n')
-    report.version = updated.version
+        concepts: chapter.concepts.map(concept => {
+          const inferred = byId.get(concept.id)
+          if (inferred === undefined) return concept // LLM 未覆盖 → 保留既有
+          const next = [...new Set(inferred)]
+          if (next.length === concept.prerequisites.length && next.every(id => concept.prerequisites.includes(id))) return concept
+          changed = true
+          return { ...concept, prerequisites: next }
+        }),
+      }))
+      if (!changed) return
+      const project = projectChapterDependencies(chapters)
+      const updated: Syllabus = {
+        ...fresh,
+        version: bumpPatch(fresh.version),
+        chapters: chapters.map(chapter => ({
+          ...chapter,
+          dependencies: project[chapter.id] ?? chapter.dependencies,
+        })),
+        adjacency: graphAdjacency(chapters),
+      }
+      await atomicWrite(join(stateDirOf(this.courseDir), 'syllabus.json'), JSON.stringify(updated, null, 2) + '\n')
+      report.version = updated.version
+    })
   }
 
   /**
@@ -553,8 +575,7 @@ export class CourseBuilder {
       }
     }
 
-    let seeded = refreshed.length - (board.concepts.length - (board.concepts.length - refreshed.filter(r => existingById.has(r.conceptId)).length))
-    seeded = Math.max(0, current.size - existingById.size)
+    const seeded = Math.max(0, current.size - existingById.size)
     board = { ...board, concepts: refreshed }
 
     if (changed) await saveProgressBoard(join(stateDir, 'progress.md'), board)

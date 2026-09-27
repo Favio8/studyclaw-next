@@ -27,26 +27,56 @@ async function retryBackoffDelay(attempt: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, jitter))
 }
 
-/** Extract a JSON object from model text (fenced or bare, Python parity). */
-export function extractJsonObject(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/g.exec(text)
-  const candidates = fenced !== null ? [fenced[1]!] : [text]
-  for (const candidate of candidates) {
-    const start = candidate.indexOf('{')
-    if (start < 0) continue
-    let depth = 0
-    for (let i = start; i < candidate.length; i += 1) {
-      if (candidate[i] === '{') depth += 1
-      else if (candidate[i] === '}') {
-        depth -= 1
-        if (depth === 0) {
-          try {
-            return JSON.parse(candidate.slice(start, i + 1)) as unknown
-          } catch {
-            break
-          }
+/** Extract a JSON object from model text (fenced or bare, Python parity).
+ *  RV-9：括号扫描必须感知字符串字面量，且围栏内损坏对象的括号会污染全文
+ *  深度计数——因此对每个 `{` 位置独立做字符串感知的平衡扫描，首个解析成功
+ *  的对象胜出；纯 JSON 候选走快路径。扫描长度封顶防病态输入。 */
+const MAX_SCAN_CHARS = 1_000_000
+
+function tryParseObjectFrom(text: string, start: number): unknown {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1)) as unknown
+        } catch {
+          return null
         }
       }
+      if (depth < 0) return null
+    }
+  }
+  return null
+}
+
+export function extractJsonObject(text: string): unknown {
+  const bounded = text.slice(0, MAX_SCAN_CHARS)
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(bounded)
+  const candidates = fenced !== null ? [fenced[1]!, bounded] : [bounded]
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as unknown
+    } catch {
+      // 非纯 JSON：逐个 `{` 位置尝试平衡扫描。
+    }
+    let index = candidate.indexOf('{')
+    while (index >= 0) {
+      const parsed = tryParseObjectFrom(candidate, index)
+      if (parsed !== null) return parsed
+      index = candidate.indexOf('{', index + 1)
     }
   }
   throw new Error('响应中未找到合法 JSON')

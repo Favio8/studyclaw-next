@@ -118,4 +118,23 @@ describe('CourseBuilder', () => {
     expect(pool.length).toBeGreaterThanOrEqual(4)
     await rm(root, { recursive: true, force: true })
   })
+
+  it('M2：生成失败时旧卡保留、checksums 不落盘（先删后生成回归）', async () => {
+    const { root, courseDir, generator } = await setup()
+    const builder = new CourseBuilder(courseDir, generator)
+    await builder.build(1)
+    const poolBefore = await loadTaskPool(courseDir)
+    expect(poolBefore.length).toBeGreaterThan(0)
+    const checksumsBefore = await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')
+    // 修改文件触发重建，但生成器抛错（模拟 LLM 故障/限流）。
+    await writeFile(join(courseDir, 'sources', 'a.md'), DOC.replace('重载是同名不同参数', 'Java 中重载是同名不同参数'), 'utf8')
+    generator.calls = -1 // 下次调用抛错
+    generator.generateTasks = async () => { throw new Error('LLM rate limited') }
+    await expect(builder.build(1)).rejects.toThrow('LLM rate limited')
+    // 旧卡未被删除；checksums 未更新 → 下次构建仍会把 a.md 视为 modified 重试。
+    const poolAfter = await loadTaskPool(courseDir)
+    expect(poolAfter).toHaveLength(poolBefore.length)
+    expect(await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')).toBe(checksumsBefore)
+    await rm(root, { recursive: true, force: true })
+  })
 })

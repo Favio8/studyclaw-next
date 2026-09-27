@@ -52,10 +52,14 @@ function contentTypeOf(path: string): string {
   return dot >= 0 ? MIME[path.slice(dot).toLowerCase()] ?? 'application/octet-stream' : 'application/octet-stream'
 }
 
-/** 注入启动参数：紧跟 `<head>` 之后（旧导出没有 `<head>` 时整体前置）。 */
+/** 注入启动参数：紧跟 `<head>` 之后（旧导出没有 `<head>` 时整体前置）。
+ *  RV-8：`<script>` 上下文里 JSON.stringify 不转义 `</script>`/`<!--`——
+ *  bootstrap 当前只有 hex token，这里统一把 `<` 转义为 `\u003c`，杜绝未来
+ *  字段携带用户数据时的脚本逃逸。 */
 function withBootstrapTap(html: string, bootstrap: Record<string, unknown> | null): string {
   if (bootstrap === null) return html
-  const tap = `<script>window.__STUDYCLAW__=${JSON.stringify(bootstrap)}</script>`
+  const json = JSON.stringify(bootstrap).replace(/</g, '\\u003c')
+  const tap = `<script>window.__STUDYCLAW__=${json}</script>`
   const headIndex = html.indexOf('<head>')
   return headIndex >= 0
     ? html.slice(0, headIndex + 6) + tap + html.slice(headIndex + 6)

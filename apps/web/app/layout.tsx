@@ -30,6 +30,15 @@ function devBootstrap(): { token?: string } | null {
   }
 }
 
+/**
+ * RV-8：`<script>` 上下文里 JSON.stringify 不转义 `</script>`/`<!--`，统一把
+ * `<` 转义为 `\u003c`（与 static-host.ts 的 tap 注入同一加固），杜绝引导参数
+ * 未来携带用户数据时的脚本逃逸。
+ */
+function bootstrapScript(bootstrap: { token?: string }): string {
+  return `window.__STUDYCLAW__=${JSON.stringify(bootstrap).replace(/</g, "\\u003c")}`;
+}
+
 export default function RootLayout({ children }: LayoutProps<"/">) {
   const bootstrap = devBootstrap();
   return (
@@ -37,7 +46,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <head>
         {bootstrap !== null ? (
           <script
-            dangerouslySetInnerHTML={{ __html: `window.__STUDYCLAW__=${JSON.stringify(bootstrap)}` }}
+            dangerouslySetInnerHTML={{ __html: bootstrapScript(bootstrap) }}
           />
         ) : null}
       </head>

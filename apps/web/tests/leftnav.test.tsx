@@ -371,3 +371,120 @@ describe("LeftNav 对话操作", () => {
     expect(createSession).toHaveBeenCalledWith(undefined, "course-1");
   });
 });
+
+describe("LeftNav 专项修复回归（P1-1/P1-2/P1-3/P2）", () => {
+  // 以下用例各自在开头显式设定 store 字段（既有 harness 的 afterEach 只重置
+  // 部分字段，跨用例污染会以空 courses/错 workspacePath 的形式咬人）。
+  const singleCourse = [{ id: "course-1", title: "Kubernetes", overallMastery: 0, dueToday: 0, lastActiveAt: "2026-08-20T00:00:00Z" }];
+
+  it("P1-2：refresh 瞬时失败保留上次列表并横幅提示", async () => {
+    mockWorkspaces();
+    const { rerender } = render(<LeftNav />);
+    expect(await screen.findByText("ws-alpha")).toBeInTheDocument();
+
+    // 切换项目路径触发 effect 重跑；本次 workspaces 失败（宿主重启/超时）。
+    apiMocks.workspaces.mockRejectedValueOnce(new Error("host restarting"));
+    storeState.workspacePath = "D:/learn/ws-beta";
+    rerender(<LeftNav />);
+
+    await waitFor(() =>
+      expect(storeState.flashStatusBanner).toHaveBeenCalledWith(expect.stringContaining("项目列表加载失败")),
+    );
+    // 旧列表未被清空。
+    expect(screen.getByText("ws-alpha")).toBeInTheDocument();
+    expect(screen.queryByText("还没有导入项目")).not.toBeInTheDocument();
+  });
+
+  it("P1-3：多课程项目渲染计数徽标与切换行，点击切换激活课程", async () => {
+    mockWorkspaces();
+    storeState.workspacePath = "D:/learn/ws-alpha";
+    const multi = [
+      { id: "course-a", title: "课程一", overallMastery: 0.5, dueToday: 0, lastActiveAt: "2026-09-27T10:00:00Z" },
+      { id: "course-b", title: "课程二", overallMastery: 0.3, dueToday: 2, lastActiveAt: "2026-09-26T10:00:00Z" },
+    ];
+    storeState.courses = multi;
+    storeState.activeCourseId = "course-a";
+    // 仅当前项目多课程（另一个项目仍单课程，避免徽标命中多个元素）。
+    apiMocks.workspaceCourses.mockImplementation((path: string) =>
+      Promise.resolve({ courses: path === "D:/learn/ws-alpha" ? multi : [multi[0]], missing: false }),
+    );
+    render(<LeftNav />);
+
+    expect(await screen.findByTitle(/该项目包含 2 个课程/)).toBeInTheDocument();
+    const switchRow = screen.getByTitle("切换到 课程二");
+    expect(within(switchRow).getByText("到期 2")).toBeInTheDocument();
+    fireEvent.click(switchRow);
+    expect(storeState.setActiveCourse).toHaveBeenCalledWith("course-b");
+  });
+
+  it("P1-1：搜索命中打开项目失败时横幅提示且搜索结果保持打开", async () => {
+    mockWorkspaces();
+    storeState.workspacePath = "D:/learn/ws-alpha";
+    storeState.courses = singleCourse;
+    storeState.activeCourseId = "course-1";
+    apiMocks.searchSessions.mockResolvedValue({
+      items: [{
+        sessionId: "session-remote",
+        title: "命中对话",
+        mode: "socratic",
+        turns: 2,
+        createdAt: "2026-08-20T00:00:00Z",
+        lastActiveAt: "2026-08-20T00:01:00Z",
+        workspacePath: "D:/learn/ws-beta",
+        workspaceTitle: "ws-beta",
+        courseId: "course-remote",
+        courseTitle: "Java",
+        snippet: "覆写会在运行时替换父类行为。",
+      }],
+      hasMore: false,
+    });
+    wsActions.adoptWorkspace.mockRejectedValue(new Error("目录不存在"));
+    render(<LeftNav />);
+
+    fireEvent.click(screen.getByRole("button", { name: "搜索项目和对话" }));
+    fireEvent.change(screen.getByPlaceholderText("搜索项目或对话"), { target: { value: "覆写" } });
+
+    const hit = await screen.findByText("命中对话", {}, { timeout: 3000 });
+    fireEvent.click(hit);
+
+    await waitFor(() =>
+      expect(storeState.flashStatusBanner).toHaveBeenCalledWith(expect.stringContaining("打开项目失败")),
+    );
+    // 搜索保持打开：结果未被清场。
+    expect(screen.getByText("命中对话")).toBeInTheDocument();
+  });
+
+  it("P2：对话操作菜单外点关闭", async () => {
+    mockWorkspaces();
+    storeState.workspacePath = "D:/learn/ws-alpha";
+    storeState.courses = singleCourse;
+    storeState.activeCourseId = "course-1";
+    apiMocks.workspaceCourses.mockResolvedValue({ courses: singleCourse, missing: false });
+    render(<LeftNav />);
+
+    const action = await screen.findByRole("button", { name: "对话操作", hidden: true });
+    fireEvent.click(action);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("P2：项目重命名撞名前置阻断，不发请求", async () => {
+    mockWorkspaces();
+    storeState.workspacePath = "D:/learn/ws-alpha";
+    render(<LeftNav />);
+
+    const renameButton = await screen.findByRole("button", { name: "重命名 ws-beta" });
+    fireEvent.click(renameButton);
+    const input = screen.getByRole("textbox", { name: "项目名称" });
+    fireEvent.change(input, { target: { value: "ws-alpha" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(storeState.flashStatusBanner).toHaveBeenCalledWith(expect.stringContaining("已存在同名项目")),
+    );
+    expect(apiMocks.renameWorkspace).not.toHaveBeenCalled();
+  });
+});
+

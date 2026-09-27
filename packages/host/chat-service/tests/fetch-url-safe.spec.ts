@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { assertFetchableHttpUrl, assertPublicHost, BlockedUrlError, fetchUrlSafe } from '../src/fetch-url-safe.ts'
+import { assertFetchableHttpUrl, assertPublicHost, BlockedUrlError, fetchUrlSafe, pinnedLookup } from '../src/fetch-url-safe.ts'
 
 function fakeResponse(status: number, headers: Record<string, string> = {}, body = '') {
   return {
@@ -89,5 +89,28 @@ describe('fetchUrlSafe', () => {
       expect(error instanceof Error && error.message).not.toContain('private-path')
       expect((error as Error).message).toContain('抓取失败')
     }
+  })
+})
+
+describe('pinnedLookup（connect 层 IP pinning，DNS rebinding 根治）', () => {
+  function callLookup(hostname: string): Promise<{ error: Error | null; address?: string; family?: number }> {
+    return new Promise(resolve => {
+      pinnedLookup(hostname, {}, (error, address, family) => resolve({ error: error ?? null, address, family }))
+    })
+  }
+
+  it('解析到私网地址的域名在 lookup 内被拒（校验与拨号同源，无 TOCTOU 窗口）', async () => {
+    const result = await callLookup('localhost')
+    expect(result.error).toBeInstanceOf(BlockedUrlError)
+    expect((result.error as Error).message).toContain('内网')
+  })
+
+  it('解析失败的域名报可读错误而不是崩溃', async () => {
+    // 真实 NXDOMAIN 环境：dnsLookup 回 ENOTFOUND；DNS 劫持/通配解析环境：
+    // 无效域名被引到 198.18.0.0/15 等 IANA 保留段，由 isForbiddenIpv4 拒下。
+    // 两条路径都必须以 Error 回调，而不是抛异常打崩宿主或静默放行。
+    const result = await callLookup('invalid.invalid.invalid.')
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.address).toBeUndefined()
   })
 })

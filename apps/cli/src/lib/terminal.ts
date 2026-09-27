@@ -99,6 +99,22 @@ let stdinEnded = false
 let pendingPrompt: { resolve: (line: string) => void; reject: (error: unknown) => void } | null = null
 let stdinWired = false
 
+// 注册任何 SIGINT 监听器都会移除 Node 的默认终止行为。有挂起 prompt 时
+// Ctrl-C 语义是"中断本次读取"（拒绝该次读取）；无挂起 prompt 时（评测逐题
+// 评审、chat 流式回合等无 prompt 阶段）必须恢复终止语义，否则 Ctrl-C 被
+// 静默吞掉、进程无法退出。摘掉本监听器后重发信号：其余处理器（如 serve 的
+// 优雅关停）继续收到，无其余处理器时走默认终止（退出码 130）。
+function onSigint(): void {
+  const pending = pendingPrompt
+  pendingPrompt = null
+  if (pending !== null) {
+    pending.reject(new EndOfInput())
+    return
+  }
+  process.removeListener('SIGINT', onSigint)
+  process.kill(process.pid, 'SIGINT')
+}
+
 function wireStdin(): void {
   if (stdinWired) return
   stdinWired = true
@@ -121,11 +137,7 @@ function wireStdin(): void {
     pendingPrompt = null
     pending?.reject(new EndOfInput())
   })
-  process.on('SIGINT', () => {
-    const pending = pendingPrompt
-    pendingPrompt = null
-    pending?.reject(new EndOfInput())
-  })
+  process.on('SIGINT', onSigint)
   process.stdin.resume()
 }
 

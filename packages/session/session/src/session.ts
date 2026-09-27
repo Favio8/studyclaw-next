@@ -143,6 +143,15 @@ export class TutorSession {
   private readonly providers: ToolContext['providers'] | undefined
   /** Tool preset is independent from the visible learning mode. */
   private readonly toolMode: string | null
+  /**
+   * RV-12：sync 回写（progress.md RMW）的课程文件锁注入点。聊天回合的
+   * `[STUDYCLAW_SYNC]` 经 SyncApplier 对 progress.md 做「读板→改行→重算
+   * 汇总→写板」的完整 RMW，此前全程在课程锁外——与锁内的 eval 提交
+   * （course.ts 的 SM-2 RMW）竞争同一文件时，锁内的写会被锁外的陈旧全量写
+   * 覆盖（学习进度丢更新）。宿主注入 withCourseLock，快写段上锁、LLM 慢调用
+   * 留在锁外；未注入时行为不变（CLI/测试路径）。
+   */
+  private readonly courseLock: (<T>(fn: () => Promise<T>) => Promise<T>) | undefined
 
   constructor(
     readonly courseDir: string,
@@ -167,6 +176,8 @@ export class TutorSession {
       systemPrompt?: string
       /** Optional preset-level tool mode (for example `general`). */
       toolMode?: string
+      /** RV-12：sync 回写段的课程文件锁（宿主注入 withCourseLock）。 */
+      courseLock?: <T>(fn: () => Promise<T>) => Promise<T>
     } = {},
   ) {
     this.store = new SessionStore(courseDir + '/history')
@@ -187,6 +198,7 @@ export class TutorSession {
     this.eventStore = options.eventStore ?? null
     this.providers = options.providers
     this.toolMode = options.toolMode?.trim() || null
+    this.courseLock = options.courseLock
     this.systemPrompt = options.systemPrompt?.trim() ?? ''
   }
 
@@ -374,7 +386,12 @@ export class TutorSession {
         pending.push(chatLine.parse({ type: 'chat', ts: utcTs(now), role: 'agent', content: visible, mode: this.mode }))
       }
       if (syncPayload !== null) {
-        const syncLines = await this.applier.apply(syncPayload, now)
+        // RV-12：写段上课程锁（若宿主注入了锁）——与 eval 的 SM-2 RMW 串行，
+        // 不再锁外竞争 progress.md。仅包住 applier 的快写，LLM 调用已在之前
+        // 完成，不拉长锁持有时间。
+        const syncLines = this.courseLock === undefined
+          ? await this.applier.apply(syncPayload, now)
+          : await this.courseLock(() => this.applier.apply(syncPayload, now))
         for (const line of syncLines) pending.push(line as unknown as Record<string, unknown>)
       }
       if (this.persistLegacy) await this.store.append(this.sessionId, ...(pending as unknown as HistoryLine[]))

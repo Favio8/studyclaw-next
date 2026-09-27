@@ -63,6 +63,29 @@ describe('SessionEventStore', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('RV-10：文件尾部丢失换行符时，append 补分隔符而不是把新行拼到末行', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-newline-'))
+    const store = new SessionEventStore(root)
+    await store.append('s',
+      { ts: '2026-08-22T12:00:00.000Z', type: 'turn/start', payload: {} },
+      { ts: '2026-08-22T12:00:00.004Z', type: 'turn/end', payload: {} },
+    )
+    const path = store.pathFor('s')
+    // 模拟断电/kill -9 恰好在最后一个 JSON 字节后、尾 \n 前中断（或外部格式化器
+    // 去掉尾换行）：所有行仍是完整 JSON，scanRowsTolerant 判健康。
+    await writeFile(path, (await readFile(path, 'utf8')).replace(/\n$/, ''), 'utf8')
+    // 旧实现在此把新行直接拼到末行 → load 时末行与新行一并被截断丢失。
+    await store.append('s', { ts: '2026-08-22T12:00:01.000Z', type: 'user/input', payload: { content: '继续' } })
+    const rows = await store.load('s')
+    expect(rows.map(row => row.seq)).toEqual([1, 2, 3])
+    expect(rows[2]!.type).toBe('user/input')
+    // 文件是规整的逐行 JSON（末行完整、无粘连）。
+    const text = await readFile(path, 'utf8')
+    expect(text.endsWith('\n')).toBe(true)
+    expect(text.split('\n').filter(line => line.trim() !== '')).toHaveLength(3)
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('appends, validates sequence, and projects an agent session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-'))
     const store = new SessionEventStore(root)

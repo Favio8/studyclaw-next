@@ -313,9 +313,15 @@ export class SessionEventStore {
       if (cacheHit || (rawForHeal !== null && !damaged)) {
         // P0-6：健康路径不再整文件重写（大日志下 O(n)/次且断电丢整本），
         // 改为纯追加 + 每批 fsync——半行损坏在下次读取时被容错截断。
+        // RV-10：但"最后一个 JSON 字节写完、尾 \n 前中断"（断电/kill -9 精确
+        // 卡点，或外部格式化器去掉尾换行）时 scanRowsTolerant 仍判健康——直接
+        // 续写会把新行拼到末行上，下次 load 两行一并被截断：已 fsync 的末行
+        // 与新行静默丢失，再下次 append 走自愈把两行永久丢弃。补一个分隔符，
+        // 让健康判定与实际字节形态一致。
+        const separator = rawForHeal !== null && rawForHeal !== '' && !rawForHeal.endsWith('\n') ? '\n' : ''
         const handle = await open(path, 'a')
         try {
-          await handle.writeFile(chunk, 'utf8')
+          await handle.writeFile(separator + chunk, 'utf8')
           await handle.sync()
         } finally {
           await handle.close()

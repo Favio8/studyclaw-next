@@ -5,7 +5,7 @@
  * emoji 口径（L9）。
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -64,6 +64,28 @@ describe('SyncApplier', () => {
     expect(text).toContain('🟡 50%')
     // 转义序列被还原后再回写，列数保持完整（misattribution 列不缺位）。
     expect(text).toContain('| c_1 | A \\| B | 继承 |')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('RV-12：并发 apply 不互踩临时文件（随机 tmp 名；旧固定名会混合内容或 ENOENT）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-applier-concurrent-'))
+    const courseDir = join(root, 'course')
+    await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
+    const boardPath = join(courseDir, '.studyclaw', 'progress.md')
+    await seedBoard(boardPath)
+    const applier = new SyncApplier(courseDir, courseDir)
+    await Promise.all([
+      applier.apply({ concept_updates: [{ id: 'c_1', score: 1 }], memory_hints: [] }, new Date()),
+      applier.apply({ concept_updates: [{ id: 'c_2', score: 0.5 }], memory_hints: [] }, new Date()),
+    ])
+    const text = await readFile(boardPath, 'utf8')
+    // 最终文件必须是完整规整的表（last-writer-wins 语义可接受，损坏不可接受）。
+    expect(text).toContain('| c_1 |')
+    expect(text).toContain('| c_2 |')
+    expect(text).toContain('| concept_id |')
+    // 无临时文件残留（旧固定名竞态下 rename 失败会留下 .tmp）。
+    const files = await readdir(join(courseDir, '.studyclaw'))
+    expect(files.some(file => file.includes('.tmp'))).toBe(false)
     await rm(root, { recursive: true, force: true })
   })
 })

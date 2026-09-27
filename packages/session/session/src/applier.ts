@@ -249,7 +249,10 @@ function mean(values: number[]): number {
 }
 
 async function atomicWrite(path: string, content: string): Promise<void> {
-  const tmp = path + '.tmp'
+  // RV-12：固定 `path + '.tmp'` 在并发 apply 时互踩——两个写流交错写同一 tmp，
+  // rename 出混合内容或 ENOENT。加 pid + 随机后缀（与 builder progress.ts 的
+  // 随机 tmp 同口径；storage-json atomic.ts 用 uuid）。
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   await writeFile(tmp, content, 'utf8')
   await rename(tmp, path)
 }

@@ -11,6 +11,7 @@ import { AgentLoop, ApprovalQueue, type Agent, type AgentCapability, type AgentE
 import {
   agentToolRegistry,
   resolveSourceRef,
+  withCourseLock,
   type ToolActionContext,
   type ToolActions,
   type ToolHandlerResult,
@@ -470,6 +471,9 @@ export function createLearningAgent(options: LearningAgentOptions): AgentLoop {
         toolMode: context.runtime.preset.id === 'general' ? 'general' : mode,
         ...(approval === undefined ? {} : { approval }),
         toolClientFactory: () => createDeepSeekToolClient(config),
+        // RV-12：聊天 sync 回写与 eval 的 SM-2 RMW 串行竞争同一 progress.md，
+        // 锁外全量写会覆盖锁内更新。注入课程锁，仅包住 sync 快写段。
+        courseLock: <T,>(fn: () => Promise<T>): Promise<T> => withCourseLock(courseDir, fn),
       })
       await session.init()
       const fileContext = await fileContextOf(courseDir, fileRefs)

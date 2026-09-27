@@ -192,6 +192,33 @@ describe('TutorSession chat loop', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('RV-12：sync 回写经注入的 courseLock（与 eval 的 SM-2 RMW 串行，不再锁外竞争）', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    let lockCalls = 0
+    const session = makeSession(courseDir, wsRoot, {
+      rounds: [{
+        text: `讲解完成。${'[STUDYCLAW_SYNC]'}{"_studyclaw_sync":{"concept_updates":[{"id":"c_1","score":0.7}],"memory_hints":[],"changelog":"+ 攻克覆写"}}`,
+      }],
+    }, {
+      new: true,
+      mode: 'socratic',
+      courseLock: async <T,>(fn: () => Promise<T>): Promise<T> => {
+        lockCalls += 1
+        return await fn()
+      },
+    })
+    await session.init()
+
+    const events = []
+    for await (const event of session.chatEvents('继续')) events.push(event)
+    expect(events.some(event => event.kind === 'sync')).toBe(true)
+    // 写段必须走锁（宿主侧注入的是 withCourseLock）。
+    expect(lockCalls).toBe(1)
+    const progress = await readFile(join(courseDir, 'progress.md'), 'utf8')
+    expect(progress).toContain('70%')
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('restores an existing session with its history', async () => {
     const { root, courseDir, wsRoot } = await setup()
     const first = makeSession(courseDir, wsRoot, { rounds: [{ text: '第一轮回答。' }] }, { new: true })

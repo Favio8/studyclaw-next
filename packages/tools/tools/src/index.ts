@@ -42,7 +42,7 @@ export type { ToolStatus } from './result.ts'
 export type { ToolContext } from './handlers.ts'
 export type { ToolActions, ToolActionContext, ToolHandlerResult, ToolProviders } from './handlers.ts'
 export { courseSourceRoot, isInplaceCourse, resolveSourceRef, INPLACE_SOURCE_EXCLUDED_DIRS } from './paths.ts'
-export { withCourseLock } from './handlers.ts'
+export { withCourseLock, parseProgressTable } from './handlers.ts'
 
 /** Assemble the default registry over one course. */
 export function defaultToolRegistry(courseDir: string, workspaceRoot: string): ToolRegistry {

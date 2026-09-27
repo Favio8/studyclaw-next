@@ -4,8 +4,9 @@
  * @module @studyclaw/tools/src/handlers
  */
 
+import { randomBytes } from 'node:crypto'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
 import { ToolRejected } from './result.ts'
 import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
@@ -18,8 +19,12 @@ const courseLocks = new Map<string, Promise<void>>()
 /** FL-36：跨进程文件锁。进程内 Promise 链在"桌面端 + 用户另开 CLI/第二个
  * 宿主"的跨进程并发下完全失效（progress.md 丢更新复发），所以在进程内链的
  * 临界区里再套一层 `<课程>/.studyclaw/course.lock` 文件锁：`wx` 独占创建 +
- * 写入 pid，持有者死亡后由后来者自愈抢走。 */
+ * 写入 pid，持有者死亡后由后来者自愈抢走。
+ * BUG-003/NEW-001：锁令牌改为 `pid:nonce` 并在获取后读回确认——`wx` 成功到
+ * 写入之间锁文件为空，可能被后来者判"陈旧"抢走；nonce 让确认比对可精确判定
+ * 锁是否仍归本进程。NEW-008：轮询改随机化指数退避，高并发不再同频空转。 */
 const COURSE_LOCK_POLL_MS = 40
+const COURSE_LOCK_POLL_MAX_MS = 1_000
 const COURSE_LOCK_TIMEOUT_MS = 30_000
 
 function isPidAlive(pid: number): boolean {
@@ -31,49 +36,78 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function newCourseLockToken(): string {
+  return `${process.pid}:${randomBytes(8).toString('hex')}`
+}
+
+/** 锁文件里解析持有者 pid；兼容旧版纯 pid 格式与新版 `pid:nonce` 格式。 */
+function holderPidFromLock(raw: string): number {
+  const pid = Number.parseInt(raw.trim().split(':')[0] ?? '', 10)
+  return Number.isInteger(pid) && pid > 0 ? pid : 0
+}
+
 /** 锁可否抢走：内容不可读/无 pid、或持有者进程已死。活着则不抢（互斥语义核心）。 */
 async function canStealCourseLock(lockPath: string): Promise<boolean> {
   const raw = await readFile(lockPath, 'utf8').catch(() => null)
   if (raw === null) return true
-  const pid = Number.parseInt(raw.trim(), 10)
-  return !(Number.isInteger(pid) && pid > 0 && pid !== process.pid && isPidAlive(pid))
+  const pid = holderPidFromLock(raw)
+  return !(pid !== 0 && pid !== process.pid && isPidAlive(pid))
 }
 
 async function withCourseFileLock<T>(courseDir: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = join(courseDir, '.studyclaw', 'course.lock')
   await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
   const deadline = Date.now() + COURSE_LOCK_TIMEOUT_MS
+  const token = newCourseLockToken()
+  let backoff = COURSE_LOCK_POLL_MS
   let handle: import('node:fs/promises').FileHandle | null = null
-  while (handle === null) {
-    try {
-      handle = await open(lockPath, 'wx')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      if (await canStealCourseLock(lockPath)) {
-        await rm(lockPath, { force: true })
-        continue
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`课程正被其他 StudyClaw 进程占用（${lockPath}），请稍后重试；若确认无其他实例运行可手动删除该锁文件`)
-      }
-      await new Promise(resolve => setTimeout(resolve, COURSE_LOCK_POLL_MS))
-    }
+  let owned = false
+  const contend = async (): Promise<void> => {
+    // 随机化指数退避：多进程等待时不同频唤醒，避免惊群与 CPU 空转。
+    await new Promise(resolve => setTimeout(resolve, Math.round(backoff * (0.5 + Math.random()))))
+    backoff = Math.min(backoff * 2, COURSE_LOCK_POLL_MAX_MS)
   }
   try {
-    await handle.write(String(process.pid), 0)
-    // 确认窗口：`wx` 成功到写入 pid 之间锁文件可能被后来者判定"陈旧"抢走，
-    // 内容与本进程 pid 不符说明锁已易主，重试获取。
-    const confirm = await readFile(lockPath, 'utf8').catch(() => '')
-    if (confirm.trim() !== String(process.pid)) {
-      await handle.close().catch(() => undefined)
-      handle = null
-      return await withCourseFileLock(courseDir, fn)
+    while (!owned) {
+      try {
+        handle = await open(lockPath, 'wx')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (await canStealCourseLock(lockPath)) {
+          await rm(lockPath, { force: true })
+          continue
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`课程正被其他 StudyClaw 进程占用（${lockPath}），请稍后重试；若确认无其他实例运行可手动删除该锁文件`)
+        }
+        await contend()
+        continue
+      }
+      // 确认窗口：`wx` 成功到写入 token 之间锁文件可能被后来者判定"陈旧"抢走，
+      // 读回内容与本进程 token 不符说明文件已被抢占者 rm 重建（我们的句柄指向
+      // 已删除的 inode）——此时绝不能 rm lockPath（那是别人的锁），只关句柄
+      // 退避重试。迭代而非递归：反复抢占下不会栈溢出。
+      await handle.write(token, 0)
+      await handle.sync().catch(() => undefined)
+      const confirm = await readFile(lockPath, 'utf8').catch(() => '')
+      if (confirm.trim() === token) {
+        owned = true
+      } else {
+        await handle.close().catch(() => undefined)
+        handle = null
+        if (Date.now() > deadline) {
+          throw new Error(`课程锁竞争激烈（${lockPath}），请稍后重试；若确认无其他实例运行可手动删除该锁文件`)
+        }
+        await contend()
+      }
     }
     return await fn()
   } finally {
     if (handle !== null) {
       await handle.close().catch(() => undefined)
-      await rm(lockPath, { force: true }).catch(() => undefined)
+      // 只有锁内容仍为本进程 token 时才删除，防止误删抢占者后来写入的锁。
+      const current = await readFile(lockPath, 'utf8').catch(() => '')
+      if (current.trim() === token) await rm(lockPath, { force: true }).catch(() => undefined)
     }
   }
 }
@@ -152,11 +186,15 @@ function isWithin(root: string, target: string): boolean {
   return relPath !== '' && relPath !== '..' && !relPath.startsWith('../') && !relPath.startsWith('..\\')
 }
 
-/** Resolve symlinks for generic filesystem tools before reading or writing. */
-async function safeExistingPath(ctx: ToolContext, target: string): Promise<void> {
+/** Resolve symlinks for generic filesystem tools before reading or writing.
+ *  BUG-001/NEW-004（TOCTOU）：返回解析后的真实路径，调用方必须用它完成后续
+ *  IO——只校验不返回时，"检查用解析路径、使用用原始路径"之间符号链接可被
+ *  替换，攻击者可在竞态窗口内把读取/写入重定向到工作区外。 */
+async function safeExistingPath(ctx: ToolContext, target: string): Promise<string> {
   const root = await realpath(ctx.workspaceRoot)
   const resolved = await realpath(target)
   if (!isWithin(root, resolved)) throw new ToolRejected('路径不能通过符号链接越界')
+  return resolved
 }
 
 async function safeWriteParent(ctx: ToolContext, target: string): Promise<string> {
@@ -167,7 +205,7 @@ async function safeWriteParent(ctx: ToolContext, target: string): Promise<string
     if (info !== null) {
       const resolved = await realpath(parent)
       if (!isWithin(root, resolved) && resolved !== root) throw new ToolRejected('路径不能通过符号链接越界')
-      return parent
+      return resolved
     }
     const next = dirname(parent)
     if (next === parent) throw new ToolRejected('工作区父目录不存在')
@@ -180,9 +218,12 @@ export async function handlerReadFile(ctx: ToolContext, args: Record<string, unk
   const path = workspacePath(ctx, String(args['path']))
   const info = await stat(path).catch(() => null)
   if (info === null || !info.isFile()) throw new ToolRejected('文件不存在')
-  await safeExistingPath(ctx, path)
-  if (info.size > Number(args['maxBytes'] ?? MAX_FILE_BYTES)) throw new ToolRejected('文件超过读取上限')
-  const content = await readFile(path, 'utf8')
+  // BUG-001：读取（含大小复核）全程使用解析后的真实路径。
+  const safePath = await safeExistingPath(ctx, path)
+  const safeInfo = await stat(safePath)
+  if (!safeInfo.isFile()) throw new ToolRejected('文件不存在')
+  if (safeInfo.size > Number(args['maxBytes'] ?? MAX_FILE_BYTES)) throw new ToolRejected('文件超过读取上限')
+  const content = await readFile(safePath, 'utf8')
   return [`已读取 ${relative(ctx.workspaceRoot, path).replaceAll('\\', '/')}`, { path: relative(ctx.workspaceRoot, path).replaceAll('\\', '/'), content }]
 }
 
@@ -190,17 +231,26 @@ export async function handlerReadFile(ctx: ToolContext, args: Record<string, unk
 export async function handlerSearchFiles(ctx: ToolContext, args: Record<string, unknown>): Promise<ToolHandlerResult> {
   const query = String(args['query']).trim()
   const root = workspacePath(ctx, String(args['path'] ?? '.'))
+  // 与 safeExistingPath 同法：搜索根目录必须 realpath 解析后复核包含关系。
+  // 词法校验（resolve+relative）挡不住指向工作区外的目录符号链接/junction，
+  // readdir 会跟随根链接列出外部条目、readFile 读出外部内容回灌给模型。
+  const safeRoot = await realpath(root)
+  const realWorkspaceRoot = await realpath(ctx.workspaceRoot)
+  if (!isWithin(realWorkspaceRoot, safeRoot) && safeRoot !== realWorkspaceRoot) throw new ToolRejected('路径不能通过符号链接越界')
   const maxResults = Number(args['maxResults'] ?? 50)
   const matches: Array<{ path: string; line: number; text: string }> = []
   const walk = async (dir: string): Promise<void> => {
     // PERF-11：整树扫描必须感知取消，超时/停止后不再继续烧 CPU/IO。
     if (ctx.signal?.aborted) return
     for (const entry of await readdir(dir, { withFileTypes: true })) {
+      // NEW-006：每个条目前都检查取消；进行中的文件读取也挂上 signal，
+      // 大文件扫描在回合取消后立即停止而不是读完全量。
+      if (ctx.signal?.aborted) return
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) await walk(path)
       else if (entry.isFile() && /\.(md|txt|json|ts|tsx|js|jsx|yaml|yml)$/i.test(entry.name)) {
-        const text = await readFile(path, 'utf8').catch(() => '')
+        const text = await readFile(path, { encoding: 'utf8', ...(ctx.signal === undefined ? {} : { signal: ctx.signal }) }).catch(() => '')
         for (const [index, line] of text.split(/\r?\n/).entries()) {
           if (!line.toLowerCase().includes(query.toLowerCase())) continue
           matches.push({ path: relative(ctx.workspaceRoot, path).replaceAll('\\', '/'), line: index + 1, text: line.trim() })
@@ -210,19 +260,27 @@ export async function handlerSearchFiles(ctx: ToolContext, args: Record<string, 
       if (matches.length >= maxResults) return
     }
   }
-  await walk(root)
+  await walk(safeRoot)
   return [`找到 ${matches.length} 处匹配`, { matches, truncated: matches.length >= maxResults }]
 }
 
 /** Generic DSH-style write_file tool; the registry approval gate runs first. */
 export async function handlerWriteFile(ctx: ToolContext, args: Record<string, unknown>): Promise<ToolHandlerResult> {
   const path = workspacePath(ctx, String(args['path']))
+  // BUG-001：先校验祖先目录，mkdir 后再复核直接父目录，写盘一律使用解析后
+  // 的真实路径，压缩符号链接替换的竞态窗口。
   await safeWriteParent(ctx, path)
-  await mkdir(join(path, '..'), { recursive: true })
-  await safeWriteParent(ctx, path)
-  const existing = await stat(path).catch(() => null)
-  if (existing !== null) await safeExistingPath(ctx, path)
-  await writeFile(path, String(args['content']), 'utf8')
+  await mkdir(dirname(path), { recursive: true })
+  const safeParent = await safeWriteParent(ctx, path)
+  const safePath = join(safeParent, basename(path))
+  const existing = await stat(safePath).catch(() => null)
+  if (existing !== null) {
+    // 既有文件可能是符号链接：解析并复核真实路径后再写。
+    const resolved = await safeExistingPath(ctx, safePath)
+    await writeFile(resolved, String(args['content']), 'utf8')
+  } else {
+    await writeFile(safePath, String(args['content']), 'utf8')
+  }
   return [`已写入 ${relative(ctx.workspaceRoot, path).replaceAll('\\', '/')}`, { path: relative(ctx.workspaceRoot, path).replaceAll('\\', '/'), bytes: Buffer.byteLength(String(args['content']), 'utf8') }]
 }
 
@@ -347,17 +405,26 @@ function noteLineTs(): string {
 /** `read_source`: line-range read of one source file (limits + UTF-8 guard). */
 export async function handlerReadSource(ctx: ToolContext, args: Record<string, unknown>): Promise<[string, Record<string, unknown>]> {
   const path = await resolveSourceRef(ctx.courseDir, String(args['path']))
-  if (!(await stat(path).catch(() => null))?.isFile()) {
+  // BUG-001 同类：resolveSourceRef 只做字符串前缀包含校验，不解析符号链接——
+  // 课程目录里的符号链接文件或中间目录 junction 可把读取引到课程根之外。
+  // 解析真实路径并复核包含关系后，后续 stat/读取全程使用真实路径。
+  const sourceRoot = await courseSourceRoot(ctx.courseDir)
+  const realRoot = await realpath(sourceRoot).catch(() => sourceRoot)
+  const realPath = await realpath(path).catch(() => null)
+  if (realPath === null || !isWithin(realRoot, realPath)) {
+    throw new ToolRejected('路径不能通过符号链接越界')
+  }
+  if (!(await stat(realPath).catch(() => null))?.isFile()) {
     throw new ToolRejected(`文件不存在: ${rel(await courseSourceRoot(ctx.courseDir), path)}`)
   }
   const suffix = path.toLowerCase().match(/\.[^.]*$/)?.[0]
   if (suffix !== '.md' && suffix !== '.txt') {
     throw new ToolRejected(`暂不支持读取该文件类型: ${rel(await courseSourceRoot(ctx.courseDir), path)}`)
   }
-  const size = (await stat(path)).size
+  const size = (await stat(realPath)).size
   if (size > MAX_FILE_BYTES) throw new ToolRejected(`文件过大（>${MAX_FILE_BYTES / 1024}KB），请用 search_sources 精确定位`)
   const rootForRead = await courseSourceRoot(ctx.courseDir)
-  const text = await readFile(path, 'utf8').catch(() => { throw new ToolRejected(`课程文件不是 UTF-8 文本: ${rel(rootForRead, path)}`) })
+  const text = await readFile(realPath, 'utf8').catch(() => { throw new ToolRejected(`课程文件不是 UTF-8 文本: ${rel(rootForRead, path)}`) })
   const lines = text.split(/\r?\n/)
   const total = lines.length
   const start = Math.max(1, Number(args['startLine'] ?? 1))
@@ -382,7 +449,6 @@ export async function handlerReadSource(ctx: ToolContext, args: Record<string, u
 }
 
 async function* iterSourceFiles(root: string, signal?: AbortSignal): AsyncGenerator<string> {
-  const excluded = new Set<string>()
   const stack = [root]
   while (stack.length > 0) {
     // PERF-11：感知取消——超时后的扫描不再空转。
@@ -398,7 +464,7 @@ async function* iterSourceFiles(root: string, signal?: AbortSignal): AsyncGenera
       if (entry.name.startsWith('.')) continue
       if (entry.isSymbolicLink()) continue
       if (entry.isDirectory()) {
-        if (!excluded.has(entry.name)) stack.push(join(current, entry.name))
+        stack.push(join(current, entry.name))
         continue
       }
       if (entry.isFile()) yield join(current, entry.name)
@@ -424,7 +490,8 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   // 二进制/富文档无法按行 utf8 grep，静默读会产生乱码匹配；显式跳过并上报。
   const BINARY_SOURCE_RE = /\.(pdf|docx?|pptx?|xlsx?|rtf|odt)$/i
   for await (const path of iterSourceFiles(root, ctx.signal)) {
-    if (ctx.signal?.aborted) break
+    // 达到上限后必须整树退出：break 只能跳出当前文件的行循环。
+    if (ctx.signal?.aborted || matches.length >= maxResults) break
     const parts = relative(root, path).split(/[\\/]/)
     if (inplace && parts.some(part => INPLACE_SOURCE_EXCLUDED_DIRS.has(part))) continue
     if ((await stat(path)).size > MAX_FILE_BYTES) { skippedOversize += 1; continue }
@@ -450,35 +517,84 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   return [`关键词 ${query}：${total} 处匹配（扫描 ${filesScanned} 个文件${skippedNote}）`, { matches, filesScanned, totalMatches: total, truncated, skippedOversize }]
 }
 
-/** progress.md concept rows: `| id | name | chapter | mastery | ... |`. */
-function parseProgressTable(text: string): Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; nextReviewAt: string | null }> {
-  const rows: Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; nextReviewAt: string | null }> = []
+/** F-11 转义感知的单元格拆分，与 course-builder progress.ts 写侧的 escapeCell
+ *  配对。tools 包不能依赖 builder（依赖环，见 paths.ts 的同一取舍），本地维护
+ *  同一拆分器。旧实现裸 split('|') 有两个后果：名字/章节含转义 `\|` 的行整行
+ *  错位；next_review_at 读成 misattribution 列（差一列），到期概念判定恒错。 */
+function splitProgressCells(row: string): string[] {
+  const cells: string[] = []
+  let current = ''
+  let escaped = false
+  for (const ch of row) {
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === '|') {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (escaped) current += '\\'
+  cells.push(current.trim())
+  return cells
+}
+
+/** progress.md concept rows: `| id | name | chapter | mastery | ... |`.
+ *  导出供 session/context 等读侧复用——此前各处手写解析，emoji 掌握度单元格
+ *  `Number('🟢 80')` → NaN 的错法只在部分文件修过（F-11 家族）。 */
+export function parseProgressTable(text: string): Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; passRate: number; nextReviewAt: string | null }> {
+  const rows: Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; passRate: number; nextReviewAt: string | null }> = []
   const lines = text.split(/\r?\n/)
   let inTable = false
   for (const line of lines) {
     const trimmed = line.trim()
     if (trimmed.startsWith('|') && trimmed.includes('concept_id')) { inTable = true; continue }
     if (!inTable) continue
-    if (!trimmed.startsWith('|')) break
-    const cells = trimmed.split('|').map(cell => cell.trim())
-    // split('|') keeps a leading empty cell: [ '', id, name, chapter, mastery, evals, ... ]
-    if (cells.length < 6) continue
-    const separator = cells.slice(1).join('').replace(/[-\s:]/g, '')
+    // F-11：遇非表格行不 break——旧版本写入的含换行备注之后可能还有概念行。
+    if (!trimmed.startsWith('|')) continue
+    const body = trimmed.slice(1, trimmed.endsWith('|') ? -1 : undefined)
+    const cells = splitProgressCells(body)
+    const separator = cells.join('').replace(/[-\s:]/g, '')
     if (separator === '') continue
-    const masteryRaw = cells[4] ?? '0'
-    const mastery = masteryRaw.endsWith('%')
-      ? Math.min(1, Number(masteryRaw.slice(0, -1)) / 100)
+    if (cells.length < 8) continue
+    // 列序对齐 builder 的 COLUMNS：concept_id, name, chapter, mastery, evals,
+    // pass_rate, ef, next_review_at, misattribution, streak。
+    const conceptId = cells[0]!.replace(/^`|`$/g, '').trim()
+    if (conceptId === '') continue
+    // 掌握度单元格是 renderMastery 的产物（`🟢 80%`）：直接 Number('🟢 80')
+    // 是 NaN → 旧实现全部概念按 0 处理，weak 列表恒错。剥离 emoji 前缀再取数。
+    const masteryRaw = cells[3] ?? '0'
+    const masteryMatch = /[🟢🟡🔴]?\s*(\d+(?:\.\d+)?)\s*%/.exec(masteryRaw)
+    const mastery = masteryMatch !== null
+      ? Number(masteryMatch[1]) / 100
       : Number(masteryRaw)
+    const nextReviewRaw = cells[7]?.trim() ?? ''
     rows.push({
-      conceptId: cells[1]!,
-      name: cells[2]!,
-      chapter: cells[3]!,
+      conceptId,
+      name: cells[1] ?? conceptId,
+      chapter: cells[2] ?? '',
       mastery: Number.isFinite(mastery) ? Math.max(0, Math.min(1, mastery)) : 0,
-      evals: Number(cells[5] ?? 0) || 0,
-      nextReviewAt: cells.length > 9 ? cells[9]! : null,
+      evals: Number(cells[4] ?? 0) || 0,
+      passRate: parsePercentCell(cells[5] ?? ''),
+      nextReviewAt: nextReviewRaw !== '' && nextReviewRaw !== '-' ? nextReviewRaw : null,
     })
   }
   return rows
+}
+
+/** pass_rate 单元格：`75%` → 0.75；无百分号的裸数按 0 处理（写侧恒带 %）。 */
+function parsePercentCell(cell: string): number {
+  const match = /(\d+(?:\.\d+)?)\s*%/.exec(cell)
+  if (match === null) return 0
+  return Math.min(1, Number(match[1]) / 100)
 }
 
 /** `get_course_state`: syllabus + mastery board + due/weak summary. */

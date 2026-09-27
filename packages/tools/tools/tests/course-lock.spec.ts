@@ -92,4 +92,33 @@ describe('withCourseLock', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('NEW-001 回归：pid:nonce 格式的陈旧锁同样被自愈抢走且临界区后清理', async () => {
+    const dir = await makeCourseDir()
+    try {
+      const lockDir = join(dir, '.studyclaw')
+      await mkdir(lockDir, { recursive: true })
+      await writeFile(join(lockDir, 'course.lock'), '999999999:deadbeefdeadbeef', 'utf8')
+      const result = await withCourseLock(dir, async () => 'acquired')
+      expect(result).toBe('acquired')
+      expect(await readFile(join(lockDir, 'course.lock'), 'utf8').then(() => true, () => false)).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('NEW-001 回归：临界区期间锁文件持有本进程 pid:nonce 令牌', async () => {
+    const dir = await makeCourseDir()
+    try {
+      let content = ''
+      await withCourseLock(dir, async () => {
+        content = await readFile(join(dir, '.studyclaw', 'course.lock'), 'utf8')
+      })
+      // 令牌 = `pid:nonce`：确认窗口以内容精确比对锁归属，纯 pid 会被回收复用。
+      expect(content.trim().startsWith(`${process.pid}:`)).toBe(true)
+      expect(content.trim().length).toBeGreaterThan(String(process.pid).length + 1)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

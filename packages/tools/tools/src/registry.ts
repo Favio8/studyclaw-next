@@ -520,6 +520,9 @@ async function withTimeout<T>(
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     parentSignal?.removeEventListener('abort', onParentAbort)
+    // M5：超时/取消胜出后，不响应 AbortSignal 的 handler 迟到 reject 不能成为
+    // unhandledRejection（Node 默认会打崩宿主进程）。已结算时此 catch 是 no-op。
+    promise.catch(() => undefined)
   }
 }
 

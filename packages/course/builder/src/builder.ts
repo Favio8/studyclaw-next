@@ -446,7 +446,7 @@ export class CourseBuilder {
     await withCourseLock(this.courseDir, async () => {
       await this.updateTaskPool([...report.added, ...report.modified], report)
       report.tasksGenerated = await this.mergeTasks(gate.kept)
-      await this.mergeSyllabus(artifacts, report)
+      await this.mergeSyllabus(artifacts, report, new Set(Object.keys(current)))
     })
     if (onProgress !== undefined) onProgress(changedFiles.length, changedFiles.length, '')
 
@@ -499,7 +499,7 @@ export class CourseBuilder {
         report.degraded.push(name)
       }
     }
-    await withCourseLock(this.courseDir, () => this.mergeSyllabus(artifacts, report))
+    await withCourseLock(this.courseDir, () => this.mergeSyllabus(artifacts, report, new Set(Object.keys(current))))
     await this.applyDependencyInference(artifacts, report)
     await withCourseLock(this.courseDir, async () => {
       report.conceptsSeeded = await this.seedProgress()
@@ -550,11 +550,21 @@ export class CourseBuilder {
     if (kept.length !== pool.length) await writeTaskPool(this.courseDir, kept)
   }
 
-  private async mergeSyllabus(artifacts: IngestArtifact[], report: BuildReport): Promise<void> {
+  private async mergeSyllabus(artifacts: IngestArtifact[], report: BuildReport, presentFiles: ReadonlySet<string>): Promise<void> {
     const path = join(stateDirOf(this.courseDir), 'syllabus.json')
     const existing = await loadSyllabus(this.courseDir)
-    const byId = new Map(existing.chapters.map((chapter, index) => [chapter.id, index]))
-    const merged: Chapter[] = [...existing.chapters]
+    // A1/T-20 迁移面：源文件已不在课程里的章节一并清掉。旧实现只退役题卡，
+    // 章节永远留在 syllabus 里——僵尸行污染大纲与依赖图，且它占用的 concept id
+    // 别的资料再也拿不到（T-20 的跨资料 id 预留会一直给后来者留 _2 后缀）。
+    // 只清理**有 source_file 标记**且该文件已消失的章节；旧版无标记的章节无法
+    // 归属，保守保留（末尾的迁移提示引导全量重建补齐标记）。progress.md 的
+    // 孤儿行由 seedProgress 负责清（它按"概念不在大纲里"过滤）。
+    const alive = (chapter: Chapter): boolean =>
+      chapter.source_file === undefined || presentFiles.has(chapter.source_file)
+    const keptExisting = existing.chapters.filter(alive)
+    const dropped = existing.chapters.length - keptExisting.length
+    const byId = new Map(keptExisting.map((chapter, index) => [chapter.id, index]))
+    const merged: Chapter[] = [...keptExisting]
     let grew = false
     for (const artifact of artifacts) {
       for (const chapter of artifact.syllabus.chapters) {
@@ -584,7 +594,7 @@ export class CourseBuilder {
         }
       }
     }
-    if (!grew) return
+    if (!grew && dropped === 0) return
     const newVersion = (await stat(path).catch(() => null)) !== null ? bumpPatch(existing.version) : existing.version
     const updated: Syllabus = {
       ...existing,
@@ -597,6 +607,16 @@ export class CourseBuilder {
     if (guarded.issues.length > 0) report.degraded.push('syllabus-quality')
     await atomicWrite(path, JSON.stringify(guarded.syllabus, null, 2) + '\n')
     report.version = updated.version
+    // A1/T-20 迁移提示：仍有无来源标记的章节（T-20 之前构建的课程）。增量
+    // build 的跨资料 id 预留只认有标记的章节，这些章节在补齐标记前享受不到
+    // 保护；全量重建或切换粒度会重新打标。收敛后本条自然消失。
+    const untagged = guarded.syllabus.chapters.filter(chapter => chapter.source_file === undefined).length
+    if (untagged > 0) {
+      report.degraded.push(
+        `syllabus 有 ${untagged} 个章节缺少来源标记（T-20 之前构建的课程）——增量构建暂无法为它们预留 id，`
+        + '建议执行一次全量重建或切换粒度补齐归属',
+      )
+    }
   }
 
   /**

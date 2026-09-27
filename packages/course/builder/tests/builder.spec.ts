@@ -152,6 +152,50 @@ describe('CourseBuilder', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('A1/T-20 迁移面：源文件删除后其章节一并清理（id 归还、无僵尸行）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, 'sources', 'a.md'), '# 讲义A\n\n## 概述\n\nA 的概述内容。\n', 'utf8')
+    await writeFile(join(courseDir, 'sources', 'b.md'), '# 讲义B\n\n## 详解\n\nB 的详解内容。\n', 'utf8')
+    await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+    expect((await loadSyllabus(courseDir)).chapters).toHaveLength(2)
+
+    await rm(join(courseDir, 'sources', 'b.md'), { force: true })
+    const report = await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+    expect(report.removed).toContain('b.md')
+
+    // b.md 的章节被清掉（旧实现只退役题卡，章节永久留着污染大纲/占用 id）。
+    expect((await loadSyllabus(courseDir)).chapters.map(ch => ch.title)).toEqual(['讲义A'])
+    // 原 b.md 占用的 concept id 已归还：新资料再用「详解」拿到干净 id（无 _2）。
+    await writeFile(join(courseDir, 'sources', 'c.md'), '# 讲义C\n\n## 详解\n\nC 的详解内容。\n', 'utf8')
+    await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+    const ids = (await loadSyllabus(courseDir)).chapters.flatMap(ch => ch.concepts.map(c => c.id))
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.some(id => id.endsWith('_2'))).toBe(false)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('A1/T-20 迁移面：旧版无来源标记的章节保守保留并给出迁移提示', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, 'sources', 'a.md'), '# 讲义A\n\n## 概述\n\nA 的概述内容。\n', 'utf8')
+    await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+    // 模拟 T-20 之前构建的课程：抹掉 source_file 标记。
+    const syllabusPath = join(courseDir, '.studyclaw', 'syllabus.json')
+    const legacy = JSON.parse(await readFile(syllabusPath, 'utf8')) as { chapters: Array<Record<string, unknown>> }
+    for (const chapter of legacy.chapters) delete chapter.source_file
+    await writeFile(syllabusPath, JSON.stringify(legacy, null, 2), 'utf8')
+
+    await writeFile(join(courseDir, 'sources', 'b.md'), '# 讲义B\n\n## 详解\n\nB 的详解内容。\n', 'utf8')
+    const report = await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+    // 无法归属的旧章节不清除（误删等于丢掌握度），但给出可操作的迁移提示。
+    expect((await loadSyllabus(courseDir)).chapters.map(ch => ch.title).sort()).toEqual(['讲义A', '讲义B'])
+    expect(report.degraded.some(line => line.includes('缺少来源标记'))).toBe(true)
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('M2：生成失败时旧卡保留、checksums 不落盘（先删后生成回归）', async () => {
     const { root, courseDir, generator } = await setup()
     const builder = new CourseBuilder(courseDir, generator)

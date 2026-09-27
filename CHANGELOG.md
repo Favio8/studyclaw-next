@@ -8,7 +8,68 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+发布后第五轮对抗性审查修复（P0+P1 共 20 项，全部配回归测试；
+报告见仓库外文档区《对抗性审查报告_2026-09-27_第五轮》）：
+
 ### 修复
+
+- Windows 8.3 短名别名绕过资料目录排除：NTFS 为 `.studyclaw` 等长名自动
+  生成 `STUDYC~1` 别名，Node realpath 不展开短名、字符串 containment 放行
+  → 模型可经短名引用直读课程状态文件；`resolveSourceRef` 与通用文件工具
+  统一拒绝 `~数字` 结尾的路径段；
+- `.source-root.json` 绑定目标零校验：被污染的仓库可把资料根指到工作区外
+  越界读取；绑定限定在 courseDir 内，否则忽略回退项目根；
+- progress.md 表头判定误伤数据行：含 `concept_id` 子串的概念行被当表头
+  跳过，eval 时该概念掌握度被静默归零且原行被擦除；三处解析器改首单元格
+  精确判定；
+- 事件日志 append 尾换行丢失：断电/强杀恰落在最后一个 JSON 字节后时，
+  新行与末行拼接、两条事件静默丢失；健康分支落盘前补分隔符；
+- Agent 恢复顺序倒置：「A 在途 + B 排队」的日志恢复后 B 先跑 A 后跑；
+  改单趟有序重建（保留首次入队次序）；
+- 聊天 sync 回写锁外竞争 progress.md：与锁内的 eval SM-2 RMW 并发时锁内
+  更新被陈旧全量写覆盖；TutorSession 增 courseLock 注入点，宿主注入
+  withCourseLock（快写段上锁、LLM 慢调用留在锁外）；
+- chatStream requestId 并发重试双发：两个并发同 requestId 调用基于同一旧
+  快照都通过"未 void"检查并各自 agent.send（重复 user/input + 双倍计费）；
+  判定+新发按 session 串行，且 void 行补带 turnId 收敛链上后到的重试；
+- 明文凭据迁移写锁外回滚新 key：readCredentials 的自动 re-seal 包进凭据锁，
+  拆出 raw 读取供持锁调用方使用（promise 链锁不可重入）；
+- 桌面壳 IPC 透出 Host token：host-info 收敛为 {dev, port}，will-navigate
+  收紧为仅本次 Host 实端口；
+- 桌面壳重启状态机自锁：startHost 加重入保护、重启计时器句柄化并由
+  startHost/stopHost 取关；win32 taskkill 校验退出码；
+- CLI 优雅关停必然残留 host.json（含明文 token）与 host.lock：清理改同步
+  rm，'exit' 处理器路径同样生效；
+- 上传路由客户端断连永不结算：busboy 'close' 在 RST 时不触发，fd 与
+  `.upload-*.tmp` 静默泄漏；请求 close + stall 兜底双路结算；
+- 交互 CLI 跑完进程挂起：stdin resume 后从不释放；unref + prompt 期间
+  ref/结算后 unref；
+- `courses.files` 枚举不走排除目录：就地课程根即项目根，node_modules 被
+  全量 walk；复用排除集 + 深度/数量双上限；
+- 预中止请求仍跑完整回合：入场即 aborted 时直接返回，不死连接白烧 LLM；
+- 动态卡缺答案键校验且绕过质量闸：补 superRefine + enforceTaskQuality，
+  越界/长度失衡卡不再入池；
+- builder atomicWrite 固定 tmp 名并发互踩：随机 tmp；granularity 写段上锁
+  且锁内重读；
+- 批量生成首败即停：一个单元失败后其余 worker 不再白烧剩余 LLM 调用；
+- 唤醒卡作答不传 evalId/signal：SSE 中断重试二次结算且流不可中止；
+- quizLoad 落地前不校验 activeCourseId：切课后旧题卡覆盖新课程；
+- 大文件上传无取消：uploadFiles 支持 AbortSignal，弹窗关闭即中止；
+- `--port abc` 静默回退 8080、`--port 99999` 抛裸栈：统一整数+范围校验；
+  `--port 0` 的 host.lock 回填实际端口；
+- 匿名 eval 账本 write-only 死状态删除；账本落盘失败留告警（静默吞掉会让
+  重试二次计分且无迹可查）。
+
+### 并发与一致性
+
+（同上「修复」中的锁外 RMW 与串行化条目。）
+
+### 内部
+
+- 生成动态卡的 StructuredCallClient 接上 signal 透传缝（工具边界完整穿线
+  为后续重构）。
+
+## [0.1.0-beta] - 2026-09-04
 
 - 子 Agent（`spawn_agent`）运行时必失败：`TutorSession.init` 改为事件日志优先，
   运行时不透明会话 id（`<parent>-child-<ts>`）不再被 legacy 文件名正则拒绝；

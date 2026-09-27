@@ -8,6 +8,32 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+遗留项收尾（2026-09-27，第五轮审查报告登记的全部遗留项）：
+
+### 修复
+
+- A4：对话队列只在**成功**终态 drain——业务 error 帧或网络重试耗尽时，排队
+  消息永久卡死（streaming 已置 false、无任何提示，用户连发多条时后面的几条
+  静默丢失）。统一为"除 abort 外的每个终态都推进队列"，不变量写进代码注释；
+- A1/T-20 迁移面：源文件删除后其章节永远留在 syllabus.json（僵尸行 + id 永久
+  占用）——按 source_file 归属清理，progress.md 孤儿行由 seedProgress 接着清；
+  T-20 之前构建的课程无来源标记，保守保留并在 report.degraded 给出"全量重建
+  补齐归属"的迁移提示；
+- 加固3：`courses.ingestUrl` 的内容类型白名单可被"服务端不声明 Content-Type"
+  绕过（二进制进 sources 再喂 LLM）——改为严格拒绝，白名单收敛为文本类集合，
+  拒绝时不落任何文件；
+- C-10：POSIX 上桌面壳给 Host 的兜底强杀宽限 3s 小于 Host 自身 5s 关停兜底，
+  host.json/host.lock 必然残留——宽限改 6s。
+
+### 测试与 CI
+
+- serve 集成补裸 socket 穿越用例 + dist 上一级金丝雀文件（变异验证过：删掉
+  根包含校验立刻红），补 desktop-smoke job（Windows）与 desktop-smoke-macos
+  job（覆盖 POSIX 退出分支）；
+- GitHub Actions 全部升级到 node24 运行时（checkout v5 / setup-node v5 /
+  upload-artifact v6 / download-artifact v7 / pnpm/action-setup v4.4.0 /
+  action-gh-release v3），消掉 Node 20 弃用警告。
+
 设计决策项收尾（2026-09-27，第五轮审查遗留的三项 T 编号）：
 
 ### 修复

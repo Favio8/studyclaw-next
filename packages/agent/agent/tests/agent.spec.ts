@@ -580,4 +580,66 @@ describe('Agent runtime', () => {
     await agent.dispose()
     await rm(root, { recursive: true, force: true })
   })
+
+  it('RV-11：restore 按原始入队次序重建（中断回合先于后入队的回合，不再倒置）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-restore-order-'))
+    const events = new SessionEventStore(join(root, 'history'))
+    // 持久化日志序：A 入队 → A 出队（崩溃时在途）→ B 入队（等待）。
+    // 旧实现 [...queued, ...interrupted] 重建出 pending=[B,A]——B 先跑。
+    await events.append('restore-order-session',
+      { ts: '2026-09-27T12:00:00.000Z', type: 'inbox/queued', payload: { turnId: 'A', target: 'next-turn', content: 'A' } },
+      { ts: '2026-09-27T12:00:00.001Z', type: 'inbox/dequeued', payload: { turnId: 'A', target: 'next-turn', content: 'A' } },
+      { ts: '2026-09-27T12:00:00.002Z', type: 'inbox/queued', payload: { turnId: 'B', target: 'next-turn', content: 'B' } },
+    )
+    const order: string[] = []
+    const agent = new Agent({
+      agentId: 'restore-order-agent',
+      sessionId: 'restore-order-session',
+      events,
+      runner: async function* (input) {
+        order.push(input.content)
+        yield { type: 'assistant/message', payload: { content: `done:${input.content}` } }
+      },
+    })
+    await agent.restore()
+    await agent.whenIdle()
+    expect(order).toEqual(['A', 'B'])
+    await agent.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('RV-13：清理路径的 best-effort 审计行写失败时被吞（不升级 unhandledRejection 打崩宿主）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-agent-appendfail-'))
+    const events = new SessionEventStore(join(root, 'history'))
+    const agent = new Agent({
+      agentId: 'appendfail-agent',
+      sessionId: 'appendfail-session',
+      events,
+      // 挂起不退出的 runner：让首条 send 成为 active turn，inbox.append 入队第二条。
+      // 预检 aborted：cancel 可能在 runner 附着监听器之前触发（pump 前置审计行
+      // 尚未跑完），无预检则 promise 永不 settle、whenIdle 永久挂起。
+      runner: async function* (_input, context) {
+        if (context.signal.aborted) return
+        await new Promise<void>(resolve => context.signal.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    })
+    agent.send({ content: 'active' })
+    // 首条成为 active（runner 挂起等 abort）；第二条入队等待。
+    agent.inbox.append('next-turn', { content: 'queued-behind-active' })
+    expect(agent.status.queued).toBe(1)
+    // 仅让 inbox/dropped 的写入失败（模拟磁盘满/文件锁）： awaited 的审计行
+    // （turn/cancelled 等）不受影响，只有 void 发射的清理行必须被吞掉。
+    const realAppend = events.append.bind(events)
+    events.append = async (sessionId, ...rest) => {
+      if (rest[0]?.type === 'inbox/dropped') throw new Error('ENOSPC simulated')
+      return await realAppend(sessionId, ...rest)
+    }
+    // cancel(keepInbox:false) 清空排队项 → 走 appendQuietly('inbox/dropped')。
+    await agent.cancel({ keepInbox: false, cause: 'user' })
+    expect(agent.status.queued).toBe(0)
+    await agent.whenIdle()
+    events.append = realAppend
+    await agent.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
 })

@@ -505,7 +505,7 @@ export class Agent {
     const entry = [...this.pending, ...this.nextStep].find(item => item.turnId === turnId)
     if (entry === undefined) return false
     entry.input = input
-    void this.append('inbox/replaced', {
+    this.appendQuietly('inbox/replaced', {
       content: input.content,
       mode: input.mode ?? null,
       metadata: input.metadata ?? {},
@@ -523,7 +523,7 @@ export class Agent {
     const entry = remove(this.pending) ?? remove(this.nextStep)
     if (entry === undefined) return false
     entry.queue.close(new Error('Agent turn removed'))
-    void this.append('inbox/dropped', { reason: 'removed' }, turnId)
+    this.appendQuietly('inbox/dropped', { reason: 'removed' }, turnId)
     this.resolveIdle()
     return true
   }
@@ -531,11 +531,11 @@ export class Agent {
   private clearQueued(reason: string): void {
     for (const entry of this.pending.splice(0)) {
       entry.queue.close(new Error('Agent turn cleared'))
-      void this.append('inbox/dropped', { reason }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason }, entry.turnId)
     }
     for (const entry of this.nextStep.splice(0)) {
       entry.queue.close(new Error('Agent turn cleared'))
-      void this.append('inbox/dropped', { reason }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason }, entry.turnId)
     }
     this.wakeRequested = false
     this.resolveIdle()
@@ -592,11 +592,11 @@ export class Agent {
     if (!options.keepInbox) {
       for (const entry of this.pending.splice(0)) {
         entry.queue.close(new Error('Agent turn cancelled'))
-        void this.append('inbox/dropped', { reason: options.cause ?? 'user' }, entry.turnId)
+        this.appendQuietly('inbox/dropped', { reason: options.cause ?? 'user' }, entry.turnId)
       }
       for (const entry of this.nextStep.splice(0)) {
         entry.queue.close(new Error('Agent turn cancelled'))
-        void this.append('inbox/dropped', { reason: options.cause ?? 'user' }, entry.turnId)
+        this.appendQuietly('inbox/dropped', { reason: options.cause ?? 'user' }, entry.turnId)
       }
       this.wakeRequested = false
     }
@@ -616,12 +616,12 @@ export class Agent {
     let removed = 0
     for (const entry of this.pending.splice(0)) {
       entry.queue.close(new Error('Agent turn cleared'))
-      void this.append('inbox/dropped', { reason: cause }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason: cause }, entry.turnId)
       removed += 1
     }
     for (const entry of this.nextStep.splice(0)) {
       entry.queue.close(new Error('Agent turn cleared'))
-      void this.append('inbox/dropped', { reason: cause }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason: cause }, entry.turnId)
       removed += 1
     }
     this.wakeRequested = false
@@ -687,11 +687,11 @@ export class Agent {
     this.disposed = true
     for (const entry of this.pending.splice(0)) {
       entry.queue.close(new Error('Agent disposed'))
-      void this.append('inbox/dropped', { reason: 'disposed' }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason: 'disposed' }, entry.turnId)
     }
     for (const entry of this.nextStep.splice(0)) {
       entry.queue.close(new Error('Agent disposed'))
-      void this.append('inbox/dropped', { reason: 'disposed' }, entry.turnId)
+      this.appendQuietly('inbox/dropped', { reason: 'disposed' }, entry.turnId)
     }
     // Parked injected context is intentionally retained for replay/inspection;
     // disposal must not turn accepted tool results into dropped user work.
@@ -718,53 +718,49 @@ export class Agent {
     }
     if (!this.restored) {
       const rows = await this.options.events.load(this.options.sessionId)
-      const queued = new Map<string, { input: AgentTurnInput; target: InboxTarget; contextOnly?: boolean }>()
-      const interrupted = new Map<string, { input: AgentTurnInput; target: InboxTarget; contextOnly?: boolean }>()
+      // RV-11：单趟有序重建。旧实现用 queued/interrupted 两个 Map，最后以
+      // [...queued, ...interrupted] 拼接——"未出队的"排在"中断恢复的"前面，
+      // 日志序「A 入队→A 出队（崩溃时在途）→B 入队」恢复后 pending=[B,A]：
+      // 后入队的 B 先跑、在途的 A 后跑，用户消息的处理顺序被颠倒（事件日志
+      // 的 user/input 序与回复落库序错位）。现在用单个 Map 保留首次入队次序
+      // （inbox/replaced 只更新内容、不改次序），终态事件标记 done 跳过。
+      type RestoredItem = { input: AgentTurnInput; target: InboxTarget; contextOnly?: boolean }
+      const readItem = (row: (typeof rows)[number]): RestoredItem => ({
+        target: row.payload['target'] === 'next-step' ? 'next-step' : 'next-turn',
+        ...(row.payload['contextOnly'] === true ? { contextOnly: true } : {}),
+        input: {
+          content: String(row.payload['content'] ?? ''),
+          ...(typeof row.payload['mode'] === 'string' ? { mode: row.payload['mode'] } : {}),
+          ...(typeof row.payload['metadata'] === 'object' && row.payload['metadata'] !== null ? { metadata: row.payload['metadata'] as Record<string, unknown> } : {}),
+        },
+      })
+      const items = new Map<string, RestoredItem>()
+      const done = new Set<string>()
+      const dequeued = new Set<string>()
       for (const row of rows) {
         const turnId = typeof row.payload['turnId'] === 'string' ? row.payload['turnId'] : ''
         if (turnId === '') continue
         if (row.type === 'inbox/queued') {
-          const item: { target: InboxTarget; input: AgentTurnInput; contextOnly?: boolean } = {
-            target: row.payload['target'] === 'next-step' ? 'next-step' : 'next-turn',
-            ...(row.payload['contextOnly'] === true ? { contextOnly: true } : {}),
-            input: {
-              content: String(row.payload['content'] ?? ''),
-              ...(typeof row.payload['mode'] === 'string' ? { mode: row.payload['mode'] } : {}),
-              ...(typeof row.payload['metadata'] === 'object' && row.payload['metadata'] !== null ? { metadata: row.payload['metadata'] as Record<string, unknown> } : {}),
-            },
-          }
-          queued.set(turnId, item)
+          // 同 turnId 重新入队（终态后复活）：清除终态标记，Map 位置保持首入次序。
+          done.delete(turnId)
+          items.set(turnId, readItem(row))
         } else if (row.type === 'inbox/dequeued') {
-          const item = queued.get(turnId)
-          if (item !== undefined) {
-            queued.delete(turnId)
-            interrupted.set(turnId, item)
-          } else {
-            interrupted.set(turnId, {
-              target: (row.payload['target'] === 'next-step' ? 'next-step' : 'next-turn') as InboxTarget,
-              input: { content: String(row.payload['content'] ?? ''), ...(typeof row.payload['metadata'] === 'object' && row.payload['metadata'] !== null ? { metadata: row.payload['metadata'] as Record<string, unknown> } : {}) },
-            })
-          }
+          dequeued.add(turnId)
+          // queued 行缺失（损坏/旧版）时从 dequeued 行本身合成条目。
+          if (!items.has(turnId)) items.set(turnId, readItem(row))
         } else if (row.type === 'inbox/replaced') {
-          const target = queued.get(turnId) ?? interrupted.get(turnId)
-          if (target !== undefined) {
-            target.input = {
-              content: String(row.payload['content'] ?? ''),
-              ...(typeof row.payload['mode'] === 'string' ? { mode: row.payload['mode'] } : {}),
-              ...(typeof row.payload['metadata'] === 'object' && row.payload['metadata'] !== null ? { metadata: row.payload['metadata'] as Record<string, unknown> } : {}),
-            }
-          }
+          const existing = items.get(turnId)
+          if (existing !== undefined) existing.input = readItem(row).input
         } else if (row.type === 'inbox/admitted' || row.type === 'inbox/dropped' || row.type === 'turn/end' || row.type === 'turn/error' || row.type === 'turn/cancelled') {
-          queued.delete(turnId)
-          interrupted.delete(turnId)
+          done.add(turnId)
           if (row.type !== 'inbox/dropped') this.completedTurnIds.add(turnId)
         } else if (row.type === 'agent/context') {
-          queued.delete(turnId)
-          interrupted.delete(turnId)
+          done.add(turnId)
         }
       }
-      for (const [turnId, item] of [...queued, ...interrupted]) {
-        const entry: QueueEntry = { turnId, input: item.input, target: item.target, ...(item.contextOnly === true ? { contextOnly: true } : {}), queue: new AsyncEventQueue<AgentEvent>(), recovered: interrupted.has(turnId), persisted: Promise.resolve() }
+      for (const [turnId, item] of items) {
+        if (done.has(turnId)) continue
+        const entry: QueueEntry = { turnId, input: item.input, target: item.target, ...(item.contextOnly === true ? { contextOnly: true } : {}), queue: new AsyncEventQueue<AgentEvent>(), recovered: dequeued.has(turnId), persisted: Promise.resolve() }
         if (item.contextOnly) this.injected.push(entry)
         else if (item.target === 'next-step') this.nextStep.push(entry)
         else this.pending.push(entry)
@@ -845,7 +841,7 @@ export class Agent {
       entry.queue.push({ agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: entry.turnId, type: 'turn/cancelled', payload: cancelledPayload, seq: cancelled.seq })
       if (activeSteering !== null) {
         activeSteering.queue.push({ agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: activeSteering.turnId, type: 'turn/cancelled', payload: cancelledPayload, seq: cancelled.seq })
-        void this.append('inbox/dropped', { reason: 'cancelled' }, activeSteering.turnId)
+        this.appendQuietly('inbox/dropped', { reason: 'cancelled' }, activeSteering.turnId)
         activeSteering.queue.close()
         activeSteering = null
       }
@@ -1026,7 +1022,7 @@ export class Agent {
       }
       if (activeSteering !== null) {
         activeSteering.queue.push({ agentId: this.options.agentId, sessionId: this.options.sessionId, turnId: activeSteering.turnId, type: 'turn/error', payload: { message }, seq: row.seq })
-        void this.append('inbox/dropped', { reason: 'error' }, activeSteering.turnId)
+        this.appendQuietly('inbox/dropped', { reason: 'error' }, activeSteering.turnId)
         activeSteering.queue.close(error)
         activeSteering = null
       }
@@ -1070,6 +1066,17 @@ export class Agent {
 
   private async append(type: string, payload: Record<string, unknown>, turnId?: string): Promise<SessionEventEnvelope> {
     return (await this.options.events.append(this.options.sessionId, { ts: utcTs(), type, payload: turnId === undefined ? payload : { ...payload, turnId } }))[0]!
+  }
+
+  /**
+   * RV-13：best-effort 审计行（清理路径的 inbox/dropped、inbox/replaced 等）。
+   * `this.appendQuietly(...)` 在磁盘满/Windows 文件锁重试耗尽/只读目录等 I/O
+   * 失败时会升级为 unhandledRejection——bin.ts 未安装全局兜底，Node 15+ 默认
+   * 行为即终止进程：Host 会在 cancel/dispose/remove 的清理路径上被自己的审计
+   * 写入打崩，在途回合全丢。清理路径的审计丢失可恢复，进程崩溃不可恢复。
+   */
+  private appendQuietly(type: string, payload: Record<string, unknown>, turnId?: string): void {
+    void this.append(type, payload, turnId).catch(() => undefined)
   }
 
   private async *replayTurn(turnId: string): AsyncIterable<AgentEvent> {

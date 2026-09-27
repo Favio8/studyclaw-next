@@ -6,7 +6,7 @@
 ## 0. 前置检查（每次发布前）
 
 ```bash
-cd D:\AAA_Favio\AI_exploring\projects\studyclaw-ai\studyclaw-next
+# 以下命令都在仓库根目录（clone 下来的 studyclaw-next/）执行
 git status --porcelain          # 必须为空
 git log --oneline -3            # 确认 HEAD 是待发布提交
 node_modules/.bin/tsc.cmd -b tsconfig.json   # 0 错误

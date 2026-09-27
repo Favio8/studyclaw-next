@@ -351,7 +351,6 @@ function rowDate(row: Record<string, unknown>): string | null {
 export async function heatmap(workspaceRoot: string, weeks = 12): Promise<HeatmapPayload> {
   interface MutableDay { date: string; score: number; level: number; tasks: number; chatTurns: number; weakSpotsCleared: number }
   const days = new Map<string, MutableDay>()
-  const lastFailed = new Map<string, boolean>()
   const ensure = (date: string): MutableDay => {
     const existing = days.get(date)
     if (existing !== undefined) return existing
@@ -361,35 +360,62 @@ export async function heatmap(workspaceRoot: string, weeks = 12): Promise<Heatma
   }
   // 项目即课程：会话历史位于项目根 .studyclaw/history（P1-7 双轨制修复）。
   const historyDir = join(workspaceRoot, '.studyclaw', 'history')
+  const chatTurnsByDate = new Map<string, number>()
+  const evalRecords: Array<{ ts: string; date: string; key: string; passed: boolean }> = []
   if ((await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) {
     for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
       const text = await readFile(join(historyDir, name), 'utf8').catch(() => '')
+      const rows: Array<Record<string, unknown>> = []
       for (const line of text.split(/\r?\n/)) {
         if (line.trim() === '') continue
-        let row: Record<string, unknown>
         try {
-          row = JSON.parse(line) as Record<string, unknown>
+          rows.push(JSON.parse(line) as Record<string, unknown>)
         } catch {
           continue
         }
+      }
+      // H3：事件日志口径的输入剔除标记先行收集，被 void 的输入不计聊天轮。
+      const voidedSeqs = new Set<number>()
+      for (const row of rows) {
+        if (row['type'] !== 'input/voided') continue
+        const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
+        const seq = Number(payload['seq'] ?? 0)
+        if (Number.isInteger(seq) && seq > 0) voidedSeqs.add(seq)
+      }
+      for (const row of rows) {
         const date = rowDate(row)
         if (date === null) continue
         // 兼容 legacy 顶层行与 events 信封行：信封数据落在 row.payload 内。
         const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
-        if (row['type'] === 'chat' && row['role'] === 'user') ensure(date).chatTurns += 1
-        const isEval = row['type'] === 'eval'
+        const type = String(row['type'] ?? '')
+        // H3：legacy `chat` 行与事件日志 `user/input` 行都计聊天轮。
+        const isUserChat = (type === 'chat' && row['role'] === 'user')
+          || (type === 'user/input' && !voidedSeqs.has(Number(row['seq'] ?? 0)))
+        if (isUserChat) chatTurnsByDate.set(date, (chatTurnsByDate.get(date) ?? 0) + 1)
+        const isEval = type === 'eval'
           || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
           || (typeof payload['task_id'] === 'string' && payload['misconceptions'] !== undefined)
         if (isEval) {
-          const day = ensure(date)
-          day.tasks += 1
-          const key = String(row['concept_id'] ?? payload['concept_id'] ?? '')
-          const passed = Boolean(row['passed'] ?? payload['passed'])
-          if (passed && lastFailed.get(key) === true) day.weakSpotsCleared += 1
-          lastFailed.set(key, !passed)
+          evalRecords.push({
+            ts: typeof row['ts'] === 'string' ? row['ts'] : '',
+            date,
+            key: String(row['concept_id'] ?? payload['concept_id'] ?? ''),
+            passed: Boolean(row['passed'] ?? payload['passed']),
+          })
         }
       }
     }
+  }
+  for (const [date, count] of chatTurnsByDate) ensure(date).chatTurns += count
+  // L8：跨文件按时间序折叠 lastFailed——readdir 字典序在 fork/迁移场景会把
+  // 「先错后对」误判成「先对后错」，weakSpotsCleared 因此依赖文件迭代顺序。
+  evalRecords.sort((a, b) => a.ts.localeCompare(b.ts))
+  const lastFailed = new Map<string, boolean>()
+  for (const record of evalRecords) {
+    const day = ensure(record.date)
+    day.tasks += 1
+    if (record.passed && lastFailed.get(record.key) === true) day.weakSpotsCleared += 1
+    lastFailed.set(record.key, !record.passed)
   }
 
   // Normalize scores, fill the window, and compute streaks.
@@ -449,6 +475,14 @@ export async function heatmapDay(workspaceRoot: string, date: string): Promise<H
         const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
         if (row['type'] === 'sync' && row['target'] === 'progress.md') {
           changelog.push(String(row['summary'] ?? ''))
+        }
+        // H3：事件日志口径的掌握度同步也进 changelog（sync/applied 的 payload
+        // 是同步块本体，审计行只存在于 legacy 存储）。
+        if (row['type'] === 'sync/applied' && Array.isArray(payload['concept_updates'])) {
+          const ids = (payload['concept_updates'] as Array<unknown>)
+            .map(item => typeof item === 'object' && item !== null ? String((item as Record<string, unknown>)['id'] ?? '') : '')
+            .filter(id => id !== '')
+          if (ids.length > 0) changelog.push(`同步掌握度：${ids.join('、')}`)
         }
         const isEval = row['type'] === 'eval'
           || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)

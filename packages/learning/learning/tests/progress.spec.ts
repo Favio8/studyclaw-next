@@ -101,4 +101,31 @@ describe('heatmap metrics', () => {
     expect(payload.streak.current).toBe(1)
     await rm(root, { recursive: true, force: true })
   })
+
+  it('事件日志口径：user/input 计聊天轮，input/voided 剔除（H3）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-metrics-events-'))
+    const ws = join(root, 'ws')
+    const historyDir = join(ws, '.studyclaw', 'history')
+    await mkdir(historyDir, { recursive: true })
+    const today = new Date()
+    const noon = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), 12))
+    const iso = (offsetSeconds: number): string => new Date(noon.getTime() + offsetSeconds * 1000).toISOString()
+    await writeFile(join(historyDir, 'session_20260821-100000.events.jsonl'), [
+      JSON.stringify({ seq: 1, ts: iso(0), type: 'session/create', payload: { mode: 'socratic' } }),
+      JSON.stringify({ seq: 2, ts: iso(1), type: 'user/input', payload: { content: '失败回合的输入', turnId: 't1' } }),
+      JSON.stringify({ seq: 3, ts: iso(2), type: 'turn/error', payload: { message: 'boom', turnId: 't1' } }),
+      JSON.stringify({ seq: 4, ts: iso(3), type: 'input/voided', payload: { seq: 2, reason: 'turn-failed', turnId: 't1' } }),
+      JSON.stringify({ seq: 5, ts: iso(4), type: 'user/input', payload: { content: '正常输入', turnId: 't2' } }),
+      JSON.stringify({ seq: 6, ts: iso(5), type: 'assistant/message', payload: { content: '回复', turnId: 't2' } }),
+      JSON.stringify({ seq: 7, ts: iso(6), type: 'eval', payload: { task_id: 't_1', concept_id: 'c_1', passed: false } }),
+      JSON.stringify({ seq: 8, ts: iso(7), type: 'eval', payload: { task_id: 't_1', concept_id: 'c_1', passed: true } }),
+    ].join('\n'), 'utf8')
+    const payload = await heatmap(ws, 1)
+    const day = payload.days[payload.days.length - 1]!
+    // 两条 user/input，一条被 void → 只计 1 个聊天轮。
+    expect(day.chatTurns).toBe(1)
+    expect(day.tasks).toBe(2)
+    expect(day.weakSpotsCleared).toBe(1)
+    await rm(root, { recursive: true, force: true })
+  })
 })

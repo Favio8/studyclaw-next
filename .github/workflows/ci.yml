@@ -111,3 +111,30 @@ jobs:
         working-directory: apps/desktop
         env:
           SMOKE_STRICT: '1'
+
+  # 同上，但在 macOS runner 上跑——覆盖 POSIX 分支：main.cjs 新增的
+  # SIGTERM/SIGINT → app.quit()（Windows 上 SIGINT 被映射为强杀，那条路径只在
+  # POSIX 上真实存在）、child.kill('SIGTERM') + 6s 宽限的 stopHost 收尾、以及
+  # residue 判定。此前这两个分支只有"人工在 mac 上跑过一次"的说法，没有常态断言。
+  desktop-smoke-macos:
+    name: Desktop smoke (macos)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4.4.0
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Assemble host sidecar
+        run: node scripts/assemble-host.mjs --build
+        working-directory: apps/desktop
+      - name: Smoke the app end to end (POSIX quit path)
+        run: node scripts/smoke-desktop.mjs
+        working-directory: apps/desktop
+        env:
+          SMOKE_STRICT: '1'

@@ -138,7 +138,11 @@ function stopHost() {
     } else {
       host.kill('SIGTERM') // Host 有 SIGTERM 优雅退出 handler
       const ref = host
-      setTimeout(() => { try { ref.kill('SIGKILL') } catch {} }, 3_000)
+      // C-10：兜底强杀的宽限必须大于 Host 自己的关停兜底（bin.ts shutdown 是
+      // server.close + 5s 超时后 process.exit）。旧值 3s 会在 Host 还在收尾时
+      // 就 SIGKILL，host.json/host.lock 必然残留——下次启动虽能靠锁自愈，但
+      // 用户会看到"退出后文件还在"。6s > 5s，正常路径远快于该值。
+      setTimeout(() => { try { ref.kill('SIGKILL') } catch {} }, 6_000)
     }
   } catch (e) {
     console.error('[desktop] stopHost error', e)

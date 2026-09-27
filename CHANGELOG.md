@@ -8,6 +8,46 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+弹层焦点管理修复（W-10，提交 `ed18fd6` 及接入提交）：
+
+### 修复
+
+- 新增 useFocusTrap hook + 模块级弹层栈：打开聚焦首个控件（或 [data-autofocus]）、
+  Tab/Shift+Tab 弹层内首尾循环、Escape 关闭（尊重各弹层 busy 语义）、关闭后
+  焦点还原；document capture 阶段监听，嵌套弹层仅栈顶响应（ModelsSection 的
+  确认框在设置弹层内）；
+- 七个 aria-modal 弹层全部接入：SettingsDialog（删自有焦点/Escape 逻辑，初始
+  焦点改首个导航项）、MaterialsDialog（补初始焦点与 Escape）、NewProjectWizard
+  （抽 WizardShell 统一各阶段，分支切换不再持有旧容器监听器）、LeftNav 移除
+  确认/重命名对话框、ModelsSection 删除/覆盖/模型候选三框；
+- 全局快捷键穿透修复：Tab 与 Ctrl 组合键守卫改查 modal 栈——MaterialsDialog
+  等本地 state 弹层打开时 Tab 不再切背景三栏焦点、Ctrl+N 不再背后新建会话；
+  Ctrl+K 在任意弹层打开时不叠开 Palette（消除半叠加态）。
+
+### 测试
+
+- 新增 focus-trap.test.tsx 5 用例（初始聚焦/边界循环/Shift 反向/Escape/焦点还原/
+  嵌套栈顶仲裁）；materials-dialog 增补初始焦点与 Escape 两例。
+
+前端队列状态机与测试缺口修复（提交 `bab236f`/`9c30e83`/`9021984`）：
+
+### 修复
+
+- W-3：队列 drain 旧实现用 setTimeout(0) 延续——setStreaming(false) 与
+  drain 之间的 macrotask 边界是双流窗口（用户新消息绕过守卫开第二条流、
+  drain 抢占 abort 把新流冻成半截且无错误行、停止键管不到即将 drain 的
+  流）；改为同步调用，false→true 同一 macrotask 内完成；
+- W-4：命令在流式中入队时旧实现会建服务端 durable 回合，但 drain 时命令
+  直接执行、turnId 从未下发——服务端回合永不消费（QueueDock「队列中 N」
+  永久卡住，宿主自行消费 inbox 时命令文本又会作为普通 LLM 回合跑一遍）；
+  命令（含未知命令）现在只进本地队列，普通消息仍建 durable 回合。
+
+### 测试
+
+- 新建 LeftNav 回归用例 5 个（列表瞬断韧性 / 多课程徽标与切换行 / 搜索
+  命中打开失败 / 菜单外点关闭 / 重命名撞名阻断）；
+- models-section 增补 409 覆盖 + 存 Key 失败组合用例（N-1）。
+
 左栏项目/课程管理与 API Key 添加专项审查修复（提交 `c2171cc`/`7992f57`/`fdf7716`）：
 
 ### 修复

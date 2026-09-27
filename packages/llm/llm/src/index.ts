@@ -403,13 +403,28 @@ export class LlmRuntime extends Service {
    * exactly like a first registration.
    */
   private commitRoutes(owned: Set<string>, registrations: readonly AdapterRegistration[]): void {
+    // Snapshot the pre-commit state: emitAdaptersUpdated runs INVARIANT
+    // listeners that may throw AFTER these writes landed, while the effect
+    // body's `yield` (which registers the disposer) has not run yet — a
+    // leaked registration that a retry would hit as DUPLICATE_ADAPTER.
+    // Roll the registry back so a failed commit leaves nothing behind.
+    const previous = new Map(this.adapters)
+    const previousOwned = new Set(owned)
     for (const provider of owned) this.adapters.delete(provider)
     owned.clear()
     for (const registration of registrations) {
       this.adapters.set(registration.provider.id, registration)
       owned.add(registration.provider.id)
     }
-    this.emitAdaptersUpdated()
+    try {
+      this.emitAdaptersUpdated()
+    } catch (error) {
+      this.adapters.clear()
+      for (const [provider, registration] of previous) this.adapters.set(provider, registration)
+      owned.clear()
+      for (const provider of previousOwned) owned.add(provider)
+      throw error
+    }
   }
 
   /**
@@ -454,10 +469,22 @@ export class LlmRuntime extends Service {
         }
         detached.push({ ...entry, settingsPath: [...entry.settingsPath] })
       }
+      // Same rollback discipline as commitRoutes: an INVARIANT listener that
+      // throws inside emitAdaptersUpdated must not leave the directory written
+      // while the disposer registration never happened.
+      const previousDirectory = new Map(this.directory)
+      const previousHeld = held
       for (const entry of held) this.directory.delete(entry.provider)
       for (const entry of detached) this.directory.set(entry.provider, entry)
       held = detached
-      this.emitAdaptersUpdated()
+      try {
+        this.emitAdaptersUpdated()
+      } catch (error) {
+        this.directory.clear()
+        for (const [provider, entry] of previousDirectory) this.directory.set(provider, entry)
+        held = previousHeld
+        throw error
+      }
     }
 
     const dispose = this.ctx.effect(function* (this: LlmRuntime) {

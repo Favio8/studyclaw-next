@@ -14,8 +14,15 @@
  * @returns never — it always throws, with the offending value JSON-rendered in the message.
  */
 export function assertNever(value: never, context?: string): never {
-  // JSON.stringify is typed string but returns undefined for undefined input;
-  // String() covers that and other non-serializable escapes.
-  const rendered = (JSON.stringify(value) as string | undefined) ?? String(value)
+  // JSON.stringify returns undefined for undefined input, but THROWS on
+  // BigInt / circular structures / throwing toJSON — the String() fallback
+  // must cover both, or the promised `unreachable variant` diagnostic is
+  // replaced by a raw TypeError.
+  let rendered: string
+  try {
+    rendered = (JSON.stringify(value) as string | undefined) ?? String(value)
+  } catch {
+    rendered = String(value)
+  }
   throw new Error(`unreachable variant${context ? ` in ${context}` : ''}: ${rendered}`)
 }

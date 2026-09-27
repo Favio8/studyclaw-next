@@ -275,4 +275,47 @@ describe('chatStream requestId 幂等（UI-1）', () => {
 
     await rm(root, { recursive: true, force: true })
   })
+
+  it('RV-22：入场即已中止的请求不发起回合（死连接不白跑 LLM）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-idempotent-preabort-'))
+    const ws = join(root, 'ws')
+    await mkdir(join(ws, '.studyclaw'), { recursive: true })
+    await writeFile(join(ws, 'overview.md'), '# 多态\n\n重载与覆写。\n', 'utf8')
+    await writeFile(join(ws, 'syllabus.json'), JSON.stringify({
+      course_id: basename(ws), title: '多态', version: '1.0.0',
+      chapters: [{ id: 'chap_1', title: '继承', concepts: [{ id: 'c_1', name: '重载与覆写' }] }],
+    }), 'utf8')
+    await writeFile(join(ws, '.studyclaw', 'config.yaml'), [
+      'version: 1',
+      'llm:',
+      '  provider: mock',
+      '  model: mock-model',
+      '  api_key_env: MOCK_KEY',
+      `  api_base: ${baseUrl}`,
+      '  temperature: 0.3',
+      '  max_concurrency: 1',
+      'ui:',
+      '  default_mode: socratic',
+      '',
+    ].join('\n'), 'utf8')
+
+    process.env.MOCK_KEY = 'test-key'
+    const config = await (await import('../src/config.ts')).loadChatConfig(ws)
+    delete process.env.MOCK_KEY
+
+    const controller = new AbortController()
+    controller.abort()
+    const before = llmCallCount
+    const kinds: string[] = []
+    for await (const event of chatStream(ws, basename(ws), { message: '解释覆写', mode: 'socratic', requestId: 'req_pre_abort_001', signal: controller.signal }, config)) {
+      kinds.push(event.kind)
+    }
+    // 不请求 LLM、不产出任何帧、不落 user/input（旧实现 abort() 后仍 send+跑完整 turn）。
+    expect(llmCallCount).toBe(before)
+    expect(kinds).toEqual([])
+    const sessions = await listSessions(ws, basename(ws))
+    expect(sessions.every(session => session.turns === 0)).toBe(true)
+
+    await rm(root, { recursive: true, force: true })
+  })
 })

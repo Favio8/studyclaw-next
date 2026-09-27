@@ -1414,8 +1414,14 @@ export async function* chatStream(
     approvals?.cancelForAgent(agent.options.agentId)
     agent.cancel({ keepInbox: true, cause: 'system' })
   }
-  if (input.signal?.aborted) abort()
-  else input.signal?.addEventListener('abort', abort, { once: true })
+  if (input.signal?.aborted) {
+    // RV-22：入场即已中止（客户端在 setup 期间就已消失）——旧实现 abort() 后
+    // 仍走完 agent.send 与整个 turn：send 路径的消费循环没有 aborted 检查
+    // （仅重放路径有），死连接上白跑完整 LLM 流（计费+落盘）。直接返回。
+    abort()
+    return
+  }
+  input.signal?.addEventListener('abort', abort, { once: true })
   try {
     // UI-1 幂等：同一 requestId 的重试（网络断线重连）重放/跟随已存在的 turn，
     // 绝不再次 agent.send —— 否则每次重试都会落盘一条重复 user/input 并重复计费，

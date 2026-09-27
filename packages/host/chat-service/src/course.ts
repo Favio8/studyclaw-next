@@ -830,20 +830,30 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
 
 async function enumerateFiles(root: string): Promise<{ root: string; files: Array<Record<string, unknown>> }> {
   const files: Array<Record<string, unknown>> = []
-  const collect = async (dir: string): Promise<void> => {
+  // RV-16：就地课程的 courseSourceRoot 就是项目根——旧实现只跳过点开头项，
+  // node_modules/.git 被全量 walk+stat 后再 slice(0,500)（先累积后截断，瞬态
+  // 内存无界；本仓库 node_modules 下实测 8,923 个 .md/.txt，打开文件面板即
+  // 全量命中）。复用 builder 同款排除集 + 深度/数量双上限、达上限即止。
+  // 符号链接条目的 isDirectory() 为 false，天然不成环。
+  const MAX_DEPTH = 6
+  const MAX_FILES = 500
+  const collect = async (dir: string, depth: number): Promise<void> => {
+    if (depth > MAX_DEPTH || files.length >= MAX_FILES) return
     for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (files.length >= MAX_FILES) return
       if (entry.name.startsWith('.')) continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) {
-        await collect(path)
+        if (INPLACE_SOURCE_EXCLUDED_DIRS.has(entry.name)) continue
+        await collect(path, depth + 1)
       } else if (entry.isFile() && /\.(md|txt|pdf)$/i.test(entry.name)) {
         const info = await stat(path)
         files.push({ name: entry.name, path, relative: relative(root, path).split('\\').join('/'), size: info.size, mtime: info.mtime.toISOString(), supported: true })
       }
     }
   }
-  if ((await stat(root).catch(() => null))?.isDirectory()) await collect(root)
-  return { root, files: files.slice(0, 500) }
+  if ((await stat(root).catch(() => null))?.isDirectory()) await collect(root, 0)
+  return { root, files: files.slice(0, MAX_FILES) }
 }
 
 function stripTags(html: string): string {

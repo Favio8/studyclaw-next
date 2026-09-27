@@ -15,6 +15,7 @@ vi.mock("../src/lib/chatStream", () => ({
   isAbortError: (error: unknown) => error instanceof DOMException && error.name === "AbortError",
   registerActiveChat: vi.fn(),
   unregisterActiveChat: vi.fn(),
+  abortActiveChat: vi.fn(),
   streamAgentAnswer: vi.fn(),
   streamChat: streamChatMock,
 }));

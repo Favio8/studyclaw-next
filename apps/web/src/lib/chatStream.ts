@@ -2,8 +2,8 @@
  * 对话流式客户端（T3.3）：POST /api/chat/stream（SSE）+ 活跃流中止单例。
  *
  * - 复用 `api.ts` 的 streamSse 帧解析（event/data/id 行）；
- * - `Last-Event-ID` 头：断线重连时重放服务端已落盘轮次的正文（t_NN），
- *   未落盘则服务端重新生成流（见 server app.py chat_stream/ replay）；
+ * - 断线重连的幂等由 `requestId` 承担（服务端命中已落盘轮次 → 重放/跟随，
+ *   未落盘 → 新开 turn）；`Last-Event-ID` 头从未被宿主实现，已移除；
  * - 模块级活跃流句柄：对话切换 / 新建前必须先 abortActiveChat()，
  *   保证同一时刻仅一条活跃流（旧流不残留、不互相串流）。
  */
@@ -19,8 +19,6 @@ export interface StreamChatArgs {
   conceptId?: string | null;
   /** 当前课程根目录下的相对文件引用。 */
   fileRefs?: string[];
-  /** Last-Event-ID：断线重连重放已落盘轮次正文（t_NN）。 */
-  lastEventId?: string | null;
   /** Existing durable Agent turn to consume (used by the inbox queue). */
   turnId?: string | null;
   /** UI-1 幂等键：客户端在重试循环内复用同一值，服务端据此重放/跟随已落盘 turn
@@ -32,8 +30,6 @@ export async function* streamChat(
   args: StreamChatArgs,
   signal?: AbortSignal,
 ): AsyncGenerator<ChatEvent> {
-  const headers: Record<string, string> = {};
-  if (args.lastEventId) headers["Last-Event-ID"] = args.lastEventId;
   yield* streamSse<ChatEvent>(
     "/api/chat/stream",
     {
@@ -46,7 +42,7 @@ export async function* streamChat(
       ...(args.turnId ? { turnId: args.turnId } : {}),
       ...(args.requestId ? { requestId: args.requestId } : {}),
     },
-    headers,
+    undefined,
     signal,
   );
 }

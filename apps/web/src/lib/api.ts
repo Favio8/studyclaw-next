@@ -2,8 +2,7 @@
  * StudyClaw API 客户端（api_spec v1.5）。
  *
  * - REST：`fetch` + 错误协议统一解析（§1 `{error:{code,message}}`）；
- * - SSE：`POST` + `ReadableStream` 手写解析（EventSource 不支持 POST，
- *   亦不便携带 Last-Event-ID 头）；
+ * - SSE：`POST` + `ReadableStream` 手写解析（EventSource 不支持 POST）。
  * - 全部走相对路径 `/api`（next.config rewrites 代理到后端，规避 CORS）。
  */
 

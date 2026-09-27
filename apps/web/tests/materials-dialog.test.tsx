@@ -82,9 +82,17 @@ describe("MaterialsDialog 上传补充", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
 
+    // jsdom File 无自有可枚举属性（name 是原型 getter），toHaveBeenCalledWith
+    // 的结构深比较对任意两个 File 都判相等——不能比较 File 对象本身，必须
+    // 断言实际收到的文件名（错误文件名/顺序颠倒在此现形）。
     await waitFor(() => {
-      expect(apiMocks.uploadSources).toHaveBeenCalledWith("course-1", [file("guide.md"), file("guide.md")]);
+      expect(apiMocks.uploadSources).toHaveBeenCalledTimes(1);
     });
+    expect(apiMocks.uploadSources.mock.calls[0]?.[0]).toBe("course-1");
+    expect((apiMocks.uploadSources.mock.calls[0]?.[1] as File[]).map((f) => f.name)).toEqual([
+      "guide.md",
+      "guide.md",
+    ]);
     await waitFor(() => {
       expect(screen.getByText(/guide_2\.md/)).toBeInTheDocument();
     });

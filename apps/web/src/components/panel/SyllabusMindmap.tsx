@@ -231,6 +231,14 @@ export default function SyllabusMindmap({
     mind.bus.addListener("selectNodes", onSelect);
     mind.bus.addListener("expandNode", onExpand);
     if (fitModeRef.current === "fit") fitToCanvas();
+    // 首次 init 消费 ready 之前到达的聚焦请求：init 把当前数据标记为"已应用"
+    // 后，refresh effect 会因 data === appliedDataRef 提前返回，pending 若不
+    // 在这里消费就永远无人处理（首次打开导图时外部聚焦失效的根因）。
+    const pendingInit = pendingFocusRef.current;
+    if (pendingInit !== null && pendingInit.retries < FOCUS_RETRY) {
+      pendingFocusRef.current = null;
+      selectAndScroll(pendingInit.id);
+    }
     return () => {
       mind.bus.removeListener("selectNodes", onSelect);
       mind.bus.removeListener("expandNode", onExpand);
@@ -238,7 +246,7 @@ export default function SyllabusMindmap({
       mindRef.current = null;
       appliedDataRef.current = null;
     };
-  }, [fitToCanvas, ready]);
+  }, [fitToCanvas, ready, selectAndScroll]);
 
   // 数据变化 → refresh()（保留实例；折叠态由投影数据恢复，避免破坏级重建）。
   useEffect(() => {

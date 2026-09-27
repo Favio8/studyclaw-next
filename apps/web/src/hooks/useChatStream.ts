@@ -13,9 +13,9 @@
  * 6. done：定格 thinking 耗时；
  * 7. error：消息卡错误态 + 状态横幅提示。
  *
- * 断线重连：最多 3 次尝试；attempt≥1 携带 `Last-Event-ID: t_<k>`
- * （k = 当前用户消息序号）。服务端命中已落盘轮次 → 重放正文（替换占位）；
- * 未落盘 → 重新生成完整流（占位先清空）。用户消息不重复追加。
+ * 断线重连：最多 3 次尝试；attempt≥1 复用同一 `requestId`（UI-1）——
+ * 服务端命中已落盘轮次 → 重放正文（替换占位）；未落盘 → 重新生成完整流
+ * （占位先清空）。用户消息不重复追加。
  *
  * 对话切换/新建由 useSessionActions 调 abortActiveChat() 中止旧流；
  * isAbortError 不触发重试。
@@ -60,8 +60,6 @@ let lastSent = "";
  * 复用 requestId 续上；business = 服务端业务 error 帧（turn 已终态失败）→
  * 配合服务端 input/voided 补偿后新开 turn（同样复用 requestId，UI-15）。 */
 let lastFailure: { requestId: string; kind: "network" | "business" } | null = null;
-/** 第 k 条用户消息 → 期望轮次 t_<k>（断线重连 Last-Event-ID）。 */
-let expectedTurn = 0;
 /** FE-2：本回合归属（项目+会话），drain 队列前比对。 */
 let queueOwner: { courseId: string | null; sessionId: string | null } = { courseId: null, sessionId: null };
 /** UI-14：AskFold 回答的幂等键。A1（第三轮审查）：必须绑定 (question, answer)
@@ -430,12 +428,6 @@ export function useChatStream() {
       const sessionId = state.activeSessionId;
       const conceptId = state.focusConceptId;
 
-      // 第 k 条用户消息 → 期望轮次 t_<k>（断线重连 Last-Event-ID）
-      // UI-2：排除 persisted:false 的本地命令回显（不进服务端会话历史，否则重连序号错位）。
-      const userCount = state.messages.filter((m) => m.role === "user" && m.persisted !== false).length;
-      expectedTurn = opts?.skipAppendUser
-        ? expectedTurn
-        : userCount + 1;
       lastSent = requestText;
 
       if (!opts?.skipAppendUser) {
@@ -488,7 +480,6 @@ export function useChatStream() {
               sessionId,
               conceptId,
               fileRefs,
-              lastEventId: attempt > 0 ? `t_${expectedTurn}` : null,
               turnId: opts?.queuedTurnId ?? null,
               requestId,
             },

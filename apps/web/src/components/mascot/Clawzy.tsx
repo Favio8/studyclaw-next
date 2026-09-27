@@ -13,7 +13,7 @@
  * 描线/瞳孔固定墨蓝（实心眼+白高光，原「镂空眼」决策已随换猫作废）。
  */
 
-import { useRef, type CSSProperties } from "react";
+import { useMemo, useRef, type CSSProperties } from "react";
 import { EYE, MIR, PAW_TOES, PIVOT, SH } from "./geometry";
 import { useMascotEngine, type MascotPartRefs } from "./useMascotEngine";
 import { useMascotState } from "./useMascotState";
@@ -144,23 +144,41 @@ function CatSvg({ size, state, tier, ariaLabel, svgRef, partRefs }: CatSvgProps)
 function ClawzyView({ state, size, tier, ariaLabel }: { state: MascotState; size: number; tier?: MascotTier; ariaLabel?: string }) {
   const resolvedTier = resolveTier(size, tier);
   const svgRef = useRef<SVGSVGElement>(null);
-  const partRefs: MascotPartRefs = {
+  const root = useRef<SVGGElement>(null);
+  const tail = useRef<SVGGElement>(null);
+  const head = useRef<SVGGElement>(null);
+  const earLB = useRef<SVGGElement>(null);
+  const earRB = useRef<SVGGElement>(null);
+  const earLF = useRef<SVGGElement>(null);
+  const earRF = useRef<SVGGElement>(null);
+  const eyeLGrp = useRef<SVGGElement>(null);
+  const eyeLInner = useRef<SVGGElement>(null);
+  const eyeRGrp = useRef<SVGGElement>(null);
+  const eyeRInner = useRef<SVGGElement>(null);
+  const pawL = useRef<SVGGElement>(null);
+  const pawR = useRef<SVGGElement>(null);
+  const mouth = useRef<SVGGElement>(null);
+  // 容器对象必须引用稳定：useMascotEngine 的订阅 effect 依赖 [frame, refs]，
+  // 每次渲染新建容器会逐渲染重挂 IntersectionObserver/rAF/visibilitychange
+  // 订阅——流式回复期间 Clawzy 图标随帧重渲染，纯白烧订阅。RefObject 本体
+  // 逐渲染稳定，作为依赖即可。
+  const partRefs = useMemo<MascotPartRefs>(() => ({
     svg: svgRef,
-    root: useRef<SVGGElement>(null),
-    tail: useRef<SVGGElement>(null),
-    head: useRef<SVGGElement>(null),
-    earLB: useRef<SVGGElement>(null),
-    earRB: useRef<SVGGElement>(null),
-    earLF: useRef<SVGGElement>(null),
-    earRF: useRef<SVGGElement>(null),
-    eyeLGrp: useRef<SVGGElement>(null),
-    eyeLInner: useRef<SVGGElement>(null),
-    eyeRGrp: useRef<SVGGElement>(null),
-    eyeRInner: useRef<SVGGElement>(null),
-    pawL: useRef<SVGGElement>(null),
-    pawR: useRef<SVGGElement>(null),
-    mouth: useRef<SVGGElement>(null),
-  };
+    root,
+    tail,
+    head,
+    earLB,
+    earRB,
+    earLF,
+    earRF,
+    eyeLGrp,
+    eyeLInner,
+    eyeRGrp,
+    eyeRInner,
+    pawL,
+    pawR,
+    mouth,
+  }), [svgRef, root, tail, head, earLB, earRB, earLF, earRF, eyeLGrp, eyeLInner, eyeRGrp, eyeRInner, pawL, pawR, mouth]);
   useMascotEngine(partRefs, state, resolvedTier);
   return (
     <CatSvg

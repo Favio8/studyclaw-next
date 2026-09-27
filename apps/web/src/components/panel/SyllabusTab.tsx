@@ -148,12 +148,18 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
     };
   }, [buildStatus, courseId]);
 
-  const statusMap: Record<string, ConceptStatus> = {};
-  mastery?.chapters.forEach((chapter) => {
-    chapter.concepts.forEach((concept) => {
-      statusMap[concept.id] = { status: concept.status, mastery: concept.mastery };
+  // 引用稳定是硬约束：statusMap 传入 SyllabusGraph 参与节点构建 memo 链，
+  // 每次渲染新建会让 dagre 布局逐键重跑——搜索输入时相机复位、拖拽位置丢失、
+  // 高亮静默消失。
+  const statusMap: Record<string, ConceptStatus> = useMemo(() => {
+    const map: Record<string, ConceptStatus> = {};
+    mastery?.chapters.forEach((chapter) => {
+      chapter.concepts.forEach((concept) => {
+        map[concept.id] = { status: concept.status, mastery: concept.mastery };
+      });
     });
-  });
+    return map;
+  }, [mastery]);
 
   const focusConcept = useCallback(
     (conceptId: string, name: string) => {

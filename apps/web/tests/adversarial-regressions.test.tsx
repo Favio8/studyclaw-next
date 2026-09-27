@@ -131,22 +131,57 @@ describe("UI-16 课程切换：/switch-course", () => {
 });
 
 describe("UI-6 重试：按消息卡内容重发", () => {
-  it("旧失败卡在成功发送之后重试：重发的是该卡文本而非最后一次发送", async () => {
+  // mock 按 send 调用序号区分轮次（不能假设"每次 send 只调用一次 streamChat"）：
+  // useChatStream.send 对非 abort 异常内部重试 MAX_ATTEMPTS=3 次，每轮都会
+  // 重新调用 streamChat——旧实现 call===1 抛错、call===2 成功，消息一在第 2
+  // 次内部重试即成功，失败卡从未产生，声明的重试路径实际未被覆盖（假绿）。
+
+  it("网络耗尽产生失败卡后重试：复用失败回合的 requestId", async () => {
     let call = 0;
     streamChatMock.mockImplementation(async function* () {
       call += 1;
-      if (call === 1) {
-        // 消息 1：网络中断（耗尽重试 → lastFailure 记录 requestId）。
+      if (call <= 3) {
+        // 消息一：3 次尝试全部网络中断（MAX_ATTEMPTS=3）→ 失败卡 + lastFailure。
         yield { event: "meta", data: { sessionId: "s-1", model: "m", provider: "p" } };
         throw new TypeError("failed to fetch");
       }
-      if (call === 2) {
-        // 消息 2：正常完成。
+      // 重试：正常完成。
+      yield { event: "meta", data: { sessionId: "s-1", model: "m", provider: "p" } };
+      yield { event: "token", data: { delta: "一号重发" } };
+      yield { event: "done", data: { usage: {} } };
+    });
+    const { result } = renderHook(() => useChatStream());
+    await act(async () => {
+      await result.current.send("消息一");
+    });
+    // 消息一的 3 次尝试共享同一幂等键。
+    const requestIds = streamChatMock.mock.calls.slice(0, 3).map((c) => (c[0] as { requestId: string }).requestId);
+    expect(new Set(requestIds).size).toBe(1);
+    // 模拟用户点"消息一"失败卡上的重试（ChatArea 传入该卡对应的用户文本）。
+    await act(async () => {
+      await result.current.retryLast("消息一");
+    });
+    const lastCall = streamChatMock.mock.calls.at(-1)![0] as { message: string; requestId: string };
+    expect(lastCall.message).toBe("消息一");
+    expect(lastCall.requestId).toBe(requestIds[0]);
+  });
+
+  it("旧失败卡在成功发送之后重试：重发该卡文本、不复用旧 requestId", async () => {
+    let call = 0;
+    streamChatMock.mockImplementation(async function* () {
+      call += 1;
+      if (call <= 3) {
+        // 消息一：网络中断耗尽重试。
+        yield { event: "meta", data: { sessionId: "s-1", model: "m", provider: "p" } };
+        throw new TypeError("failed to fetch");
+      }
+      // 消息二（call=4）：正常完成——成功会清空 lastFailure。
+      if (call === 4) {
         yield { event: "meta", data: { sessionId: "s-1", model: "m", provider: "p" } };
         yield { event: "token", data: { delta: "二号回复" } };
         yield { event: "done", data: { usage: {} } };
       }
-      // 重试：正常完成。
+      // 重试（call=5）：正常完成。
       yield { event: "meta", data: { sessionId: "s-1", model: "m", provider: "p" } };
       yield { event: "token", data: { delta: "一号重发" } };
       yield { event: "done", data: { usage: {} } };
@@ -158,12 +193,15 @@ describe("UI-6 重试：按消息卡内容重发", () => {
     await act(async () => {
       await result.current.send("消息二");
     });
-    // 模拟用户点"消息一"失败卡上的重试（ChatArea 传入该卡对应的用户文本）。
+    const firstRequestId = (streamChatMock.mock.calls[0]![0] as { requestId: string }).requestId;
     await act(async () => {
       await result.current.retryLast("消息一");
     });
-    const lastCall = streamChatMock.mock.calls.at(-1)![0] as { message: string };
+    const lastCall = streamChatMock.mock.calls.at(-1)![0] as { message: string; requestId: string };
+    // 重发的是该卡自己的文本而不是"最后一次发送"（消息二）。
     expect(lastCall.message).toBe("消息一");
+    // 成功发送已清空 lastFailure：不得复用消息一的旧 requestId。
+    expect(lastCall.requestId).not.toBe(firstRequestId);
   });
 });
 

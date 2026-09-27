@@ -76,16 +76,20 @@ export default function Console() {
     };
   }, []);
 
-  const loadCourses = useCallback(async () => {
+  const loadCourses = useCallback(async (path?: string) => {
     try {
-      const workspacePath = useAppStore.getState().workspacePath;
+      const workspacePath = path ?? useAppStore.getState().workspacePath;
       if (!workspacePath) return;
       const { courses: list } = await api.courseList(workspacePath);
+      // 晚到响应守卫：workspacePath 切换（切项目/首启恢复）后，旧项目的在途
+      // 响应不得覆盖新项目的课程列表与会话状态。
+      if (useAppStore.getState().workspacePath !== workspacePath) return;
       setCourses(list);
       void Promise.all(
         list.map(async (course) => {
           try {
             const { sessions } = await api.sessions(course.id);
+            if (useAppStore.getState().workspacePath !== workspacePath) return;
             setCourseSessions(course.id, sessions);
           } catch {
             // 项目树允许单个项目对话读取失败，激活项目仍会由 hook 重试。
@@ -119,7 +123,8 @@ export default function Console() {
   const workspacePath = useAppStore((s) => s.workspacePath);
   useEffect(() => {
     if (!workspacePath) return;
-    void loadCourses().then(async (list) => {
+    void loadCourses(workspacePath).then(async (list) => {
+      if (useAppStore.getState().workspacePath !== workspacePath) return;
       if (list && list.length > 0) {
         setActiveCourse(list[0].id); // 默认激活第一个项目
         return;
@@ -135,7 +140,9 @@ export default function Console() {
       if (!courseId) return;
       try {
         await api.ensureCourse(courseId);
-        const again = await loadCourses();
+        if (useAppStore.getState().workspacePath !== workspacePath) return;
+        const again = await loadCourses(workspacePath);
+        if (useAppStore.getState().workspacePath !== workspacePath) return;
         if (again && again.length > 0) setActiveCourse(again[0].id);
       } catch {
         /* 后端不可达/课程不允许：保持空态，由用户手动打开项目 */

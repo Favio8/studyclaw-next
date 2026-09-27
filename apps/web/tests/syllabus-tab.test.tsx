@@ -71,6 +71,9 @@ import SyllabusTab from "../src/components/panel/SyllabusTab";
 
 afterEach(() => {
   cleanup();
+  // 清理 mock 调用记录（保留实现）：调用历史跨用例累积，加入次数类断言
+  // 即会假红/假绿；与 right-panel/settings-dialog 测试保持同一清理约定。
+  vi.clearAllMocks();
   storeState.syllabusCollapsed = {};
   storeState.syllabusSearch = "";
   storeState.syllabusView = "tree";

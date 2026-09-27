@@ -121,11 +121,12 @@ describe("MessageCard tool integration (T6.6: tool块独立、不污染正文)",
         }}
       />,
     );
+    // 存在性必须是无条件断言：包在 if 里时选择器失配会整体静默跳过，
+    // "工具摘要泄漏进正文"的回归发生时测试依旧假绿。
     const marked = container.querySelector("[data-markdown-view]");
-    if (marked) {
-      expect(marked.textContent).not.toContain("工具调用");
-      expect(marked.textContent).not.toContain("read_source");
-    }
+    expect(marked).not.toBeNull();
+    expect(marked!.textContent).not.toContain("工具调用");
+    expect(marked!.textContent).not.toContain("read_source");
     expect(screen.getByText("纯正文，不含工具。")).toBeInTheDocument();
   });
 });

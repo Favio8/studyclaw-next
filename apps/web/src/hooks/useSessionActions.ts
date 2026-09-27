@@ -167,6 +167,10 @@ export function useSessionActions() {
     abortActiveChat();
     const courseId = activeCourseId;
     if (consumeSuppress(courseId)) {
+      // UI-9：suppress 跳过的是"自动选第一条会话"，不是列表刷新本身——
+      // 触发场景（全局搜索跨项目打开会话/新建后切换）用户已显式选定目标，
+      // 但左栏列表仍需加载，否则进入课程后会话列表空白，须手动刷新才有。
+      void loadSessions(courseId);
       return;
     }
     const epochAtStart = peekSelectEpoch();

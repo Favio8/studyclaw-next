@@ -187,6 +187,19 @@ const EVAL_LEDGER_TTL_MS = 10 * 60 * 1000
 const EVAL_LEDGER_MAX_FILES = 500
 const EVAL_LEDGER_ID_RE = /^[A-Za-z0-9._-]+$/
 
+/** SEC-3/加固3：`courses.ingestUrl` 允许的响应内容类型（不含参数，小写比较）。
+ *  下游按 HTML/markdown 文本处理，只放行文本类；缺失（空串）同样拒绝——旧实现
+ *  用 `contentType !== ''` 放行"未声明类型"的响应，二进制可借此混进 sources。 */
+const INGEST_URL_ALLOWED_TYPES = new Set([
+  'text/html',
+  'text/plain',
+  'text/markdown',
+  'text/x-markdown',
+  'application/xhtml+xml',
+  'application/xml',
+  'text/xml',
+])
+
 function evalLedgerFile(workspaceRoot: string, evalId: string): string {
   const safe = EVAL_LEDGER_ID_RE.test(evalId) ? evalId : createHash('sha256').update(evalId).digest('hex')
   return join(stateDirOf(workspaceRoot), 'eval-ledger', `${safe}.json`)
@@ -628,8 +641,18 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const response = await fetchUrlSafe(url)
       if (!response.ok) throw new Error(`抓取失败: HTTP ${response.status}`)
       const contentType = response.headers?.get ? response.headers.get('content-type') ?? '' : ''
-      if (!/\btext\/html|\btext\/plain|\bmarkdown/i.test(contentType) && contentType !== '') {
-        throw new Error(`不支持的内容类型: ${contentType.split(';')[0] ?? 'unknown'}`)
+      // SEC-3/加固3：内容类型白名单。旧实现只拦"声明了类型且不在白名单"，
+      // 服务端干脆不发 Content-Type 时（contentType === ''）整段校验被绕过，
+      // PDF/zip/任意二进制都能进 sources 再喂给 LLM。策略定为严格拒绝：合法
+      // 站点必然声明类型，缺失即异常；嗅探会给"声明成 text/html 的二进制"留
+      // 口子，且这段代码下游本来就是按 HTML/markdown 文本处理的。
+      const declared = contentType.split(';')[0]?.trim().toLowerCase() ?? ''
+      if (!INGEST_URL_ALLOWED_TYPES.has(declared)) {
+        throw new Error(
+          declared === ''
+            ? '来源服务器未声明 Content-Type，已拒绝抓取（可在来源站点修正后重试）'
+            : `不支持的内容类型: ${declared}`,
+        )
       }
       let html = await response.text()
       html = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '')

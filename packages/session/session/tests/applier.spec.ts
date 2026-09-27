@@ -67,23 +67,25 @@ describe('SyncApplier', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it('RV-12：并发 apply 不互踩临时文件（随机 tmp 名；旧固定名会混合内容或 ENOENT）', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'studyclaw-applier-concurrent-'))
+  it('RV-12：串行 apply 不丢更新、不留临时文件（宿主经 courseLock 串行的生产形态）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-applier-serial-'))
     const courseDir = join(root, 'course')
     await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
     const boardPath = join(courseDir, '.studyclaw', 'progress.md')
     await seedBoard(boardPath)
     const applier = new SyncApplier(courseDir, courseDir)
-    await Promise.all([
-      applier.apply({ concept_updates: [{ id: 'c_1', score: 1 }], memory_hints: [] }, new Date()),
-      applier.apply({ concept_updates: [{ id: 'c_2', score: 0.5 }], memory_hints: [] }, new Date()),
-    ])
+    // 生产形态：宿主给 TutorSession 注入 withCourseLock，两个 sync 写段串行
+    // （锁外并发会被陈旧全量写覆盖，正是 RV-12；固定 tmp 名在并发下还会混合
+    // 内容/rename ENOENT）。这里按串行语义驱动两次完整 RMW。
+    await applier.apply({ concept_updates: [{ id: 'c_1', score: 1 }], memory_hints: [] }, new Date())
+    await applier.apply({ concept_updates: [{ id: 'c_2', score: 0.5 }], memory_hints: [] }, new Date())
     const text = await readFile(boardPath, 'utf8')
-    // 最终文件必须是完整规整的表（last-writer-wins 语义可接受，损坏不可接受）。
-    expect(text).toContain('| c_1 |')
-    expect(text).toContain('| c_2 |')
-    expect(text).toContain('| concept_id |')
-    // 无临时文件残留（旧固定名竞态下 rename 失败会留下 .tmp）。
+    // 两次更新都在（无丢失、无损坏）。
+    const c1Row = text.split(/\r?\n/).find(line => line.includes('| c_1 |'))
+    const c2Row = text.split(/\r?\n/).find(line => line.includes('| c_2 |'))
+    expect(c1Row).toContain('🟢 100%')
+    expect(c2Row).toContain('🟡 50%')
+    // 无临时文件残留。
     const files = await readdir(join(courseDir, '.studyclaw'))
     expect(files.some(file => file.includes('.tmp'))).toBe(false)
     await rm(root, { recursive: true, force: true })

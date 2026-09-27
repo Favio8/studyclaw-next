@@ -14,6 +14,7 @@
 import { useEffect } from "react";
 import { quizAnswer, quizNext } from "@/src/lib/quizFlow";
 import { createNewSession } from "@/src/lib/sessionActions";
+import { isModalOpen } from "@/src/lib/modalStack";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { PanelTab } from "@/src/store/useAppStore";
 
@@ -61,19 +62,18 @@ export function useKeyboardShortcuts() {
       if (mod && !alt && !event.shiftKey) {
         const key = event.key.toLowerCase();
         if (key === "k") {
-          // Command Palette（互斥弹层：先关向导）。
-          // 加固7a：设置弹层打开时 Ctrl+K 不再叠开 Palette——此前 z-90 的设置层
-          // 被 z-100 的 Palette 盖住但焦点在 Palette 输入框，用户面对"焦点在
-          // 看不见的面板里打字"的半叠加状态。设置层让位给 ESC/关闭钮处理。
-          if (state.settingsOpen) return;
+          // Command Palette。W-10：任意弹层打开（modal 栈非空——设置/材料/
+          // 向导/各类确认框，含非 store 的本地弹层）时不叠开 Palette，避免
+          // 半叠加态；旧实现只查三个 store 旗标，MaterialsDialog 打开时
+          // Ctrl+K 仍会叠开。
+          if (isModalOpen()) return;
           event.preventDefault();
-          if (state.wizardOpen) state.setWizardOpen(false);
           state.setPaletteOpen(!state.paletteOpen);
           return;
         }
         // UI-20：其余 Ctrl 组合键不再穿透弹层——Palette 搜索框里按 Ctrl+N
         // 会静默新建会话、设置弹层里会静默切 Tab。Ctrl+K 留作弹层互斥开关。
-        if (state.paletteOpen || state.wizardOpen || state.settingsOpen) return;
+        if (state.paletteOpen || isModalOpen()) return;
         if (key === "n") {
           event.preventDefault();
           // UI-22：失败原因（无项目 vs 请求失败）由 createNewSession 内部
@@ -132,7 +132,10 @@ export function useKeyboardShortcuts() {
       if (event.key === "Tab") {
         // UI-12：设置弹层同为模态——Tab 必须在弹层内部导航，不能被三区
         // 焦点循环劫持（此前焦点会逃逸到背景三区）。
-        if (state.paletteOpen || state.wizardOpen || state.settingsOpen) return; // 弹层让位原生 Tab
+        // W-10：判定改查 modal 栈（isModalOpen）——覆盖材料/向导/确认框等
+        // 非 store 本地弹层；弹层内的循环由 useFocusTrap 的 capture 处理器
+        // 负责（边界 preventDefault），中段交由浏览器原生 Tab。
+        if (state.paletteOpen || isModalOpen()) return; // 弹层让位原生 Tab
         event.preventDefault();
         const zone = currentZone() ?? "left";
         const delta = event.shiftKey ? -1 : 1;

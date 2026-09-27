@@ -39,6 +39,7 @@ import { api } from "@/src/lib/api";
 import { relativeTime } from "@/src/lib/format";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
 import { useAppStore } from "@/src/store/useAppStore";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import type { CourseSummary, SessionSearchResult, SessionSummary, WorkspaceItem } from "@/src/types/api";
 
 const SESSION_LIMIT = 5;
@@ -269,6 +270,15 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   }
 
   const [confirmForget, setConfirmForget] = useState<WorkspaceItem | null>(null);
+  // W-10：确认框与重命名框的焦点圈闭（两个对话框各有折叠/展开两处渲染，
+  // 同一 ref 在任意分支挂载；Escape 收敛到 hook，删掉 div 上自有 onKeyDown）。
+  const confirmForgetRef = useRef<HTMLDivElement>(null);
+  const renameDialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap({ containerRef: confirmForgetRef, onEscape: () => setConfirmForget(null) });
+  useFocusTrap({
+    containerRef: renameDialogRef,
+    onEscape: () => { if (!sessionRenameBusy) setSessionRenameTarget(null); },
+  });
 
   async function forgetWorkspace(item: WorkspaceItem) {
     try {
@@ -1119,7 +1129,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget) setConfirmForget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" tabIndex={-1} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setConfirmForget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
+          <div ref={confirmForgetRef} role="dialog" aria-modal="true" aria-labelledby="ws-forget-title" tabIndex={-1} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
             <h2 id="ws-forget-title" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
             <p className="mt-3 text-[13px] leading-6 text-text-secondary">
               将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
@@ -1391,7 +1401,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget) setConfirmForget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="ws-forget-title-expanded" tabIndex={-1} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setConfirmForget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
+          <div ref={confirmForgetRef} role="dialog" aria-modal="true" aria-labelledby="ws-forget-title-expanded" tabIndex={-1} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
             <h2 id="ws-forget-title-expanded" className="text-[16px] font-medium text-text-primary">确认移除项目</h2>
             <p className="mt-3 text-[13px] leading-6 text-text-secondary">
               将 <span className="font-medium text-text-primary">{confirmForget.title}</span> 从列表移除吗？
@@ -1424,7 +1434,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
             if (event.target === event.currentTarget && !sessionRenameBusy) setSessionRenameTarget(null);
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="session-rename-title" tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape" && !sessionRenameBusy) { event.stopPropagation(); setSessionRenameTarget(null); } }} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
+          <div ref={renameDialogRef} role="dialog" aria-modal="true" aria-labelledby="session-rename-title" tabIndex={-1} className="w-[min(420px,calc(100vw-32px))] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3 outline-none">
             <h2 id="session-rename-title" className="text-[16px] font-medium text-text-primary">重命名对话</h2>
             <input
               ref={sessionRenameInputRef}

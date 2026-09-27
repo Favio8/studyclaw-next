@@ -8,6 +8,7 @@ import ModelsSection from "@/src/components/settings/ModelsSection";
 import { MODES } from "@/src/lib/modes";
 import { api, ApiError } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import type { SettingsPayload } from "@/src/types/api";
 
 type Section = "general" | "models" | "agent";
@@ -46,7 +47,12 @@ export default function SettingsDialog() {
   const [loaded, setLoaded] = useState<SettingsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // W-10：焦点圈闭（打开聚焦首个控件、Tab 循环、Escape 尊重 busy、关闭还原）。
+  useFocusTrap({
+    containerRef: dialogRef,
+    onEscape: () => { if (!busy) setOpen(false); },
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -55,7 +61,6 @@ export default function SettingsDialog() {
     setError(null);
     setLoaded(null);
     setDraft(null);
-    queueMicrotask(() => closeButtonRef.current?.focus());
     void api.settings().then((payload) => {
       if (!alive) return;
       setLoaded(payload);
@@ -65,15 +70,6 @@ export default function SettingsDialog() {
     });
     return () => { alive = false; };
   }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) setOpen(false);
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [busy, open, setOpen]);
 
   if (!open) return null;
 
@@ -110,6 +106,7 @@ export default function SettingsDialog() {
       onMouseDown={closeOnMask}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -152,7 +149,6 @@ export default function SettingsDialog() {
           <div className="flex h-[54px] shrink-0 items-start justify-between gap-2 px-[14px] pb-2 pl-2.5 pt-5">
             <span className="text-[14px] font-medium text-text-primary">{section === "general" ? "通用设置" : section === "models" ? "模型配置" : "Agent 运行时"}</span>
             <button
-              ref={closeButtonRef}
               type="button"
               aria-label="关闭设置"
               title="关闭设置"

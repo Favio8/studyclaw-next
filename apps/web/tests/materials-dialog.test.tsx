@@ -205,3 +205,21 @@ describe("MaterialsDialog 勾选新建课程", () => {
     });
   });
 });
+
+describe("MaterialsDialog 焦点管理（W-10）", () => {
+  it("打开后焦点落在弹层内（首个可聚焦控件），而非逃逸到背景", () => {
+    render(<MaterialsDialog onClose={vi.fn()} />);
+    const dialog = screen.getByRole("dialog", { name: "资料导入/上传" });
+    const active = document.activeElement;
+    expect(active).not.toBeNull();
+    expect(dialog.contains(active)).toBe(true);
+  });
+
+  it("Escape 关闭弹层（与遮罩点击同语义）", () => {
+    const onClose = vi.fn();
+    render(<MaterialsDialog onClose={onClose} />);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+

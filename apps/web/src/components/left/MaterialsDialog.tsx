@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import { FolderPlus, Upload, X } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { refreshCourseList, refreshPanelData } from "@/src/lib/panelData";
@@ -326,6 +327,11 @@ ${msg}`);
 
   const supportedCount = (candidates ?? []).filter((c) => c.supported).length;
 
+  // W-10：焦点圈闭——打开聚焦首个控件、Tab 层内循环、Escape 关闭（与遮罩点击
+  // 同语义）、关闭后焦点还原。
+  const dialogRef = useRef<HTMLElement>(null);
+  useFocusTrap({ containerRef: dialogRef, onEscape: onClose });
+
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4"
@@ -335,6 +341,7 @@ ${msg}`);
       }}
     >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="资料导入/上传"

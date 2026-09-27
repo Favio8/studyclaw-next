@@ -16,6 +16,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import type {
   ProviderCatalogEntry,
   ProviderModelPayload,
@@ -260,6 +261,9 @@ function ProviderEditorCard({
   }
 
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
+  // W-10：候选选择框的焦点圈闭（Escape 关闭，与遮罩点击同语义）。
+  const candidatesDialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap({ containerRef: candidatesDialogRef, onEscape: () => setCandidates(null) });
   // 浏览器和密码管理器可能忽略 autocomplete="off"，尤其是新建表单。
   // 使用 new-password + 非语义化字段名，避免把用户的学号/账号资料误填进 Provider。
   const formAutoComplete = creating ? "new-password" : "off";
@@ -591,7 +595,13 @@ function ProviderEditorCard({
           role="presentation"
           onMouseDown={(e) => { if (e.target === e.currentTarget) setCandidates(null); }}
         >
-          <div role="dialog" aria-modal="true" aria-label="选择要添加的模型" className="flex max-h-[70vh] w-[440px] flex-col rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3">
+          <div
+            ref={candidatesDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="选择要添加的模型"
+            className="flex max-h-[70vh] w-[440px] flex-col rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3"
+          >
             <h4 className="text-sm font-medium text-text-primary">选择要添加的模型</h4>
             <p className="mt-1 text-xs text-text-faint">已在列表中的模型默认未勾选，采纳不会覆盖已调优的容量。</p>
             <div className="mt-2 flex gap-2 text-xs">
@@ -665,6 +675,11 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   // P2：空目录的添加卡被用户手动收起后，不因 SettingsDialog 的 loaded 刷新
   // （如去通用页签保存）而反复重开。
   const [dismissedEmptyAdd, setDismissedEmptyAdd] = useState(false);
+  // W-10：删除/覆盖确认框的焦点圈闭（Escape 尊重 busy）。
+  const deleteDialogRef = useRef<HTMLDivElement>(null);
+  const conflictDialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap({ containerRef: deleteDialogRef, onEscape: () => { if (!busy) setDeleteId(null); } });
+  useFocusTrap({ containerRef: conflictDialogRef, onEscape: () => { if (!busy) setConflict(null); } });
 
   // SettingsDialog loads its payload asynchronously. Keep the section in
   // sync when it becomes available after the models tab has mounted, while
@@ -988,7 +1003,12 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           role="presentation"
           onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) setDeleteId(null); }}
         >
-          <div role="dialog" aria-modal="true" className="w-[380px] rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3">
+          <div
+            ref={deleteDialogRef}
+            role="dialog"
+            aria-modal="true"
+            className="w-[380px] rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3"
+          >
             <h4 className="text-sm font-medium text-text-primary">确认删除 Provider</h4>
             <p className="mt-2 text-sm text-text-muted">确定要删除 {deleteId} 吗？该操作同时会移除已保存的 API Key。</p>
             <div className="mt-4 flex justify-end gap-2">
@@ -1007,7 +1027,13 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           role="presentation"
           onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) setConflict(null); }}
         >
-          <div role="dialog" aria-modal="true" aria-label="Provider 已存在" className="w-[380px] rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3">
+          <div
+            ref={conflictDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Provider 已存在"
+            className="w-[380px] rounded-xl border border-border-line bg-bg-panel p-4 shadow-lv3"
+          >
             <h4 className="text-sm font-medium text-text-primary">Provider 已存在</h4>
             <p className="mt-2 text-sm text-text-muted">
               「{conflict.profile.id}」已存在。覆盖会保留其 API Key，但会用当前表单内容替换配置。确定覆盖吗？

@@ -9,12 +9,13 @@
  * source of truth).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, Folder, FolderOpen, HardDrive, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { Clawzy } from "@/src/components/mascot";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
 import { useAppStore } from "@/src/store/useAppStore";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
@@ -28,6 +29,39 @@ function errorMessage(error: unknown): string {
 
 type Phase = "picking" | "adopting" | "error";
 type Mode = "native" | "browse";
+
+/** W-10：向导各阶段共用的弹层外壳——焦点圈闭 + Escape 关闭 + 遮罩点击关闭。
+ *  抽成组件而非在分支内直接加 hook：阶段切换会替换整个 section，分支内 hook
+ *  的监听器会持有已卸载的旧容器。 */
+function WizardShell({
+  labelledBy,
+  onEscape,
+  children,
+}: {
+  labelledBy: string;
+  onEscape: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLElement>(null);
+  useFocusTrap({ containerRef: ref, onEscape });
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"
+      role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onEscape(); }}
+    >
+      <section
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy}
+        className="w-[min(92vw,430px)] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3"
+      >
+        {children}
+      </section>
+    </div>
+  );
+}
 
 export default function NewProjectWizard() {
   const setWizardOpen = useAppStore((state) => state.setWizardOpen);
@@ -114,40 +148,36 @@ export default function NewProjectWizard() {
 
   if (phase === "picking") {
     return (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" role="presentation">
-        <section role="dialog" aria-modal="true" aria-labelledby="open-project-title" className="w-[min(92vw,430px)] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-focus/10 text-accent-focus"><FolderOpen size={18} aria-hidden /></span>
-            <div className="min-w-0">
-              <h2 id="open-project-title" className="text-[15px] font-medium text-text-primary">选择学习项目</h2>
-              <p className="mt-1 text-[13px] leading-5 text-text-muted">正在打开系统文件夹选择器，请在弹出的窗口中选择项目文件夹。</p>
-            </div>
-            <button type="button" aria-label="取消" title="取消" onClick={() => setWizardOpen(false)} className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-text-faint hover:bg-bg-card hover:text-text-primary"><X size={16} aria-hidden /></button>
+      <WizardShell labelledBy="open-project-title" onEscape={() => setWizardOpen(false)}>
+        <div className="flex items-start gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-focus/10 text-accent-focus"><FolderOpen size={18} aria-hidden /></span>
+          <div className="min-w-0">
+            <h2 id="open-project-title" className="text-[15px] font-medium text-text-primary">选择学习项目</h2>
+            <p className="mt-1 text-[13px] leading-5 text-text-muted">正在打开系统文件夹选择器，请在弹出的窗口中选择项目文件夹。</p>
           </div>
-          <div className="mt-5 flex items-center gap-2 text-[12px] text-text-faint" role="status"><LoaderCircle size={14} className="animate-spin text-accent-focus" aria-hidden />等待系统选择器响应…</div>
-          <div className="mt-4 border-t border-border-line pt-3">
-            <button type="button" onClick={() => setMode("browse")} className="text-[12px] text-text-faint underline-offset-2 transition-colors hover:text-text-primary hover:underline">
-              没有弹出窗口？改用目录浏览 →
-            </button>
-          </div>
-        </section>
-      </div>
+          <button type="button" aria-label="取消" title="取消" onClick={() => setWizardOpen(false)} className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-text-faint hover:bg-bg-card hover:text-text-primary"><X size={16} aria-hidden /></button>
+        </div>
+        <div className="mt-5 flex items-center gap-2 text-[12px] text-text-faint" role="status"><LoaderCircle size={14} className="animate-spin text-accent-focus" aria-hidden />等待系统选择器响应…</div>
+        <div className="mt-4 border-t border-border-line pt-3">
+          <button type="button" onClick={() => setMode("browse")} className="text-[12px] text-text-faint underline-offset-2 transition-colors hover:text-text-primary hover:underline">
+            没有弹出窗口？改用目录浏览 →
+          </button>
+        </div>
+      </WizardShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWizardOpen(false); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="open-project-error-title" className="w-[min(92vw,430px)] rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
-        <div className="flex items-start gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-fail/10 text-accent-fail"><FolderOpen size={18} aria-hidden /></span><div className="min-w-0"><h2 id="open-project-error-title" className="text-[15px] font-medium text-text-primary">无法打开项目</h2><p role="alert" className="mt-1 break-words text-[13px] leading-5 text-text-muted">{error ?? "未选择项目"}</p></div></div>
-        <div className="mt-5 flex items-center justify-between gap-2">
-          <button type="button" onClick={() => setMode("browse")} className="text-[12px] text-text-faint underline-offset-2 transition-colors hover:text-text-primary hover:underline">改用目录浏览 →</button>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setWizardOpen(false)} className="h-8 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card hover:text-text-primary">取消</button>
-            <button type="button" onClick={() => void chooseAndOpen()} className="flex h-8 items-center gap-1.5 rounded-lg border border-border-line px-3 text-[13px] text-text-muted hover:bg-bg-card hover:text-text-primary"><RefreshCw size={14} aria-hidden />重新选择</button>
-          </div>
+    <WizardShell labelledBy="open-project-error-title" onEscape={() => setWizardOpen(false)}>
+      <div className="flex items-start gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-fail/10 text-accent-fail"><FolderOpen size={18} aria-hidden /></span><div className="min-w-0"><h2 id="open-project-error-title" className="text-[15px] font-medium text-text-primary">无法打开项目</h2><p role="alert" className="mt-1 break-words text-[13px] leading-5 text-text-muted">{error ?? "未选择项目"}</p></div></div>
+      <div className="mt-5 flex items-center justify-between gap-2">
+        <button type="button" onClick={() => setMode("browse")} className="text-[12px] text-text-faint underline-offset-2 transition-colors hover:text-text-primary hover:underline">改用目录浏览 →</button>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setWizardOpen(false)} className="h-8 rounded-lg px-3 text-[13px] text-text-muted hover:bg-bg-card hover:text-text-primary">取消</button>
+          <button type="button" onClick={() => void chooseAndOpen()} className="flex h-8 items-center gap-1.5 rounded-lg border border-border-line px-3 text-[13px] text-text-muted hover:bg-bg-card hover:text-text-primary"><RefreshCw size={14} aria-hidden />重新选择</button>
         </div>
-      </section>
-    </div>
+      </div>
+    </WizardShell>
   );
 }
 
@@ -191,9 +221,13 @@ function BrowsePicker({ onAdopt, onCancel, onPreferNative, busy }: {
 
   const current = page?.path ?? "";
 
+  // W-10：焦点圈闭（Escape = 取消，与遮罩点击/取消钮同语义）。
+  const dialogRef = useRef<HTMLElement>(null);
+  useFocusTrap({ containerRef: dialogRef, onEscape: onCancel });
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="browse-project-title" className="flex max-h-[80vh] w-[min(92vw,470px)] flex-col rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="browse-project-title" className="flex max-h-[80vh] w-[min(92vw,470px)] flex-col rounded-2xl border border-border-line bg-bg-panel p-5 shadow-lv3">
         <div className="flex items-start gap-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-focus/10 text-accent-focus"><FolderOpen size={18} aria-hidden /></span>
           <div className="min-w-0 flex-1">

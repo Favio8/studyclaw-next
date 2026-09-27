@@ -191,4 +191,22 @@ describe('MarkdownIngestor', () => {
     // chunk 的 concept_id 跟随各自章节，不串资料。
     expect(artB.chunks[0]!.concept_id).toBe(idB)
   })
+
+  it('T-20：reserve 只报告真正加入的 id，release 不误删别文件已产生的 id', () => {
+    const ingestor = new MarkdownIngestor()
+    const doc = '# 讲义A\n\n## 概述\n\nA 的概述内容。\n'
+    const idA = ingestor.parseText(doc, 'a.md', 'c1').syllabus.chapters[0]!.concepts[0]!.id
+    // 已被本实例占用（同一 build 里先解析的 a.md）→ 不重复加入、返回空。
+    expect(ingestor.reserve([idA])).toEqual([])
+    const idB = ingestor.parseText(doc, 'b.md', 'c1').syllabus.chapters[0]!.concepts[0]!.id
+    expect(idB).toBe(`${idA}_2`)
+    // 本实例没产生过的外部 id 才会被真正加入，并由调用方 release。
+    const added = ingestor.reserve([`${idA}_9`])
+    expect(added).toEqual([`${idA}_9`])
+    ingestor.release(added)
+    // release 只撤自己加入的那批：a.md 真实产生的 idA 仍在实例集里 → c.md
+    // 拿 _3，不会回退成干净 id 与 a.md 撞车。
+    const idC = ingestor.parseText(doc, 'c.md', 'c1').syllabus.chapters[0]!.concepts[0]!.id
+    expect(idC).toBe(`${idA}_3`)
+  })
 })

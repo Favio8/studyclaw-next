@@ -348,6 +348,34 @@ export class CourseBuilder {
     // concept id，掌握度跨资料共享。注意一次性迁移效果：既有课程重建时
     // 原合并概念会拆分，历史掌握度留在第一个 id 上。
     const ingestor = new MarkdownIngestor(undefined, this.granularity)
+    // T-20（增量稳定性）：增量 build 只重解析变更文件，一个全新的 ingestor
+    // 看不到未变更资料已占用的 id——b.md 改一个字就会让它的「概述」重新拿到
+    // 干净 id，又和 a.md 的「概述」撞成同一个 concept id（正是 T-20 要修的
+    // 掌握度跨资料混用），同时在 syllabus 里留下没人再生产的 _2 僵尸行。
+    // 因此按 source_file 归属把**其他资料**已占用的 id 预留出来；本文件自己
+    // 的旧 id 不预留（否则每次增量 build 后缀递增、越滚越多）。
+    // 只预留已标记来源的章节：旧版 syllabus.json 没有 source_file，无法归属，
+    // 误预留会把别文件的 id 也当成本文件的，一律不预留（保持旧行为），直到
+    // 下次全量 build / regenerateSyllabus 重新打上标记。
+    const idsByFile = new Map<string, Set<string>>()
+    for (const chapter of (await loadSyllabus(this.courseDir)).chapters) {
+      const owner = chapter.source_file
+      if (owner === undefined) continue
+      let ids = idsByFile.get(owner)
+      if (ids === undefined) {
+        ids = new Set<string>()
+        idsByFile.set(owner, ids)
+      }
+      ids.add(chapter.id)
+      for (const concept of chapter.concepts) ids.add(concept.id)
+    }
+    const foreignIds = (file: string): string[] => {
+      const reserved: string[] = []
+      for (const [owner, ids] of idsByFile) {
+        if (owner !== file) reserved.push(...ids)
+      }
+      return reserved
+    }
     // PERF-1 重构：摄取（本地解析，快）保持按文件串行；LLM 生成（慢）
     // 扁平化为 chunk 粒度的任务队列后按 max_concurrency 有界并行消费——
     // 旧实现双层全串行，56 chunk × ~10s 就是分钟级空白等待。
@@ -358,6 +386,10 @@ export class CourseBuilder {
       if (onProgress !== undefined) onProgress(index, changedFiles.length, name)
       const path = join(sourcesDir, name)
       const ext = name.toLowerCase().match(/\.[^.]*$/)?.[0] ?? ''
+      // T-20：预留其他资料已占用的 id，解析完立即撤消（只撤 reserve 报告真正
+      // 加入的那批——同一 build 里先前文件已产生的同名 id 必须继续占用）。
+      const reserved = foreignIds(name)
+      const added = ingestor.reserve(reserved)
       let artifact: IngestArtifact
       try {
         if (ext === '.md' || ext === '.txt') {
@@ -370,11 +402,19 @@ export class CourseBuilder {
       } catch {
         report.degraded.push(name)
         continue
+      } finally {
+        ingestor.release(added)
       }
       // Carry the checksum identity (nested paths included) into every chunk.
       const normalized: IngestArtifact = {
         ...artifact,
         source_file: name,
+        // T-20：章节打上来源标记落盘——下次增量 build 靠它认出"哪些 id 属于
+        // 别的资料"，从而预留（见上方 foreignIds）。
+        syllabus: {
+          ...artifact.syllabus,
+          chapters: artifact.syllabus.chapters.map(chapter => ({ ...chapter, source_file: name })),
+        },
         chunks: artifact.chunks.map(chunk => ({ ...chunk, source_ref: { ...chunk.source_ref, file: name } })),
       }
       // F-17：空/纯文本文档零章节不再静默成功——标入 degraded 显式告警。
@@ -447,6 +487,11 @@ export class CourseBuilder {
         artifacts.push({
           ...artifact,
           source_file: name,
+          // T-20：granularity 重建同样全量重解析，章节一并打上来源标记。
+          syllabus: {
+            ...artifact.syllabus,
+            chapters: artifact.syllabus.chapters.map(chapter => ({ ...chapter, source_file: name })),
+          },
           chunks: artifact.chunks.map(chunk => ({ ...chunk, source_ref: { ...chunk.source_ref, file: name } })),
         })
         report.added.push(name)
@@ -519,8 +564,18 @@ export class CourseBuilder {
           const known = new Set(current.concepts.map(concept => concept.id))
           const fresh = chapter.concepts.filter(concept => !known.has(concept.id))
           if (fresh.length > 0) {
-            merged[index] = { ...current, concepts: [...current.concepts, ...fresh] }
+            // T-20：沿用/补上来源标记——合并后章节仍要能认出"属于哪个资料"，
+            // 否则下次增量 build 无法为它预留 id。
+            merged[index] = {
+              ...current,
+              source_file: chapter.source_file ?? current.source_file,
+              concepts: [...current.concepts, ...fresh],
+            }
             grew = true
+          } else if (current.source_file === undefined && chapter.source_file !== undefined) {
+            // 旧版无标记章节被同一 chapter id 重新打到：只补归属、不新增内容
+            // （不算 grew，避免无谓 bump 版本与重写）。
+            merged[index] = { ...current, source_file: chapter.source_file }
           }
         } else {
           byId.set(chapter.id, merged.length)

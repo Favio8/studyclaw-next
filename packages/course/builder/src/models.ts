@@ -35,6 +35,10 @@ export const chapter = z.object({
   description: z.string().default(''),
   dependencies: z.array(z.string()).default([]),
   concepts: z.array(concept).default([]),
+  /** T-20：产出该章节的源文件（sources/ 下的相对名）。增量 build 只重解析
+   *  变更文件，靠它把「其他资料」已占用的 id 预留出来，避免同名章节重新拿到
+   *  干净 id 而撞车（掌握度跨资料混用）。旧版 syllabus.json 无此字段。 */
+  source_file: z.string().optional(),
 })
 export type Chapter = z.infer<typeof chapter>
 

@@ -119,6 +119,39 @@ describe('CourseBuilder', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('T-20：增量 build 只重解析变更文件，跨资料同名概念 id 不撞车', async () => {
+    // 两个讲义都有「概述」——旧实现（含只提实例级 seen 的中间态）在全量 build
+    // 下不撞，但增量 build 用全新 ingestor 只解析变更文件，会把 b.md 的「概述」
+    // 重新分配成干净 id，与 a.md 的「概述」撞成同一 concept id（掌握度跨资料
+    // 混用），并留下没人再生产的 _2 僵尸行。现在按 source_file 归属为其他资料
+    // 预留 id，变更文件稳定复得自己的 _2 后缀。
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, 'sources', 'a.md'), '# 讲义A\n\n## 概述\n\nA 的概述内容。\n', 'utf8')
+    await writeFile(join(courseDir, 'sources', 'b.md'), '# 讲义B\n\n## 概述\n\nB 的概述内容。\n', 'utf8')
+    await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+
+    const conceptIdsOf = async (title: string): Promise<string[]> => {
+      const syllabus = await loadSyllabus(courseDir)
+      return syllabus.chapters.find(chapter => chapter.title === title)!.concepts.map(concept => concept.id)
+    }
+    const beforeA = await conceptIdsOf('讲义A')
+    const beforeB = await conceptIdsOf('讲义B')
+    expect(beforeA.length).toBeGreaterThan(0)
+    expect(beforeB).not.toEqual(beforeA) // 全量 build：第二个资料得 _2 后缀
+
+    // 只改 b.md → 增量 build 只重解析它（全新 ingestor）。
+    await writeFile(join(courseDir, 'sources', 'b.md'), '# 讲义B\n\n## 概述\n\nB 的概述内容（修订）。\n', 'utf8')
+    await new CourseBuilder(courseDir, new FakeGenerator()).build(1)
+
+    const all = (await loadSyllabus(courseDir)).chapters.flatMap(chapter => chapter.concepts.map(concept => concept.id))
+    expect(new Set(all).size).toBe(all.length) // 没有任何 concept id 跨资料撞车
+    expect(await conceptIdsOf('讲义A')).toEqual(beforeA) // 未变更资料原样不动
+    expect(await conceptIdsOf('讲义B')).toEqual(beforeB) // 变更资料稳定复得自己的 id
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('M2：生成失败时旧卡保留、checksums 不落盘（先删后生成回归）', async () => {
     const { root, courseDir, generator } = await setup()
     const builder = new CourseBuilder(courseDir, generator)

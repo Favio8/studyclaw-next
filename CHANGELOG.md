@@ -18,7 +18,10 @@
   setGlobal 前 safeParse 拒绝，open 时坏记录隔离登记 domain.quarantined 并
   warn（其余记录照常可用）；
 - T-20：slug 去重集按文件隔离导致跨讲义同名章节共享 concept id（掌握度跨
-  资料混用）——提升为 ingestor 实例级（build 单实例），第二个得 _2 后缀。
+  资料混用）——提升为 ingestor 实例级（build 单实例），第二个得 _2 后缀；
+  并按章节 source_file 归属在增量 build 前为**其他资料**预留已占用的 id
+  （否则只改一个文件就会让它的同名章节重新拿到干净 id、又撞车），变更文件
+  稳定复得自己的 id；
 
 ### 文档
 

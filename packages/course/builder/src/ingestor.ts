@@ -342,6 +342,29 @@ export class MarkdownIngestor {
    */
   private readonly seenIds = new Set<string>()
 
+  /**
+   * T-20：临时预留外部 id（其他资料已占用的 chapter/concept id）。增量 build
+   * 只重解析变更文件，必须把未变更资料已占用的 id 预留出来，否则该文件的
+   * 同名章节会重新拿到干净 id、与另一资料撞车。
+   * @returns 本次真正加入去重集的 id——调用方必须原样交给 {@link release}，
+   *   这样"本 build 里其他文件已经产生的同名 id"不会被误删（那会让后续文件
+   *   重新撞上车）。
+   */
+  reserve(ids: Iterable<string>): string[] {
+    const added: string[] = []
+    for (const id of ids) {
+      if (this.seenIds.has(id)) continue
+      this.seenIds.add(id)
+      added.push(id)
+    }
+    return added
+  }
+
+  /** 撤消 {@link reserve} 的临时预留（只删 reserve 报告"真正加入"的那批）。 */
+  release(added: Iterable<string>): void {
+    for (const id of added) this.seenIds.delete(id)
+  }
+
   parseText(text: string, sourceName: string, courseId = 'course'): IngestArtifact {
     const processed = preprocessMarkdown(text, sourceName)
     const pdfMode = preprocessModeFor(sourceName) === 'pdf'

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
  * 阶段三整机冒烟：真实路径 `electron .`（main.cjs）——
- * spawn sidecar → 轮询 host.json → 开窗 loadURL → UI 就绪。
+ * spawn sidecar → 轮询 host.json → 开窗 loadURL → UI 就绪 → 应用自身退出路径。
  * 验证点：
  *   1. sidecar 进程拉起、host.json 写出（userData/host-home/）
  *   2. 窗口加载成功（console 无 net::ERR / fatal）
- *   3. 退出后 sidecar 无残留进程（R6）
+ *   3. 应用自身退出路径收尾：优先 SIGTERM（非 Windows）/ taskkill 无 /F 的
+ *      WM_CLOSE 请求（Windows）走 before-quit → stopHost，sidecar 无残留（R6）；
+ *      仅当优雅退出宽限内未生效才兜底强杀（强杀会留下孤儿 sidecar，属已知产品
+ *      限制，此路径下不断言 residue）。
  *
  * 用法：node scripts/smoke-desktop.mjs
  */
@@ -26,9 +29,14 @@ const electron = process.env.ELECTRON_PATH ?? require('electron')
 const userData = mkdtempSync(join(process.env.TEMP ?? '/tmp', 'sc-desktop-ud-'))
 console.log('[smoke] userData =', userData)
 
+// ELECTRON_RUN_AS_NODE 会让 electron 二进制退化为纯 Node 运行（app 未定义，
+// main.cjs 直接崩）——调用方环境（CI/Harness）可能带着它，必须显式剔除。
+const childEnv = { ...process.env, ELECTRON_ENABLE_LOGGING: '1', STUDYCLAW_DESKTOP_USERDATA: userData }
+delete childEnv.ELECTRON_RUN_AS_NODE
+
 const child = spawn(electron, ['.'], {
   cwd: desktop,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', STUDYCLAW_DESKTOP_USERDATA: userData },
+  env: childEnv,
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: false,
 })
@@ -78,13 +86,30 @@ const ui = await fetch(`http://127.0.0.1:${cfg.port}/`, { signal: AbortSignal.ti
 const html = await ui.text()
 console.log('[smoke] GET / via sidecar →', ui.status, 'token-injected:', html.includes('__STUDYCLAW__'))
 
-// 退出：杀整棵树（模拟 window close → app.quit 路径之后的进程消失断言）。
-killTree(child.pid)
-await new Promise(r => setTimeout(r, 1500))
+// 退出：优先走应用自身的退出路径（before-quit → stopHost），验证收尾；
+// 优雅退出宽限内未生效才兜底强杀，并标记 graceful=false（强杀留孤儿是已知
+// 产品限制，此路径不断言 residue）。
+const gracefulStop = () => {
+  if (process.platform === 'win32') {
+    // 无 /F：向 GUI 窗口发 WM_CLOSE 关闭请求 → Electron 走正常退出流程。
+    spawnSync('taskkill', ['/PID', String(child.pid)], { stdio: 'ignore' })
+  } else {
+    child.kill('SIGTERM')
+  }
+}
+gracefulStop()
+await new Promise(r => setTimeout(r, 6000))
+let graceful = !pidAlive(child.pid)
+if (!graceful) {
+  console.log('[smoke] 优雅退出宽限未生效，兜底强杀')
+  killTree(child.pid)
+}
+await new Promise(r => setTimeout(r, 2000))
 const residue = pidAlive(cfg.pid) ? 1 : 0
-console.log('[smoke] sidecar residue after kill:', residue)
+console.log('[smoke] graceful exit:', graceful, '| sidecar residue:', residue)
 rmSync(userData, { recursive: true, force: true })
 
 const pass = fatalErrors.length === 0 && ui.ok && html.includes('__STUDYCLAW__')
+  && (graceful ? residue === 0 : true)
 console.log(pass ? '[smoke] RESULT: PASS' : '[smoke] RESULT: FAIL')
 process.exit(pass ? 0 : 1)

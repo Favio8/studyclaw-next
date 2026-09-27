@@ -8,6 +8,26 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+测试覆盖与安全文档收尾（2026-09-27）：
+
+### 测试
+
+- 新增 `apps/cli/tests/serve-http.spec.ts`（9 用例）：serve 主循环此前零集成
+  覆盖——现在以子进程起真实 Host 断言 token 门禁顺序（无/错 token 401、
+  正确 200）、Origin 403 先于 token、GET /api/* 405、静态托管 tap 注入与
+  SPA 回落、三种编码穿越不泄漏、上传路由 409 边界、SIGINT 优雅关停后
+  host.json/host.lock 真正删除（C-1 回归）、实例锁强杀自愈；
+- smoke-desktop 退出段改走应用自身退出路径（SIGTERM / taskkill 无 /F），
+  sidecar 残留纳入 pass 条件（旧实现用外部强杀却声称验证 R6）；并剔除
+  调用方环境继承的 ELECTRON_RUN_AS_NODE（会让 electron 退化为纯 Node）。
+
+### 安全
+
+- C-13（静态托管 token 门禁）经威胁模型分析后关闭为文档化取舍：访问
+  token 必须明文落盘（host.json）供桌面壳/CLI 发现，门禁对能读磁盘的
+  同机攻击者无效，仅防跨站 drive-by（现有同源策略已覆盖）；SECURITY.md
+  已精确声明该边界并给出 OS 级缓解建议（独立用户账户、磁盘加密、ACL）。
+
 弹层焦点管理修复（W-10，提交 `ed18fd6` 及接入提交）：
 
 ### 修复

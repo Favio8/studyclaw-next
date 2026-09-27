@@ -123,3 +123,21 @@ describe('T-1：Windows 8.3 短名别名拒绝', () => {
     expect((data as { content: string }).content).toBe('legit')
   })
 })
+
+describe('T-12：异盘绝对路径 containment（Windows）', () => {
+  it.runIf(process.platform === 'win32')('跨盘绝对路径被拒（relative 产物为绝对形态，旧判定放行）', async () => {
+    // C: 上的工作区，D: 的绝对路径：relative('C:\\ws','D:\\x') = 'D:\\x'，
+    // 不以 '../' 开头 → 旧实现放行（跨盘逃逸原语）。
+    const otherDrive = process.cwd().split(':')[0] === 'C' ? 'D:\\__studyclaw_probe__.md' : 'C:\\__studyclaw_probe__.md'
+    await expect(handlerReadFile(ctx, { path: otherDrive })).rejects.toBeInstanceOf(ToolRejected)
+    await expect(handlerWriteFile(ctx, { path: otherDrive, content: 'x' })).rejects.toBeInstanceOf(ToolRejected)
+  })
+})
+
+describe('T-15：Windows 保留设备名', () => {
+  it.runIf(process.platform === 'win32')('保留设备名作为文件名被拒（旧实现写入"成功"但数据进设备被弃）', async () => {
+    for (const name of ['CON', 'NUL', 'PRN', 'AUX', 'COM1', 'LPT1', 'con.txt']) {
+      await expect(handlerWriteFile(ctx, { path: name, content: 'x' })).rejects.toBeInstanceOf(ToolRejected)
+    }
+  })
+})

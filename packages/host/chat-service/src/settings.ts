@@ -599,8 +599,12 @@ export async function updateSettings(workspaceRoot: string, partial: {
     if (partial.model !== undefined) nextLlm.model = partial.model.trim()
     if (partial.apiKeyEnv !== undefined) {
       const value = partial.apiKeyEnv.trim()
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-        throw new Error('API key 环境变量名必须是字母、数字和下划线组成，且不能以数字开头')
+      // 加固4：与 discoverModels 的 API_KEY_ENV_RE 对齐——旧判定接受任意标识符
+      // （如 PATH/HOME），而该值会作为 Bearer 发往模型端点：既是自伤型外带通道，
+      // 也让「环境变量未设置」的排障失去意义。生成侧 deriveKeyRef 产出的
+      // `<PROVIDER>_API_KEY` 形态天然合规，既有配置读取不受影响（仅约束新值）。
+      if (!API_KEY_ENV_RE.test(value)) {
+        throw new Error('API key 环境变量名需符合约定（如 DEEPSEEK_API_KEY 或 <名称>_API_KEY），不接受任意标识符')
       }
       nextLlm.api_key_env = value
     }

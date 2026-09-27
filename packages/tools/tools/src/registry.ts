@@ -230,7 +230,22 @@ export class ToolRegistry {
       return result
     }
     if (requiresApproval && ctx.approval !== undefined) {
-      const decision = await raceWithAbort(ctx.approval({ name: spec.name, policy: spec.policy, args: clean }), ctx.signal)
+      // T-14：审批期 abort/异常必须转成结构化 ToolResult——raceWithAbort 抛的
+      // 裸 Error 会穿出 execute()，而 executeWithRetry 只按 status 重试不
+      // catch，到达 Agent 循环的是非契约异常（executeBatch/ToolRuntime 才有
+      // 结构化兜底，直接调用方没有）。
+      let decision: 'allow' | 'deny'
+      try {
+        decision = await raceWithAbort(ctx.approval({ name: spec.name, policy: spec.policy, args: clean }), ctx.signal)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const cancelled = message === 'tool cancelled' || ctx.signal?.aborted === true
+        const result = cancelled
+          ? ToolResult.rejected('工具已取消', 'TOOL_CANCELLED', spec.renderIntent)
+          : ToolResult.degraded(`审批失败: ${message}`, 'TOOL_EXECUTION_FAILED', spec.renderIntent)
+        this.auditAction(spec.name, result)
+        return result
+      }
       if (decision !== 'allow') {
         const result = ToolResult.rejected(`工具 ${spec.name} 未获用户确认`, 'APPROVAL_DENIED', spec.renderIntent)
         this.auditAction(spec.name, result)

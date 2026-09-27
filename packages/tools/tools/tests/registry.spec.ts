@@ -555,4 +555,38 @@ describe('ToolRegistry', () => {
     expect(result.summary).toContain('tool timeout')
     await rm(root, { recursive: true, force: true })
   })
+
+  it('T-14：审批期间 abort 转结构化 TOOL_CANCELLED（不向调用方抛裸 Error）', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const registry = agentToolRegistry(courseDir, wsRoot)
+    const controller = new AbortController()
+    const resultPromise = registry.execute('write_note', { content: 'x' }, {
+      courseDir,
+      workspaceRoot: wsRoot,
+      signal: controller.signal,
+      approval: async () => {
+        // 审批挂起，直到 abort（模拟用户在审批期取消）。
+        await new Promise<void>((_resolve, reject) => controller.signal.addEventListener('abort', () => reject(new Error('tool cancelled')), { once: true }))
+        return 'deny' as const
+      },
+    })
+    controller.abort()
+    // 旧实现：raceWithAbort 的裸 Error 穿出 execute()，这里是 rejects.toThrow。
+    const result = await resultPromise
+    expect(result.status).toBe('rejected')
+    expect(result.error).toBe('TOOL_CANCELLED')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-8：超长工具参数被 schema 上限拦截（prompt 成本放大防护）', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const registry = agentToolRegistry(courseDir, wsRoot)
+    const result = await registry.execute('evaluate_answer', {
+      taskId: 't_1',
+      answer: 'x'.repeat(4001),
+    }, { courseDir, workspaceRoot: wsRoot, approval: async () => 'allow' })
+    expect(result.status).toBe('rejected')
+    expect(result.summary).toContain('参数非法')
+    await rm(root, { recursive: true, force: true })
+  })
 })

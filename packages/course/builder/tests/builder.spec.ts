@@ -8,7 +8,7 @@
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CourseBuilder, loadSyllabus, loadTaskPool, type TaskGenerator } from '../src/builder.ts'
+import { CourseBuilder, loadSyllabus, loadTaskPool, migrateLegacyLayout, MAX_SOURCE_FILE_BYTES, type TaskGenerator } from '../src/builder.ts'
 import type { HarnessTask, IngestArtifact } from '../src/models.ts'
 
 class FakeGenerator implements TaskGenerator {
@@ -191,6 +191,50 @@ describe('CourseBuilder', () => {
     // 等在途单元结算完毕：失败已发生时不再认领第 3 个单元（旧实现会）。
     await new Promise(resolve => setTimeout(resolve, 80))
     expect(calls).toBe(2)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-7：超过大小上限的源文件被跳过并进 degraded（构建内存守卫）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-bigfile-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, 'sources', 'a.md'), DOC, 'utf8')
+    // 64MB+1 的巨型文件：旧实现整文件 readFile 进内存（checksum 阶段）。
+    await writeFile(join(courseDir, 'sources', 'huge.md'), Buffer.alloc(MAX_SOURCE_FILE_BYTES + 1, 0x61), 'utf8')
+    const builder = new CourseBuilder(courseDir, new FakeGenerator())
+    const report = await builder.build(1)
+    expect(report.degraded.some(line => line.includes('huge.md') && line.includes('上限'))).toBe(true)
+    // 正常文件仍被摄取（守卫不误伤）。
+    expect(report.added).toContain('a.md')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-10：布局迁移 rename 失败时不写 marker（半迁移不永久化，下次重试）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-halfmigrate-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
+    await writeFile(join(courseDir, 'progress.md'), '# 旧布局看板\n', 'utf8')
+    // 注入必失败的 move（模拟占用/杀软锁定导致的 EPERM/EBUSY）。
+    await migrateLegacyLayout(courseDir, async () => { throw new Error('EPERM simulated') })
+    // marker 未落 → 下次启动会重试迁移（旧实现吞错后写 marker，半迁移被洗白）。
+    const marker = join(courseDir, '.studyclaw', '.layout-v2')
+    await expect(readFile(marker, 'utf8')).rejects.toThrow()
+    // 根目录遗留原样未动。
+    await expect(readFile(join(courseDir, 'progress.md'), 'utf8')).resolves.toContain('旧布局看板')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('T-10：迁移成功时 marker 落盘且幂等（二次调用直接返回）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-migrate-ok-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
+    await writeFile(join(courseDir, 'progress.md'), '# 旧布局看板\n', 'utf8')
+    await migrateLegacyLayout(courseDir)
+    const marker = join(courseDir, '.studyclaw', '.layout-v2')
+    await expect(readFile(marker, 'utf8')).resolves.toBe('v2\n')
+    await expect(readFile(join(courseDir, '.studyclaw', 'progress.md'), 'utf8')).resolves.toContain('旧布局看板')
+    // 幂等：二次调用不重复迁移、不抛错。
+    await migrateLegacyLayout(courseDir)
     await rm(root, { recursive: true, force: true })
   })
 })

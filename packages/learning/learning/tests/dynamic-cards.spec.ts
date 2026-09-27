@@ -90,4 +90,14 @@ describe('generateDynamicCards 质量闸（T-5）', () => {
     const cards = await generateDynamicCards(client, evaluatorOptions, sourceTask, '混淆了重载与覆写')
     expect(cards).toHaveLength(0)
   })
+
+  it('T-19：同毫秒连续两批的动态卡 task_id 不碰撞（随机后缀）', async () => {
+    const client = new FakeStructuredClient({ tasks: [mcq()] })
+    const first = await generateDynamicCards(client, evaluatorOptions, sourceTask, '混淆了重载与覆写')
+    const second = await generateDynamicCards(client, evaluatorOptions, sourceTask, '混淆了重载与覆写')
+    expect(first[0]!.task_id).not.toBe(second[0]!.task_id)
+    // 仍可溯源到源题与概念。
+    expect(first[0]!.concept_id).toBe('c_override')
+    expect(first[0]!.target_id).toBe('dynamic:c_override_001')
+  })
 })

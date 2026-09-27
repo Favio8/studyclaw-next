@@ -5,7 +5,7 @@
  * @module @studyclaw/learning/src/index
  */
 
-import { readFile, readdir } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { harnessTask, type HarnessTask } from '@studyclaw/course-builder'
@@ -19,6 +19,31 @@ import { loadTaskPool } from '@studyclaw/course-builder'
 import { enforceTaskQuality } from '@studyclaw/course-builder'
 import { loadProgressBoard, dueRecords } from '@studyclaw/course-builder'
 import { localDateKey } from '@studyclaw/course-builder'
+
+// ---------------------------------------------------------------------------
+// Layout fallbacks (T-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * T-16：状态文件路径回退——v2 布局（`<root>/.studyclaw/<name>`）优先，旧布局
+ * 根目录兜底。与 tools 的 resolveStateFile 同口径：硬编码 `.studyclaw/` 会让
+ * 未迁移旧布局的工作区"静默失效"（进度板读不到 → 到期调度恒空；history 读不到
+ * → 热力图恒 0），且无任何告警。
+ */
+async function stateFilePath(root: string, name: string): Promise<string> {
+  const v2 = join(root, '.studyclaw', name)
+  if ((await stat(v2).catch(() => null))?.isFile()) return v2
+  return join(root, name)
+}
+
+/** T-16：会话历史目录回退（v2 `<root>/.studyclaw/history`，旧布局 `<root>/history`）。 */
+async function historyDirOf(root: string): Promise<string> {
+  const v2 = join(root, '.studyclaw', 'history')
+  if ((await stat(v2).catch(() => null))?.isDirectory()) return v2
+  const legacy = join(root, 'history')
+  if ((await stat(legacy).catch(() => null))?.isDirectory()) return legacy
+  return v2
+}
 
 // ---------------------------------------------------------------------------
 // Evaluator (rubric binary hit)
@@ -153,7 +178,9 @@ export async function pickTasks(
   dueOnly = false,
 ): Promise<HarnessTask[]> {
   const pool = (await loadTaskPool(courseDir)).filter(task => !task.deprecated)
-  const board = await loadProgressBoard(join(courseDir, '.studyclaw', 'progress.md'))
+  // T-16：进度板路径回退（v2 布局优先、旧布局根目录兜底）——硬编码
+  // `.studyclaw/` 让未迁移的旧布局工作区到期调度静默失效（板读不到 → 无到期）。
+  const board = await loadProgressBoard(await stateFilePath(courseDir, 'progress.md'))
   const due = new Set(dueRecords(board, today).map(record => record.conceptId))
 
   // FL-24：学习进度的权威在 `progress.md`——`evalSubmit` 只写它，从不回写 task
@@ -175,11 +202,27 @@ export async function pickTasks(
     if (conceptId !== null) {
       return ordered.filter(task => task.concept_id === conceptId).slice(0, Math.max(1, count))
     }
-    const picked = ordered.filter(task => due.has(task.concept_id)).slice(0, Math.max(1, count))
+    // T-4：到期挑选按概念去重——旧实现直接 slice，count 内可能全是同一概念
+    // 的多张卡（学生可记忆题面与答案位，公平性缺陷）；不足 count 时再用同概念
+    // 的其余到期卡补位（不少题）。
+    const limit = Math.max(1, count)
+    const picked: HarnessTask[] = []
+    const seenConcepts = new Set<string>()
+    for (const task of ordered) {
+      if (picked.length >= limit) break
+      if (!due.has(task.concept_id) || seenConcepts.has(task.concept_id)) continue
+      seenConcepts.add(task.concept_id)
+      picked.push(task)
+    }
+    for (const task of ordered) {
+      if (picked.length >= limit) break
+      if (!due.has(task.concept_id) || picked.includes(task)) continue
+      picked.push(task)
+    }
     if (!dueOnly) {
       const seen = new Set(picked.map(task => task.concept_id))
       for (const task of ordered) {
-        if (picked.length >= Math.max(1, count)) break
+        if (picked.length >= limit) break
         if (attemptsOf(task) === 0 && !seen.has(task.concept_id)) {
           picked.push(task)
           seen.add(task.concept_id)
@@ -271,7 +314,9 @@ export async function generateDynamicCards(
   )
   const candidates = batch.tasks.slice(0, count).map((task, index) => ({
     ...task,
-    task_id: `${sourceTask.concept_id.replace(/^c_/, '')}_dyn${Date.now()}${index}`,
+    // T-19：`_dyn${Date.now()}${index}` 在同毫秒跨批会碰撞（mock/高速连续）
+    // → 池内 id 重复。加随机后缀；target_id 仍指向源题，不影响溯源。
+    task_id: `${sourceTask.concept_id.replace(/^c_/, '')}_dyn${Date.now().toString(36)}${index}${Math.random().toString(36).slice(2, 6)}`,
     concept_id: sourceTask.concept_id,
     source_ref: sourceTask.source_ref,
     history: { attempts: 0, last_score: null, pass_count: 0, last_review_at: null, next_review_at: null, ef: 2.5 },
@@ -291,13 +336,15 @@ export async function generateDynamicCards(
 
 /** Read the workspace-level global profile (Memory.md). */
 export async function readGlobalMemory(workspaceRoot: string): Promise<string> {
-  return (await readFile(join(workspaceRoot, '.studyclaw', 'Memory.md'), 'utf8').catch(() => '')) ?? ''
+  // T-16：v2 优先、旧布局根目录兜底。
+  return (await readFile(await stateFilePath(workspaceRoot, 'Memory.md'), 'utf8').catch(() => '')) ?? ''
 }
 
 /** Read the course memory pool evidence (sync audit lines). */
 export async function readCourseMemoryPool(courseDir: string): Promise<string[]> {
   // P1-7：与写入侧一致——历史目录在 <课程根>/.studyclaw/history。
-  const historyDir = join(courseDir, '.studyclaw', 'history')
+  // T-16：旧布局（根目录 history/）回退。
+  const historyDir = await historyDirOf(courseDir)
   const hints: string[] = []
   if (!(await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) return hints
   for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
@@ -322,9 +369,28 @@ export async function readCourseMemoryPool(courseDir: string): Promise<string[]>
 // Gitops (silent auto-commit, never blocks the session)
 // ---------------------------------------------------------------------------
 
+/**
+ * T-18：题池（含答案键）与评测幂等账本不进用户的 git 历史——gitops 的
+ * `git add -A` 会把 .studyclaw 全量提交，答案/评分痕迹随之进入仓库历史且
+ * 无法真正"取消"。在状态目录落一份 .gitignore（幂等、best-effort）：只排除
+ * 答案-bearing 文件，进度/大纲/会话历史仍按 gitops 设计照常提交。
+ * 注意：已被历史提交跟踪的文件不会被 .gitignore 自动 untrack（需用户自行
+ * `git rm --cached`），此处只防止未来的提交。
+ */
+async function ensureStateGitignore(workspaceRoot: string): Promise<void> {
+  const stateDir = join(workspaceRoot, '.studyclaw')
+  const gitignore = join(stateDir, '.gitignore')
+  const existing = await readFile(gitignore, 'utf8').catch(() => null)
+  if (existing !== null && existing.includes('tasks/')) return
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(gitignore, ['# studyclaw: 答案-bearing 状态文件不进 git 历史', 'tasks/', 'eval-ledger/', ''].join('\n'), 'utf8').catch(() => undefined)
+}
+
 /** Best-effort `git add` + commit of the workspace (silently degrades). */
 export async function autoCommit(workspaceRoot: string, courseName: string, changelog: string): Promise<void> {
   try {
+    // T-18：先保证答案-bearing 文件被 .gitignore 排除，再 add -A。
+    await ensureStateGitignore(workspaceRoot)
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const exec = promisify(execFile)
@@ -382,7 +448,8 @@ export async function heatmap(workspaceRoot: string, weeks = 12): Promise<Heatma
     return fresh
   }
   // 项目即课程：会话历史位于项目根 .studyclaw/history（P1-7 双轨制修复）。
-  const historyDir = join(workspaceRoot, '.studyclaw', 'history')
+  // T-16：旧布局（根目录 history/）回退——硬编码让未迁移工作区热力图恒 0。
+  const historyDir = await historyDirOf(workspaceRoot)
   const chatTurnsByDate = new Map<string, number>()
   const evalRecords: Array<{ ts: string; date: string; key: string; passed: boolean }> = []
   if ((await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) {
@@ -481,7 +548,8 @@ export async function heatmapDay(workspaceRoot: string, date: string): Promise<H
   const changelog: string[] = []
   const events: HeatmapDayDetail['events'] = []
   // 项目即课程：会话历史位于项目根 .studyclaw/history（P1-7 双轨制修复）。
-  const historyDir = join(workspaceRoot, '.studyclaw', 'history')
+  // T-16：旧布局（根目录 history/）回退。
+  const historyDir = await historyDirOf(workspaceRoot)
   if ((await (await import('node:fs/promises')).stat(historyDir).catch(() => null))?.isDirectory()) {
     for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
       const text = await readFile(join(historyDir, name), 'utf8').catch(() => '')

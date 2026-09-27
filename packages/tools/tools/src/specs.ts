@@ -125,7 +125,8 @@ export function buildDefaultSpecs(): ToolSpec[] {
       {
         type: 'object',
         properties: {
-          content: { type: 'string', minLength: 1, description: '想转成复习卡的段落内容' },
+          // T-8：content 原无上限——超长串直灌 prompt，成本可被半可信 LLM 放大。
+          content: { type: 'string', minLength: 1, maxLength: MAX_NOTE_CHARS, description: '想转成复习卡的段落内容（≤4000 字符）' },
           title: { type: 'string', description: '可选，卡片标题（缺省由内容推导）' },
           conceptId: { type: 'string', description: '可选，归属概念 ID；缺省 slug 推导' },
           count: { type: 'integer', minimum: 1, maximum: 5, description: '生成张数，缺省 1' },
@@ -142,8 +143,9 @@ export function buildDefaultSpecs(): ToolSpec[] {
         type: 'object',
         properties: {
           taskId: { type: 'string', minLength: 1, description: '源题卡 task_id（以此卡为基底变体）' },
-          misconception: { type: 'string', minLength: 1, description: '暴露出的误区/盲点描述' },
-          content: { type: 'string', description: '可选，覆盖源题内容片段' },
+          // T-8：misconception/content 原无上限（write_note 有）——超长串直灌 prompt。
+          misconception: { type: 'string', minLength: 1, maxLength: MAX_NOTE_CHARS, description: '暴露出的误区/盲点描述（≤4000 字符）' },
+          content: { type: 'string', maxLength: MAX_NOTE_CHARS, description: '可选，覆盖源题内容片段（≤4000 字符）' },
           targetId: { type: 'string', description: '可选，target_id（缺省 dynamic:<源题>）' },
           count: { type: 'integer', minimum: 1, maximum: 5, description: '生成张数，缺省 1' },
         },
@@ -174,7 +176,8 @@ export function buildDefaultSpecs(): ToolSpec[] {
         type: 'object',
         properties: {
           taskId: { type: 'string', minLength: 1, description: '被作答的题卡 task_id' },
-          answer: { type: 'string', minLength: 1, description: '学生的作答文本' },
+          // T-8：answer 原无上限——学生/模型灌入的超长作答直通判题 prompt。
+          answer: { type: 'string', minLength: 1, maxLength: MAX_NOTE_CHARS, description: '学生的作答文本（≤4000 字符）' },
         },
         required: ['taskId', 'answer'],
       },

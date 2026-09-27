@@ -531,8 +531,10 @@ const handlers = {
       model: z.string().optional(),
       apiKeyEnv: z.string().optional(),
       apiBase: z.string().nullish(),
-      temperature: z.number().optional(),
-      maxConcurrency: z.number().optional(),
+      // 加固1：数值范围——z.number() 原样放行 -5/999/1e308（NaN/Infinity 已被
+      // zod v4 拒绝），temperature 直送 LLM API、maxConcurrency 仅消费端 clamp。
+      temperature: z.number().min(0).max(2).optional(),
+      maxConcurrency: z.number().int().min(1).max(32).optional(),
       defaultMode: z.string().optional(),
       agentPreset: z.string().optional(),
       permissionPreset: z.string().optional(),
@@ -564,8 +566,9 @@ const handlers = {
       name: z.string(),
       model: z.string(),
       baseUrl: z.string().nullish(),
-      temperature: z.number().optional(),
-      maxConcurrency: z.number().optional(),
+      // 加固1：数值范围（同 settings.update）。
+      temperature: z.number().min(0).max(2).optional(),
+      maxConcurrency: z.number().int().min(1).max(32).optional(),
       // null = 保留现有列表；[] = 显式清空；数组 = 整体替换（merge 语义）。
       models: z.array(z.object({ id: z.string(), name: z.string(), contextWindow: z.number().nullish(), maxTokens: z.number().nullish() })).nullable().optional(),
       overwrite: z.boolean().optional(),
@@ -744,7 +747,11 @@ export async function dispatch(
     }
     const message = error instanceof Error ? error.message : String(error)
     if (message.includes('ENOENT') || message.includes('not a directory')) {
-      return err('workspace-invalid-path', `cannot open workspace: ${message}`)
+      // 加固2：不回显具体路径——master.key/凭据文件损坏时完整主目录路径会经
+      // 此返回给调用方，与 discoverModels/fetchUrlSafe 的脱敏姿态不一致。细节
+      // 落宿主日志（host-logger 已 tee 到 <home>/logs）。
+      console.error('[studyclaw] rpc workspace path error:', message)
+      return err('workspace-invalid-path', 'cannot open workspace (path missing or not a directory)')
     }
     if (message.startsWith('模型不可用:') || message.startsWith('Provider 未配置凭据:')) {
       return err('model-not-routable', message)
@@ -758,6 +765,9 @@ export async function dispatch(
     if (message.startsWith('审批请求不存在:')) {
       return err('approval-not-found', message)
     }
-    return err('invalid-request', message)
+    // 加固2：未知错误不回显原始消息（可能含文件路径/内部细节）——细节落日志，
+    // 调用方只拿到可行动的高层提示。
+    console.error('[studyclaw] rpc unhandled error:', message)
+    return err('invalid-request', '请求失败（详见宿主日志）')
   }
 }

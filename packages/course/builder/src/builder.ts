@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, stat } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import { withCourseLock } from '@studyclaw/tools'
 import { MarkdownIngestor } from './ingestor.ts'
@@ -45,8 +45,12 @@ const LEGACY_LAYOUT_ARTIFACTS = ['syllabus.json', 'progress.md', 'notes.md', 'ta
  * One-shot layout migration: moves pre-v2 root-level artifacts into
  * `.studyclaw/`. Idempotent and marker-guarded; existing files inside the
  * state directory always win over the legacy copy.
+ * `move` 可注入（测试/特殊 FS 场景），默认 fs rename。
  */
-export async function migrateLegacyLayout(workspaceRoot: string): Promise<void> {
+export async function migrateLegacyLayout(
+  workspaceRoot: string,
+  move: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
   const stateDir = stateDirOf(workspaceRoot)
   const marker = join(stateDir, LEGACY_LAYOUT_MARKER)
   if ((await stat(marker).catch(() => null)) !== null) return
@@ -55,12 +59,23 @@ export async function migrateLegacyLayout(workspaceRoot: string): Promise<void> 
     if ((await stat(join(workspaceRoot, name)).catch(() => null)) !== null) found.push(name)
   }
   await mkdir(stateDir, { recursive: true })
+  const moved: string[] = []
+  const failed: string[] = []
   for (const name of found) {
     const to = join(stateDir, name)
     if ((await stat(to).catch(() => null)) !== null) continue
-    await rename(join(workspaceRoot, name), to).catch(() => undefined)
+    // T-10：rename 失败必须留痕——旧实现吞掉错误但仍写 marker，半迁移被永久化：
+    // 根 progress.md 成孤儿、v2 只读 .studyclaw/progress.md，历史静默丢失。
+    const ok = await move(join(workspaceRoot, name), to).then(() => true).catch(() => false)
+    if (ok) moved.push(name)
+    else failed.push(name)
   }
-  if (found.length > 0) console.log(`[studyclaw] 布局迁移: ${found.join(', ')} -> .studyclaw/`)
+  if (moved.length > 0) console.log(`[studyclaw] 布局迁移: ${moved.join(', ')} -> .studyclaw/`)
+  if (failed.length > 0) {
+    // 有遗留未迁移：不写 marker，下次启动重试（避免半迁移被 marker 洗白）。
+    console.warn(`[studyclaw] 布局迁移未完成（${failed.join(', ')} 仍在根目录，可能被占用/杀软锁定）；下次启动将重试`)
+    return
+  }
   await atomicWrite(marker, 'v2' + String.fromCharCode(10))
 }
 
@@ -90,6 +105,14 @@ export interface TaskGenerator {
   generateTasks(chunk: IngestArtifact['chunks'][number], count: number): Promise<HarnessTask[]>
 }
 
+/**
+ * T-7：单文件大小上限（构建内存守卫，非产品限制）——就地仓库里一个巨型
+ * .md/.pdf 会让 checksum/抽取/摄取整文件读内存（1GB 级可压垮构建进程）。
+ * 超限文件跳过且经 onSkip 上报，不进校验和表（下次构建仍会重试上报，
+ * 不会静默消失）。
+ */
+export const MAX_SOURCE_FILE_BYTES = 64 * 1024 * 1024
+
 /** Scan `sources/` producing `{relative: "sha256:<hex>"}` (Python parity). */
 export async function computeChecksums(
   sourcesDir: string,
@@ -97,6 +120,7 @@ export async function computeChecksums(
   excludedDirs: ReadonlySet<string> | null = null,
   skipHiddenDirs = false,
   excludedFiles: ReadonlySet<string> = COURSE_STATE_FILES,
+  onSkip?: (name: string, size: number) => void,
 ): Promise<Record<string, string>> {
   const table: Record<string, string> = {}
   if (!(await stat(sourcesDir).catch(() => null))?.isDirectory()) return table
@@ -113,6 +137,13 @@ export async function computeChecksums(
         await walk(path)
       } else if (entry.isFile() && extensions.includes(entry.name.toLowerCase().match(/\.[^.]*$/)?.[0] ?? '')
         && !excludedFiles.has(entry.name)) {
+        const info = await stat(path).catch(() => null)
+        if (info === null) continue
+        // T-7：超限文件在 readFile 之前拦下（整文件读内存的源头）。
+        if (info.size > MAX_SOURCE_FILE_BYTES) {
+          onSkip?.(rel, info.size)
+          continue
+        }
         const digest = createHash('sha256').update(await readFile(path)).digest('hex')
         table[rel] = `sha256:${digest}`
       }
@@ -130,7 +161,16 @@ async function atomicWrite(path: string, content: string): Promise<void> {
   // rename 出混合内容（syllabus.json 损坏 → loadSyllabus 回退空大纲）或
   // ENOENT。加 pid + 随机后缀（progress.ts / storage-json atomic.ts 同口径）。
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-  await writeFile(tmp, content, 'utf8')
+  // T-17：fsync 后再 rename——旧实现 writeFile+rename 无 fsync，断电时 rename
+  // 可能已生效而数据未落盘（课程状态文件损坏/内容丢失）。storage-json 的
+  // atomic.ts 同口径（write+fsync+rename）。
+  const handle = await open(tmp, 'w')
+  try {
+    await handle.writeFile(content, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
   await rename(tmp, path)
 }
 
@@ -265,9 +305,14 @@ export class CourseBuilder {
       throw new BuildError(`课程目录不存在: ${this.courseDir}（先运行 studyclaw init）`)
     }
     const sourcesDir = this.sourcesDir()
-    const current = await computeChecksums(sourcesDir, this.extensions, this.excludedSourceDirs, this.skipHiddenSourceDirs, this.excludedSourceFiles)
+    // T-7：超限源文件收集进 degraded（在 report 建立前，先落本地数组）。
+    const skipped: string[] = []
+    const current = await computeChecksums(sourcesDir, this.extensions, this.excludedSourceDirs, this.skipHiddenSourceDirs, this.excludedSourceFiles, (name, size) => {
+      skipped.push(`${name}（${Math.round(size / 1024 / 1024)}MB 超过 ${Math.round(MAX_SOURCE_FILE_BYTES / 1024 / 1024)}MB 上限，已跳过）`)
+    })
     const stored = await this.loadChecksums()
     const report = emptyReport()
+    report.degraded.push(...skipped)
     // 首建判定：既有指纹但无题卡池也无大纲 → 视为全量首建（Python parity）。
     if (Object.keys(stored).length > 0 && (await loadTaskPool(this.courseDir)).length === 0) {
       const hasSyllabus = (await stat(join(stateDirOf(this.courseDir), 'syllabus.json')).catch(() => null)) !== null
@@ -373,8 +418,13 @@ export class CourseBuilder {
   async regenerateSyllabus(granularity: 'fine' | 'coarse'): Promise<BuildReport> {
     if (granularity !== 'fine' && granularity !== 'coarse') throw new Error('granularity 取值 fine | coarse')
     const sourcesDir = this.sourcesDir()
-    const current = await computeChecksums(sourcesDir, this.extensions, this.excludedSourceDirs, this.skipHiddenSourceDirs, this.excludedSourceFiles)
+    // T-7：超限源文件收集进 degraded（在 report 建立前，先落本地数组）。
+    const skipped: string[] = []
+    const current = await computeChecksums(sourcesDir, this.extensions, this.excludedSourceDirs, this.skipHiddenSourceDirs, this.excludedSourceFiles, (name, size) => {
+      skipped.push(`${name}（${Math.round(size / 1024 / 1024)}MB 超过 ${Math.round(MAX_SOURCE_FILE_BYTES / 1024 / 1024)}MB 上限，已跳过）`)
+    })
     const report = emptyReport()
+    report.degraded.push(...skipped)
     // L6：无变更路径此前沿用 emptyReport 的 '1.0.0' 假版本——以磁盘上的
     // 当前版本为基线，mergeSyllabus 增长时再自行 bump。
     report.version = (await loadSyllabus(this.courseDir)).version

@@ -170,4 +170,27 @@ describe('pickTasks', () => {
     const picked = await pickTasks(course, 'review', null, 1, '2026-08-21')
     expect(picked.map(task => task.task_id)).toEqual(['t_a01'])
   })
+
+  it('T-4：到期挑选按概念去重（count 内不全是同一概念），不足时同概念补位', async () => {
+    const course = await makeCourse()
+    // 让 c_a 与 c_c 都到期；c_a 有两张到期卡。
+    const boardPath = join(course, '.studyclaw', 'progress.md')
+    let board = await loadProgressBoard(boardPath)
+    board = upsertProgressRecord(board, {
+      conceptId: 'c_c', name: '概念C', chapter: '章一', mastery: 0.4, evals: 5,
+      passRate: 0.4, streak: 0, ef: 2.5, nextReviewAt: '2026-08-19', misattribution: 'none',
+    })
+    await saveProgressBoard(boardPath, board)
+    await writeTaskPool(course, [
+      makeTask('t_a01', 'c_a', 1),
+      makeTask('t_a02', 'c_a', 1), // 同概念第二张到期卡
+      makeTask('t_c01', 'c_c', 5),
+    ])
+    // count=2：两概念各一张（旧实现会给出同一概念的两张）。
+    const spread = await pickTasks(course, 'review', null, 2, '2026-08-21')
+    expect(spread.map(task => task.task_id)).toEqual(['t_a01', 't_c01'])
+    // count=3：概念去重后不足，用同概念其余到期卡补位（不少题）。
+    const topped = await pickTasks(course, 'review', null, 3, '2026-08-21')
+    expect(topped.map(task => task.task_id)).toEqual(['t_a01', 't_c01', 't_a02'])
+  })
 })

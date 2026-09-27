@@ -6,7 +6,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { courseSourceRoot, isEightDotThreeSegment, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
 import { ToolRejected } from './result.ts'
 import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
@@ -177,7 +177,10 @@ function workspacePath(ctx: ToolContext, value: string): string {
   const root = resolve(ctx.workspaceRoot)
   const target = resolve(root, value)
   const relPath = relative(root, target)
-  if (relPath === '' || relPath === '..' || relPath.startsWith('../') || relPath.startsWith('..\\')) throw new ToolRejected('路径必须位于工作区内')
+  // T-12：异盘绝对路径的 containment 必须显式拒绝——Windows 上
+  // `relative('C:\\ws', 'D:\\x')` 返回 'D:\\x'（绝对形态），不以 '../' 开头，
+  // 旧判定放行 → 跨盘逃逸（现有调用方被后续 realpath 层兜住，但原语本身不安全）。
+  if (relPath === '' || isAbsolute(relPath) || relPath === '..' || relPath.startsWith('../') || relPath.startsWith('..\\')) throw new ToolRejected('路径必须位于工作区内')
   // T-1：8.3 短名（如 STUDYC~1 ↔ .studyclaw）realpath 不展开、字符串
   // containment 放行——通用文件工具同样拒绝，与 resolveSourceRef 同口径。
   if (relPath.split(/[\\/]/).some(isEightDotThreeSegment)) {
@@ -188,7 +191,8 @@ function workspacePath(ctx: ToolContext, value: string): string {
 
 function isWithin(root: string, target: string): boolean {
   const relPath = relative(root, target)
-  return relPath !== '' && relPath !== '..' && !relPath.startsWith('../') && !relPath.startsWith('..\\')
+  // T-12：同上——异盘绝对路径（relative 产物为绝对形态）不算 containment。
+  return relPath !== '' && !isAbsolute(relPath) && relPath !== '..' && !relPath.startsWith('../') && !relPath.startsWith('..\\')
 }
 
 /** Resolve symlinks for generic filesystem tools before reading or writing.
@@ -272,6 +276,12 @@ export async function handlerSearchFiles(ctx: ToolContext, args: Record<string, 
 /** Generic DSH-style write_file tool; the registry approval gate runs first. */
 export async function handlerWriteFile(ctx: ToolContext, args: Record<string, unknown>): Promise<ToolHandlerResult> {
   const path = workspacePath(ctx, String(args['path']))
+  // T-15：Windows 保留设备名（CON/NUL/PRN/AUX/COM1-9/LPT1-9）作为文件名时
+  // writeFile 实测"成功"——数据进设备被弃，向 LLM 报假成功。显式拒绝。
+  const deviceName = basename(path)
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(deviceName)) {
+    throw new ToolRejected(`Windows 保留设备名不可作为文件名: ${deviceName}`)
+  }
   // BUG-001：先校验祖先目录，mkdir 后再复核直接父目录，写盘一律使用解析后
   // 的真实路径，压缩符号链接替换的竞态窗口。
   await safeWriteParent(ctx, path)
@@ -364,6 +374,11 @@ export async function handlerLsp(ctx: ToolContext, args: Record<string, unknown>
   if (!Number.isInteger(line) || line < 1 || !Number.isInteger(character) || character < 1) {
     throw new ToolRejected('line 和 character 必须是从 1 开始的整数')
   }
+  // T-13：file_path 必须限定在工作区内——lsp 的 policy='read' 免审批，原样
+  // 交给 provider 时绝对路径可让 hover/definition 读取并回灌工作区外文件。
+  // 只做 containment 校验，透传仍用原始 filePath（provider 按 cwd 解析，
+  // 既有调用契约不变）。
+  workspacePath(ctx, filePath)
   if (ctx.providers?.lsp === undefined) throw new Error('LSP provider 未安装或未启用')
   const result = await ctx.providers.lsp({
     method: operation,

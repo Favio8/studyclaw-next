@@ -1,15 +1,20 @@
 /**
  * 服务入口防护回归：readRequestBody 跨 TCP chunk 的多字节 UTF-8 完整性
- * （P0-1 乱码根因）、体积上限（P1-5），以及 loopback Origin 白名单（SEC-1）。
+ * （P0-1 乱码根因）、体积上限（P1-5）、读超时与提前断连保护（NEW-002），
+ * loopback Origin 白名单（SEC-1），以及错误消息凭据净化（BUG-005）。
  */
 
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
-import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody } from '../src/lib/http-guards.ts'
+import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from '../src/lib/http-guards.ts'
 
-class FakeRequest extends EventEmitter {}
+class FakeRequest extends EventEmitter {
+  destroy(): void {
+    this.emit('close')
+  }
+}
 
 function writeChunks(request: FakeRequest, chunks: Buffer[]): void {
   queueMicrotask(() => {
@@ -47,6 +52,62 @@ describe('readRequestBody', () => {
       request.emit('end')
     })
     await expect(pending).rejects.toBeInstanceOf(PayloadTooLargeError)
+  })
+
+  it('NEW-002：请求体迟迟不发完时超时拒绝（Slowloris 防护）', async () => {
+    const request = new FakeRequest()
+    const pending = readRequestBody(request as unknown as IncomingMessage, 1024, 50)
+    queueMicrotask(() => {
+      request.emit('data', Buffer.from('half-'))
+      // 不发 end，模拟只发一半请求体的慢速客户端。
+    })
+    await expect(pending).rejects.toBeInstanceOf(RequestBodyTimeoutError)
+  })
+
+  it('NEW-002：连接在 body 完成前断开时立即拒绝而不是挂死', async () => {
+    const request = new FakeRequest()
+    const pending = readRequestBody(request as unknown as IncomingMessage, 1024)
+    queueMicrotask(() => {
+      request.emit('data', Buffer.from('abc'))
+      request.emit('close')
+    })
+    await expect(pending).rejects.toThrow('closed before body completed')
+  })
+
+  it('NEW-002：正常完成后 close 不影响结果（settled 只结算一次）', async () => {
+    const request = new FakeRequest()
+    const pending = readRequestBody(request as unknown as IncomingMessage, 1024)
+    queueMicrotask(() => {
+      request.emit('data', Buffer.from('ok'))
+      request.emit('end')
+      request.emit('close')
+    })
+    await expect(pending).resolves.toBe('ok')
+  })
+})
+
+describe('sanitizeErrorMessage（BUG-005）', () => {
+  it('净化 URL 查询参数中的密钥/token', () => {
+    expect(sanitizeErrorMessage('fetch failed for https://api.com/v1/chat?api_key=sk-secret123'))
+      .toBe('fetch failed for https://api.com/v1/chat?api_key=***')
+    expect(sanitizeErrorMessage('GET /v1/models?token=abcdef123456789&x=1 failed'))
+      .toBe('GET /v1/models?token=***&x=1 failed')
+  })
+
+  it('净化 Bearer 头与厂商前缀密钥', () => {
+    expect(sanitizeErrorMessage('Authorization: Bearer sk-abcdef1234567890'))
+      .toBe('Authorization: Bearer ***')
+    expect(sanitizeErrorMessage('invalid key sk-abcdefghijklmnop1234 provided'))
+      .toBe('invalid key sk-*** provided')
+    expect(sanitizeErrorMessage('bad AIzaSyA1234567890abcdefghij key')).toBe('bad AIza*** key')
+    expect(sanitizeErrorMessage('gsk_0123456789abcdefghijklmnop rejected')).toBe('gsk_*** rejected')
+  })
+
+  it('净化 URL 用户信息段，正常中文错误消息原样保留', () => {
+    expect(sanitizeErrorMessage('connect ECONNREFUSED https://user:p4ssw0rd@internal.host/api'))
+      .toBe('connect ECONNREFUSED https://***:***@internal.host/api')
+    const plain = 'ENOENT: no such file C:\\Users\\Favio\\.studyclaw\\creds.json'
+    expect(sanitizeErrorMessage(plain)).toBe(plain)
   })
 })
 

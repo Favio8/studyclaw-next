@@ -12,8 +12,8 @@ import { createServer } from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { join, dirname } from 'node:path'
-import { readFile, realpath, readdir, stat } from 'node:fs/promises'
+import { join, dirname, resolve } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -21,7 +21,7 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import WorkspaceRegistry from '@studyclaw/workspace'
 import { AcpProtocolError, AcpRouter, parseAcpRequest, type AcpHost, type AcpNotification, type AcpRequest, type AcpUpdate } from '@studyclaw/acp'
 import { listCourseSummaries } from '@studyclaw/course-summary'
-import { migrateLegacyLayout } from '@studyclaw/course-builder'
+import { migrateLegacyLayout, stateDirOf } from '@studyclaw/course-builder'
 import { dispatch, type HostServices, type SessionSearchResultView } from '@studyclaw/apiproxy'
 import { pickNativeDirectory } from '@studyclaw/directory-picker-native'
 import {
@@ -55,7 +55,7 @@ import { createCourseService } from '@studyclaw/chat-service'
 import { AgentRegistry } from '@studyclaw/agent'
 import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
-import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody } from './lib/http-guards.ts'
+import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from './lib/http-guards.ts'
 import { installHostFileLogging } from './lib/host-logger.ts'
 import { createStaticHost } from './lib/static-host.ts'
 import type { StaticHost } from './lib/static-host.ts'
@@ -66,7 +66,11 @@ import { syncCommand } from './commands/sync.ts'
 import { courseCommand } from './commands/course.ts'
 
 function hostHome(): string {
-  return process.env.STUDYCLAW_HOME ?? join(homedir(), '.studyclaw')
+  // NEW-007：env 覆盖先 resolve 成绝对路径（相对路径以进程 cwd 锚定），
+  // 避免宿主与 CLI/桌面端 cwd 不同时，配置与锁文件落到不可预期的位置。
+  const override = process.env.STUDYCLAW_HOME
+  if (override !== undefined && override.trim() !== '') return resolve(override.trim())
+  return join(homedir(), '.studyclaw')
 }
 
 /** FL-03：设置读写以 lastOpenedPath 为根；未打开工作区时配置会写到宿主进程
@@ -279,17 +283,31 @@ async function browseWorkspaceChildren(
 const UPLOAD_FILE_LIMIT_BYTES = 25 * 1024 * 1024
 const UPLOAD_MAX_FILES = 10
 
-/** 在 dir 内为 filename 找一个不冲突的名字：重名追加 -1/-2 序号而不是覆盖。 */
+/**
+ * 在 dir 内为 filename 找一个不冲突的名字：重名追加 -1/-2 序号而不是覆盖。
+ * L10：目标名以 `wx` 独占创建空文件预留——旧「readdir 查重 → rename」的检查-
+ * 使用窗口内，并发上传可能选中同一名字并静默互覆；预留后并发方立刻 EEXIST
+ * 递增序号。调用方必须向返回路径写入（rename 覆盖空文件），失败时清理它。
+ */
 async function uniqueDestinationPath(dir: string, filename: string): Promise<string> {
-  const taken = new Set((await readdir(dir)).map(entry => entry.toLowerCase()))
+  const { open } = await import('node:fs/promises')
   const dot = filename.lastIndexOf('.')
   const stem = dot > 0 ? filename.slice(0, dot) : filename
   const ext = dot > 0 ? filename.slice(dot) : ''
   let candidate = filename
-  for (let index = 1; taken.has(candidate.toLowerCase()); index += 1) {
+  let index = 1
+  for (;;) {
+    const probe = join(dir, candidate)
+    try {
+      const handle = await open(probe, 'wx')
+      await handle.close()
+      return probe
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
     candidate = `${stem}-${index}${ext}`
+    index += 1
   }
-  return join(dir, candidate)
 }
 
 /**
@@ -495,7 +513,9 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       ingestUrl: async (courseId, url, title) => courseService.ingestUrl(activeRoot(), courseId, url, title),
       createCards: async (courseId, payload) => courseService.createCards(activeRoot(), courseId, payload as { content: string; title?: string | null; conceptId?: string | null; count?: number; sessionId?: string | null }),
       dynamicCards: async (courseId, payload) => courseService.dynamicCards(activeRoot(), courseId, payload as { taskId: string; misconception: string; content?: string | null; targetId?: string | null; count?: number; sessionId?: string | null }),
-      evalSubmit: (courseId, taskId, answer, sessionId) => courseService.evalSubmit(activeRoot(), courseId, taskId, answer, sessionId),
+      // M4：evalId 必须透传——箭头函数实现少于接口形参是 TS 允许的，此前
+      // 在这里静默丢参导致磁盘幂等账本（.studyclaw/eval-ledger/）永不写入。
+      evalSubmit: (courseId, taskId, answer, sessionId, evalId) => courseService.evalSubmit(activeRoot(), courseId, taskId, answer, sessionId, evalId),
       job: jobId => courseService.job(jobId) as Record<string, unknown> | undefined,
       tools: providerStatus => courseService.tools(providerStatus),
       heatmap: async weeks => courseService.heatmap(activeRoot(), weeks),
@@ -633,7 +653,8 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       get: async () => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '读取设置'); return settingsPayload(registry.lastOpenedPath) as unknown as Record<string, unknown> },
       update: async partial => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '更新设置'); return updateSettings(registry.lastOpenedPath, partial) as unknown as Record<string, unknown> },
       catalog: async () => providerCatalog() as unknown as Array<Record<string, unknown>>,
-      discover: async input => discoverModels(input) as unknown as Array<Record<string, unknown>>,
+      // M6：设置页「从端点获取」永远实时探测；sessionModels 的自动发现才走缓存。
+      discover: async input => discoverModels({ ...input, refresh: true }) as unknown as Array<Record<string, unknown>>,
       save: async input => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存模型供应商'); return saveProvider(registry.lastOpenedPath, input as Parameters<typeof saveProvider>[1]) as unknown as Record<string, unknown> },
       remove: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '删除模型供应商'); return deleteProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
       activate: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '激活模型供应商'); return activateProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
@@ -842,7 +863,28 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const method = url.pathname.slice('/api/'.length)
     const uploadMatch = /^courses\/([^/]+)\/sources$/.exec(method)
     if (uploadMatch !== null) {
-      void handleUpload(request, response, decodeURIComponent(uploadMatch[1]!))
+      // WHATWG URL 的 pathname 原样保留无效百分号序列（%ZZ、50%off），
+      // decodeURIComponent 会抛 URIError——绝不能在请求监听器的同步路径上解码，
+      // 否则异常升级为 uncaughtException 打崩宿主进程。
+      let courseId: string
+      try {
+        courseId = decodeURIComponent(uploadMatch[1]!)
+      } catch {
+        response.writeHead(400)
+        response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'courseId 含无效的百分号编码', details: null } }))
+        return
+      }
+      void handleUpload(request, response, courseId).catch(error => {
+        // 兜底边界：handleUpload 已尽力把失败写进响应，这里只接漏网异常，
+        // 与主 API 分支的边界 catch 同样遵守 headersSent 限制。
+        if (response.headersSent || response.writableEnded || response.destroyed) {
+          response.end()
+          return
+        }
+        console.error('[studyclaw] upload 失败:', error instanceof Error ? sanitizeErrorMessage(error.stack ?? error.message) : String(error))
+        response.writeHead(500)
+        response.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: '上传处理失败', details: null } }))
+      })
       return
     }
     void (async () => {
@@ -895,11 +937,19 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
           response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
           return
         }
+        if (error instanceof RequestBodyTimeoutError) {
+          response.writeHead(408)
+          response.end(JSON.stringify({ error: { code: error.code, message: error.message, details: null } }))
+          return
+        }
         // Every request must receive a JSON envelope. A native picker or a
         // newly added service can reject outside dispatch; without this
         // boundary catch Next reports a misleading HTTP 500/socket hangup.
-        console.error(`[studyclaw] rpc ${method} 失败:`, error)
-        const message = error instanceof Error ? error.message : String(error)
+        // BUG-005：错误消息可能内嵌 URL 凭据/厂商密钥（fetch 失败、上游 4xx
+        // 回显），出日志与出 API 前先净化。日志记净化后的堆栈（栈首行即
+        // message），排障信息不丢；API 响应只回净化后的单行 message。
+        const message = sanitizeErrorMessage(error instanceof Error ? error.message : String(error))
+        console.error(`[studyclaw] rpc ${method} 失败:`, error instanceof Error ? sanitizeErrorMessage(error.stack ?? error.message) : message)
         response.writeHead(500)
         response.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message, details: null } }))
       }
@@ -962,7 +1012,9 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
   /** `POST /api/courses/<id>/sources` (multipart): save files into sources/, then sync-build. */
   async function handleUpload(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse, courseId: string): Promise<void> {
     const { default: Busboy } = await import('busboy')
-    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { mkdir, rename, rm } = await import('node:fs/promises')
+    const { createWriteStream } = await import('node:fs')
+    const { randomUUID } = await import('node:crypto')
     const root = registry.lastOpenedPath
     if (root === '') {
       response.writeHead(409)
@@ -970,12 +1022,26 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       return
     }
     const sourcesDir = join(root, 'sources')
-    await mkdir(sourcesDir, { recursive: true })
+    try {
+      await mkdir(sourcesDir, { recursive: true })
+    } catch (error) {
+      response.writeHead(500)
+      response.end(JSON.stringify({ error: { code: 'sources-dir-unavailable', message: `sources 目录不可用: ${error instanceof Error ? error.message : String(error)}`, details: null } }))
+      return
+    }
     const added: string[] = []
     const rejected: Array<{ file: string; reason: string }> = []
-    // 写入串行链：同批落盘顺序确定，且响应在全部写盘完成后才发出，
-    // 杜绝旧实现 `void writeFile` 失败既不进响应也无日志的 fire-and-forget。
-    let writeChain: Promise<void> = Promise.resolve()
+    // NEW-003：每个文件直接流式落盘到临时文件（pause/drain 背压限流），不再把
+    // 25MB×N 并发上传整体吃进内存；全部流结算后按到达顺序原子改名转正。
+    // NEW-009：busboy 中途出错会掐断在途写流并标记放弃，结算 Promise 不悬挂，
+    // 临时文件就地清理。
+    const pending: Array<{
+      safe: string
+      tmpPath: string
+      skipReason: string | null
+      settled: Promise<void>
+      destroy: () => void
+    }> = []
     let busboyError: Error | null = null
     try {
       const busboy = Busboy({
@@ -988,34 +1054,71 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       busboy.on('file', (_name, stream, info) => {
         const filename = info.filename.split(/[\\/]/).pop() ?? 'upload.txt'
         const safe = filename.replace(/[^\w.\u4e00-\u9fff-]/g, '_').slice(0, 120) || 'upload.txt'
-        const chunks: Buffer[] = []
-        let truncated = false
-        stream.on('data', chunk => chunks.push(chunk as Buffer))
-        // busboy 在 fileSize 处截断并丢弃剩余字节；带 limit 标记的文件不落盘。
-        stream.on('limit', () => { truncated = true })
-        stream.on('end', () => {
-          writeChain = writeChain.then(async () => {
-            if (truncated) {
-              rejected.push({ file: safe, reason: `超过单个 ${Math.round(UPLOAD_FILE_LIMIT_BYTES / 1024 / 1024)}MB 的上限` })
-              return
-            }
-            try {
-              // 重名不再静默互相覆盖：追加 -1/-2 序号生成唯一文件名。
-              const path = await uniqueDestinationPath(sourcesDir, safe)
-              await writeFile(path, Buffer.concat(chunks))
-              added.push(path.slice(sourcesDir.length + 1))
-            } catch (error) {
-              rejected.push({ file: safe, reason: error instanceof Error ? error.message : String(error) })
-            }
+        const tmpPath = join(sourcesDir, `.upload-${randomUUID()}.tmp`)
+        const writeStream = createWriteStream(tmpPath)
+        const entry: { safe: string; tmpPath: string; skipReason: string | null; settled: Promise<void>; destroy: () => void } = {
+          safe,
+          tmpPath,
+          skipReason: null,
+          settled: Promise.resolve(),
+          destroy: () => writeStream.destroy(),
+        }
+        entry.settled = new Promise<void>(resolve => {
+          // busboy 在 fileSize 处截断并丢弃剩余字节；带 limit 标记的文件不转正。
+          stream.on('limit', () => { entry.skipReason = `超过单个 ${Math.round(UPLOAD_FILE_LIMIT_BYTES / 1024 / 1024)}MB 的上限` })
+          stream.on('data', chunk => {
+            if (entry.skipReason !== null) return
+            if (!writeStream.write(chunk as Buffer)) stream.pause()
           })
+          writeStream.on('drain', () => stream.resume())
+          stream.on('end', () => { writeStream.end() })
+          stream.on('error', () => {
+            if (entry.skipReason === null) entry.skipReason = '文件流读取失败'
+            writeStream.destroy()
+          })
+          writeStream.on('error', () => {
+            if (entry.skipReason === null) entry.skipReason = '文件落盘失败'
+          })
+          writeStream.on('close', resolve)
         })
+        pending.push(entry)
       })
-      busboy.on('error', (error: Error) => { busboyError = error })
+      busboy.on('error', (error: Error) => {
+        busboyError = error
+        for (const entry of pending) {
+          if (entry.skipReason === null) entry.skipReason = `上传中断: ${error.message}`
+          entry.destroy()
+        }
+      })
       request.pipe(busboy)
       await new Promise<void>(resolve => busboy.on('close', resolve))
-      await writeChain
+      await Promise.allSettled(pending.map(entry => entry.settled))
     } catch (error) {
       busboyError = error instanceof Error ? error : new Error(String(error))
+    }
+    // 落盘收尾：放弃的（截断/出错/中断）临时文件就地清理；成功的原子改名到
+    // 唯一目标名（重名追加 -1/-2 序号，不再静默互相覆盖）。响应在全部落盘
+    // 结算后才发出，杜绝 fire-and-forget 式写盘失败既不进响应也无日志。
+    for (const entry of pending) {
+      if (entry.skipReason !== null) {
+        await rm(entry.tmpPath, { force: true }).catch(() => undefined)
+        rejected.push({ file: entry.safe, reason: entry.skipReason })
+        continue
+      }
+      try {
+        const path = await uniqueDestinationPath(sourcesDir, entry.safe)
+        try {
+          await rename(entry.tmpPath, path)
+          added.push(path.slice(sourcesDir.length + 1))
+        } catch (error) {
+          // L10：rename 失败时预留的空文件一并清理。
+          await rm(path, { force: true }).catch(() => undefined)
+          throw error
+        }
+      } catch (error) {
+        await rm(entry.tmpPath, { force: true }).catch(() => undefined)
+        rejected.push({ file: entry.safe, reason: error instanceof Error ? error.message : String(error) })
+      }
     }
     if (busboyError !== null) {
       response.writeHead(400)
@@ -1081,7 +1184,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         writeFrame(event, frame['data'])
       }
     } catch (error) {
-      writeFrame('error', { code: 'EVAL_FAILED', message: error instanceof Error ? error.message : String(error) })
+      writeFrame('error', { code: 'EVAL_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
     }
     response.end()
   }
@@ -1136,7 +1239,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const conceptId = typeof input.conceptId === 'string' ? input.conceptId : null
     const fileRefs = Array.isArray(input.fileRefs) ? input.fileRefs.filter((ref): ref is string => typeof ref === 'string') : []
     if (queuedTurnId !== '') {
-      if (sessionId === null) { writeFrame('error', { code: 'invalid-request', message: 'queued turn requires sessionId' }); writeFrame('done', { usage: {}, turnId: sessionId }); response.end(); return }
+      if (sessionId === null) { writeFrame('error', { code: 'invalid-request', message: 'queued turn requires sessionId' }); writeFrame('done', { usage: {}, turnId: queuedTurnId }); response.end(); return }
       // H-1：帧映射统一走 chat-service 的 agentEventToFrame——此前这里内联的
       // if 链缺 turn/cancelled → TURN_CANCELLED，取消的队列回合会被下方 done
       // 帧错误闭环为成功（半截回复当成功渲染）。
@@ -1174,10 +1277,12 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       }
     } catch (error) {
       if (abortController.signal.aborted) { response.end(); return }
-      console.error(`[studyclaw] chat/stream 失败:`, error)
+      // BUG-005：SSE 错误帧同样可能携带上游凭据回显，出日志与帧前净化。
+      const message = sanitizeErrorMessage(error instanceof Error ? error.message : String(error))
+      console.error(`[studyclaw] chat/stream 失败:`, message)
       writeFrame('error', {
         code: 'CHAT_STREAM_FAILED',
-        message: error instanceof Error ? error.message : String(error),
+        message,
       })
     }
     const completedSessionId = resolvedSessionId
@@ -1215,8 +1320,10 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       if (response.writableEnded || response.destroyed) return
       response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
     }
+    let answeredTurnId: string | null = null
     try {
       const { handle } = await agentService.resolveAnswerTurn(agentId, answer, requestId)
+      answeredTurnId = handle.turnId
       for await (const event of handle.events) {
         if (abortController.signal.aborted) break
         // H-1：此前内联的映射缺 turn/cancelled → TURN_CANCELLED——ask 幂等
@@ -1228,7 +1335,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         writeFrame(mapped.event, mapped.data)
       }
     } catch (error) {
-      writeFrame('error', { code: 'AGENT_ANSWER_FAILED', message: error instanceof Error ? error.message : String(error) })
+      writeFrame('error', { code: 'AGENT_ANSWER_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
     } finally {
       if (abortController.signal.aborted) {
         // 与 answerEvents 语义一致：客户端断连取消本回合（保留 inbox），
@@ -1236,7 +1343,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         void agentService.cancel(agentId, true).catch(() => undefined)
       }
     }
-    writeFrame('done', { usage: {}, turnId: agentId })
+    writeFrame('done', { usage: {}, turnId: answeredTurnId })
     response.end()
   }
 
@@ -1263,7 +1370,13 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
   })
 
   const shutdown = async (): Promise<void> => {
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    // server.close() 只在全部连接结束后回调；SSE（chat/agents/acp 流）是
+    // 长连接、没有空闲关闭语义，不主动断开存量连接会让 Ctrl-C 永久挂起。
+    // 先停止接新连接，再强制断开存量连接，5s 兜底超时保证清理序列必达。
+    const closed = new Promise<void>(resolve => server.close(() => resolve()))
+    ;(server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()
+    const timeout = new Promise<void>(resolve => { const t = setTimeout(resolve, 5_000); t.unref?.() })
+    await Promise.race([closed, timeout])
     removeHostConfig()
     instanceLock.release()
     hostLogger.stop()
@@ -1332,11 +1445,14 @@ async function migrateSessions(sessionId?: string): Promise<void> {
   if (root === '') throw new Error('尚未打开工作区')
   const { courses } = await listCourseSummaries(root)
   let count = 0
+  // L11：事件历史在 <工作区根>/.studyclaw/history（v2 布局），旧代码漏掉
+  // .studyclaw 段导致迁移命令永远扫空目录。
+  const historyDir = join(stateDirOf(root), 'history')
   for (const course of courses) {
     const sessions = await listSessions(root, course.id)
     for (const session of sessions) {
       if (sessionId !== undefined && session.sessionId !== sessionId) continue
-      const result = await migrateLegacySession(join(root, 'history'), session.sessionId)
+      const result = await migrateLegacySession(historyDir, session.sessionId)
       if (result.migrated) count += 1
       console.log(`${result.migrated ? '已迁移' : '已存在'} ${course.id}/${session.sessionId} (${result.events} events)`)
     }

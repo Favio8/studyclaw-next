@@ -3,6 +3,51 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
+配套对抗性验证与发布门禁全绿）。
+
+### 修复
+
+- 子 Agent（`spawn_agent`）运行时必失败：`TutorSession.init` 改为事件日志优先，
+  运行时不透明会话 id（`<parent>-child-<ts>`）不再被 legacy 文件名正则拒绝；
+  子会话 id 追加随机后缀消除同毫秒碰撞；
+- 事件日志 append 的 O(n²) 性能墙：按路径缓存上次写入后的 stat + 行数，
+  健康路径跳过全文件重读重解析（外部写入自动使缓存失效）；
+- 学习热力图对新事件日志格式恒计 0 聊天轮：`user/input` 计入、
+  `input/voided` 剔除；日详情补 `sync/applied` 变更日志；
+- 系统提示词掌握度恒 0%：context 组装复用 tools 的转义感知表格解析器
+  （emoji 掌握度单元格 / 含换行备注行 / passRate 三处旧错一次性修复）；
+- 聊天同步更新掌握度后 progress.md 表头汇总（总体掌握度 / 待复习卡片数 /
+  更新时间）不重算的问题；单元格对齐 `renderMastery` 的 emoji 口径；
+- 评测 sm2 帧的 `masteryDelta` 从硬编码 ±0.1 改为指数平滑的真实差值（圆整 3 位）；
+- `eval.submit` 宿主接线丢失 `evalId` 参数导致磁盘幂等账本永不写入的问题；
+- `regenerateSyllabus` 无变更时报告假版本号 1.0.0；
+- `studyclaw session migrate` 使用错误的 history 目录（漏 `.studyclaw` 段）；
+- 队列回合错误路径与回答流的 done 帧 `turnId` 字段错填。
+
+### 并发与一致性
+
+- `JobManager` 提升为进程级单例：UI 同步与 Agent 工具触发的同课程构建
+  真正共享去重（此前每 turn 新建实例互相失明，可能双跑构建双倍计费）；
+- 课程构建改为「先生成后删旧卡」：LLM 生成失败不再削空题池；
+  无 LLM 写段套课程文件锁，慢调用留在锁外；
+- 设置写入（saveProvider / deleteProvider / activateProvider / updateSettings /
+  setCredential）全部纳入 config 写锁（固定 config → credential 锁序），
+  并发保存不再互相丢字段；
+- 评测幂等账本持久化到 `.studyclaw/eval-ledger/`：宿主重启后同 evalId
+  重试重放已结算帧，不再二次计分（TTL 10 分钟，500 文件上限）；
+- 工具超时后的孤儿 promise 兜底，迟到的 reject 不再可能打崩宿主进程；
+- 模型目录探测加 5 分钟 TTL 缓存（设置页「从端点获取」仍实时）；
+- 上传/导入重名落盘改为 `wx` 独占预留，消除 readdir→rename 的并发互覆窗口。
+
+### 内部
+
+- 移除从未被宿主实现的 `Last-Event-ID` 重连残留（幂等由 `requestId` 承担）；
+- 掌握度解密失败降级时留告警日志；usage token 数标注为 length/4 粗估口径；
+- 清理死代码（`iterSourceFiles` 空 excluded 集、`seedProgress` 覆盖行等）。
+
 ## [0.1.0-beta] - 2026-09-04
 
 首个公开测试版。核心形态：本地优先的 AI 学习搭子——挂载一个本地资料文件夹，

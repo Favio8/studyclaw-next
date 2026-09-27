@@ -1,12 +1,14 @@
-![StudyClaw logo](./apps/web/app/icon.svg)
+<div align="center">
 
-# StudyClaw
+# <img src="./apps/web/app/icon.svg" width="28" alt="StudyClaw" /> StudyClaw
 
 **本地优先的 AI 学习搭子 —— 把一个资料文件夹，变成会追问、会出题、会安排复习的私教。**
 
-![Status](https://img.shields.io/badge/status-beta%20%E7%AD%B9%E5%A4%87%E4%B8%AD-yellow) ![License](https://img.shields.io/badge/license-MIT-blue) ![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white) ![pnpm](https://img.shields.io/badge/pnpm-11.7-F69220?logo=pnpm&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white) ![Local First](https://img.shields.io/badge/local--first-%E6%97%A0%E9%81%A5%E6%B5%8B%E6%97%A0%E4%B8%8A%E4%BC%A0-orange) ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
+![Status](https://img.shields.io/badge/status-beta%20%E7%AD%B9%E5%A4%87%E4%B8%AD-yellow) [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE) ![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=node.js&logoColor=white) ![pnpm](https://img.shields.io/badge/pnpm-11.7-F69220?logo=pnpm&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&logoColor=white) ![Local First](https://img.shields.io/badge/local--first-%E6%97%A0%E9%81%A5%E6%B5%8B%E6%97%A0%E4%B8%8A%E4%BC%A0-orange) ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
 
 [快速开始](#快速开始) · [学习闭环](#学习闭环) · [架构](#架构) · [CLI 命令](#cli-命令参考) · [开发指南](#开发指南) · [路线图](#路线图) · [FAQ](#faq)
+
+</div>
 
 ---
 
@@ -23,7 +25,7 @@ StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装
 
 > 与常见 AI 学习工具的区别
 >
-> | 学习材料 | 云端 AI 题库 / 课程 App | 通用 AI 聊天窗口 | **StudyClaw** |
+> | 对比维度 | 云端 AI 题库 / 课程 App | 通用 AI 聊天窗口 | **StudyClaw** |
 > | --- | --- | --- | --- |
 > | 学习材料 | 平台预置，你的资料进不去 | 每次手动粘贴 | **直接挂载本地文件夹，增量更新** |
 > | 学习状态 | 锁在平台账号里 | 对话关掉就没了 | **本地文件，可审计、可迁移** |

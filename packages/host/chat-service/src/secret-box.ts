@@ -12,13 +12,15 @@
 
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
-const SEALED_MARKER = '"sealed": true'
 const KEY_BYTES = 32
 
 export function masterKeyPath(): string {
-  const home = process.env.STUDYCLAW_HOME ?? join(homedir(), '.studyclaw')
+  // NEW-007 对齐：env 覆盖与 bin.ts 的 hostHome 同一取法（resolve 成绝对路径），
+  // 否则相对路径下宿主侧与密钥侧各自锚定不同 cwd，master.key 与密文错位。
+  const override = process.env.STUDYCLAW_HOME
+  const home = override !== undefined && override.trim() !== '' ? resolve(override.trim()) : join(homedir(), '.studyclaw')
   return join(home, 'master.key')
 }
 
@@ -49,6 +51,8 @@ async function writeFileAtomicRestricted(path: string, data: string): Promise<vo
     await handle.sync()
     await handle.close()
   } catch (error) {
+    // RV-6：失败路径必须释放句柄，否则写失败高频场景下 fd 持续泄漏。
+    await handle.close().catch(() => undefined)
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
   }
@@ -92,27 +96,34 @@ export interface UnsealResult {
 export async function unsealCredentials(raw: string): Promise<UnsealResult> {
   const trimmed = raw.trim()
   if (trimmed === '') return { data: {}, wasPlaintext: false }
-  if (!trimmed.includes(SEALED_MARKER)) {
-    const parsed = JSON.parse(trimmed) as unknown
-    return {
-      data: typeof parsed === 'object' && parsed !== null ? parsed as Record<string, string> : {},
-      wasPlaintext: true,
-    }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch (error) {
+    throw new Error(`凭据文件不是合法 JSON，无法读取: ${error instanceof Error ? error.message : String(error)}`)
   }
-  const envelope = JSON.parse(trimmed) as { iv?: string; tag?: string; ciphertext?: string }
-  if (typeof envelope.iv !== 'string' || typeof envelope.tag !== 'string' || typeof envelope.ciphertext !== 'string') {
+  const envelope = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null
+  // RV-5：密封判定改用结构化字段（顶层 sealed === true），不再做原文子串匹配
+  // ——旧判定 `includes('"sealed": true')` 会被明文 JSON 的"值"里恰好含该字样
+  // 的文件误判成密封信封，随后以"缺少字段"响亮失败、凭据不可用。
+  if (envelope === null || envelope['sealed'] !== true) {
+    return { data: envelope !== null ? envelope as Record<string, string> : {}, wasPlaintext: true }
+  }
+  if (typeof envelope['iv'] !== 'string' || typeof envelope['tag'] !== 'string' || typeof envelope['ciphertext'] !== 'string') {
     throw new Error('凭据信封缺少字段，无法解密')
   }
   const key = await ensureMasterKey()
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.iv, 'base64'))
-  decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'))
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope['iv'], 'base64'))
+  decipher.setAuthTag(Buffer.from(envelope['tag'], 'base64'))
   const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(envelope.ciphertext, 'base64')),
+    decipher.update(Buffer.from(envelope['ciphertext'], 'base64')),
     decipher.final(),
   ])
-  const parsed = JSON.parse(plaintext.toString('utf8')) as unknown
+  const sealedParsed = JSON.parse(plaintext.toString('utf8')) as unknown
   return {
-    data: typeof parsed === 'object' && parsed !== null ? parsed as Record<string, string> : {},
+    data: typeof sealedParsed === 'object' && sealedParsed !== null ? sealedParsed as Record<string, string> : {},
     wasPlaintext: false,
   }
 }

@@ -121,7 +121,12 @@ export function useChatStream() {
   }, []);
 
   /** FE-2 队列归属守卫：只有"发起排队时的会话"仍处于激活状态才允许发送下一条，
-   * 否则丢弃并提示——修复 abort 走成功出口把旧会话文本发进新会话的串课。 */
+   * 否则丢弃并提示——修复 abort 走成功出口把旧会话文本发进新会话的串课。
+   *  W-3：同步 drain（旧实现 setTimeout 0）——setStreaming(false) 与 drain 之间
+   *  的 macrotask 边界是双流窗口：用户新消息绕过 streaming 守卫开第二条流，
+   *  drain 到点又 registerActiveChat 抢占 abort 把新流冻成半截且无错误行，
+   *  停止键也管不到即将 drain 的流。同步调用让 false→true 在同一 macrotask
+   *  内完成，用户输入插不进来；React 批处理下亦无 UI 闪烁。 */
   const drainQueueIfOwned = useCallback(() => {
     const state = useAppStore.getState();
     const next = state.shiftQueuedMessage();
@@ -133,8 +138,8 @@ export function useChatStream() {
       flashStatusBanner("已切换会话，丢弃旧队列消息");
       return;
     }
-    scheduleDeferred(() => { void sendRef.current(next.text, { queuedTurnId: next.turnId }); }, 0);
-  }, [flashStatusBanner, scheduleDeferred]);
+    void sendRef.current(next.text, { queuedTurnId: next.turnId });
+  }, [flashStatusBanner]);
 
   /** W-8：abort 路径的陈旧队列清理——排队时的会话已切换且队列非空时静默清掉，
    * 否则残留会在下次 drain 时弹"已切换会话，丢弃旧队列消息"的误导横幅。 */
@@ -357,7 +362,13 @@ export function useChatStream() {
           flashStatusBanner("队列已满，请等待当前回合完成");
           return;
         }
-        if (state.activeSessionId) {
+        // W-4：命令（含未知命令）不进服务端 durable inbox——命令在 drain 时由
+        // 本函数的命令路径直接执行、不经过 streamChat，服务端回合永不消费：
+        // QueueDock「队列中 N」永久卡住，且宿主自行消费 inbox 时命令文本又会
+        // 作为普通 LLM 回合跑一遍。命令只进本地队列（无 turnId，刷新丢失可接受），
+        // 普通消息才建 durable 回合保刷新不丢。
+        const commandOnly = parseCommand(trimmed) !== null;
+        if (!commandOnly && state.activeSessionId) {
           try {
             const queued = await api.enqueueAgent(state.activeCourseId ?? "", state.activeSessionId, state.mode, trimmed);
             state.enqueueQueuedMessage({ text: trimmed, turnId: queued.turnId });

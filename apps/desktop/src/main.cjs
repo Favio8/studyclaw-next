@@ -45,8 +45,18 @@ function paths() {
   return { resourcesRoot, hostBundle, webDist }
 }
 
+/** C-3：崩溃退避重启的挂起计时器——startHost 成功即取消（被顶替），stopHost
+ *  也取消（退出不该再重启）。无主计时器会和 activate 触发的 startHost 双 spawn。 */
+let restartTimer = null
+
 function startHost() {
   if (isDev) return // dev：外部已运行的 serve 就是 Host
+  // C-3：重入保护——崩溃后 1s 退避计时器挂起期间用户触发 activate → startHost()
+  // 与计时器到点后的 startHost() 会双重 spawn：后者 rmSync 掉前者的 host.json
+  // 并再 spawn，新 Host 因前一个持 host.lock 启动失败 → 又进重启循环 → 5 分钟
+  // 内第 4 次即 fatal，应用被自身状态机锁死。
+  if (host !== null) return
+  if (restartTimer !== null) { clearTimeout(restartTimer); restartTimer = null }
   const { hostBundle, webDist } = paths()
   if (!existsSync(hostBundle)) {
     fatal('缺少 Host 资源 resources/host/bin.js，请先运行 node scripts/assemble-host.mjs')
@@ -88,7 +98,8 @@ function startHost() {
     }
     lastRestartWindow.push(now)
     const wait = RESTART_BACKOFF_MS[Math.min(restartIdx++, RESTART_BACKOFF_MS.length - 1)]
-    setTimeout(() => {
+    restartTimer = setTimeout(() => {
+      restartTimer = null
       startHost()
       // Host 以 --port 0 启动，每次重启都是新端口；崩溃时存活（或新开）的
       // 窗口必须跟随新端口，否则继续连已死的旧端口。pid 复核的 waitForHost
@@ -107,6 +118,9 @@ function startHost() {
 }
 
 function stopHost() {
+  // C-3：退出路径先取消挂起的重启计时器——否则 app.quit() 后计时器到点仍会
+  // spawn 一个新 Host（退出后复活）。
+  if (restartTimer !== null) { clearTimeout(restartTimer); restartTimer = null }
   if (!host || host.pid === undefined) return
   const pid = host.pid
   try {
@@ -114,7 +128,13 @@ function stopHost() {
       // /T 清整棵进程树（Electron-as-node 在部分路径下会派生辅助进程）。
       // 强杀不触发 Host 的 SIGTERM 优雅收尾（host.json/lock 残留），但
       // Host 启动时对过期 lock 自愈（冒烟已验证二次启动自愈）。
+      // C-4：校验退出码——fire-and-forget 时 taskkill 是否真正执行无迹可查；
+      // 用户随后强杀 Electron 会让 sidecar 成孤儿（继续占端口、写 lock），
+      // 后续每次启动都因孤儿 pid 存活被拒 → 3 次重启后 fatal 且报错只指向
+      // 日志。退出码/错误落日志至少让"退出后仍有残留"可诊断。
       spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
+        .on('error', e => console.error('[desktop] taskkill 启动失败', e))
+        .on('exit', code => { if (code !== 0) console.error(`[desktop] taskkill 退出码 ${code}（PID ${pid} 可能残留）`) })
     } else {
       host.kill('SIGTERM') // Host 有 SIGTERM 优雅退出 handler
       const ref = host
@@ -178,7 +198,11 @@ async function createMainWindow() {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (e, target) => {
-    const allowed = isDev ? target.startsWith(DEV_URL) : /^http:\/\/127\.0\.0\.1:\d+\//.test(target)
+    // C-5：仅放行本次 Host 的端口（host.json 实端口，pid 已由 waitForHost 复核）
+    // ——任意 localhost 端口放行会把"页内脚本可取 token"的面放大到同机全部
+    // 本地服务。其余一律外开系统浏览器（与 setWindowOpenHandler 同语义）。
+    const cfg = isDev ? { port: null } : readHostConfig()
+    const allowed = isDev ? target.startsWith(DEV_URL) : (cfg !== null && target.startsWith(`http://127.0.0.1:${cfg.port}/`))
     if (!allowed) { e.preventDefault(); shell.openExternal(target) }
   })
   await win.loadURL(url)
@@ -248,4 +272,13 @@ if (!gotLock) { app.quit() } else {
 }
 
 // contextIsolation 之后的诊断信息最小暴露面（供未来的桌面诊断 UI 使用）。
-ipcMain.handle('studyclaw:host-info', () => (isDev ? { dev: true } : readHostConfig()))
+// C-5：不再透出 host.json 全文（含明文访问 token）——旧实现把 token+port 经
+// contextBridge 暴露给窗口内页面，而 will-navigate 放行任意 127.0.0.1 端口，
+// 任一 localhost 页面即可取 token 驱动全部 RPC；preload 注释"桌面壳不额外
+// 注入任何凭据"与实现相反。收敛为 {dev, port}（Web UI 全库不调用该 API，
+// 已 grep 证实，无兼容负担）。
+ipcMain.handle('studyclaw:host-info', () => {
+  if (isDev) return { dev: true }
+  const cfg = readHostConfig()
+  return { dev: false, port: cfg === null ? null : cfg.port }
+})

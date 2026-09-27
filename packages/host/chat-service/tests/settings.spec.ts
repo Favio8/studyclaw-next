@@ -311,4 +311,63 @@ describe('settings domain', () => {
     expect(after.providers.find(p => p.id === 'dup')!.name).toBe('覆盖成功')
     await rm(root, { recursive: true, force: true })
   })
+
+  it('M3：并发保存两个 provider 双双存活（config 写锁串行化 RMW）', async () => {
+    const { root, ws } = await setup()
+    await Promise.all([
+      saveProvider(ws, { id: 'alpha', name: 'Alpha', model: 'model-a', baseUrl: 'https://a.example/v1' }),
+      saveProvider(ws, { id: 'beta', name: 'Beta', model: 'model-b', baseUrl: 'https://b.example/v1' }),
+    ])
+    const payload = await settingsPayload(ws)
+    const alpha = payload.providers.find(p => p.id === 'alpha')
+    const beta = payload.providers.find(p => p.id === 'beta')
+    expect(alpha).toBeDefined()
+    expect(beta).toBeDefined()
+    // 原 mock provider 的字段也不被并发写覆盖丢失。
+    expect(payload.providers.find(p => p.id === 'mock')!.model).toBe('mock-model')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('M3：并发「保存凭据」与「更新设置」互不丢字段', async () => {
+    const { root, ws } = await setup()
+    await Promise.all([
+      setCredential(ws, 'mock', 'concurrent-secret'),
+      updateSettings(ws, { temperature: 0.7 }),
+    ])
+    const payload = await settingsPayload(ws)
+    // llm.temperature 读取时被 provider 段显式值遮蔽（既有语义），直接看落盘。
+    const raw = await readFile(join(ws, '.studyclaw', 'config.yaml'), 'utf8')
+    expect(raw).toContain('temperature: 0.7')
+    expect(payload.providers.find(p => p.id === 'mock')!.apiKeyConfigured).toBe(true)
+    const config = await loadChatConfig(ws)
+    expect(config.apiKey).toBe('concurrent-secret')
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('M6：discoverModels 命中缓存不发请求，refresh 强制实时', async () => {
+    let hits = 0
+    const server: Server = createServer((_req, res) => {
+      hits += 1
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'cached-model' }] }))
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const baseUrl = typeof address === 'object' && address !== null ? `http://127.0.0.1:${address.port}/v1` : ''
+    try {
+      const first = await discoverModels({ baseUrl })
+      expect(first.map(m => m.id)).toEqual(['cached-model'])
+      expect(hits).toBe(1)
+      // 同键第二次调用走缓存（TTL 内）。
+      const second = await discoverModels({ baseUrl })
+      expect(second.map(m => m.id)).toEqual(['cached-model'])
+      expect(hits).toBe(1)
+      // refresh: true 绕过缓存。
+      const fresh = await discoverModels({ baseUrl, refresh: true })
+      expect(fresh.map(m => m.id)).toEqual(['cached-model'])
+      expect(hits).toBe(2)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
 })

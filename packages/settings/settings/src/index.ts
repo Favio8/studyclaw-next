@@ -272,12 +272,14 @@ function cloneJsonShaped(
     if (isPlainObject(value)) {
       if (visiting.has(value)) throw reject('a circular reference', path)
       visiting.add(value)
-      // TODO(settings-json-properties): Use property-safe construction here and
-      // in mergeLayers so valid JSON keys such as "__proto__" remain own data.
+      // TODO(settings-json-properties): mergeLayers carries the same fix.
+      // Plain assignment invokes the inherited `__proto__` accessor for that
+      // key (key lost + prototype replaced); defineProperty keeps every valid
+      // JSON key as own data.
       const out: Record<string, unknown> = {}
       for (const [key, entry] of Object.entries(value)) {
         if (entry === undefined) continue
-        out[key] = clone(entry, `${path}.${key}`)
+        Object.defineProperty(out, key, { value: clone(entry, `${path}.${key}`), enumerable: true, writable: true, configurable: true })
       }
       visiting.delete(value)
       return out
@@ -297,9 +299,16 @@ function cloneJsonShaped(
 function mergeLayers(under: unknown, over: unknown): unknown {
   if (over === undefined) return under
   if (!isPlainObject(under) || !isPlainObject(over)) return over
+  // The spread already defines own keys safely (CreateDataProperty), but the
+  // per-key write below must too: plain assignment for key `__proto__` would
+  // invoke the inherited accessor (key lost + prototype replaced) instead of
+  // writing own data. hasOwn guards the read as well — `'__proto__' in {}` is
+  // true via Object.prototype, and reading merged['__proto__'] would then
+  // return the prototype instead of the absent own key.
   const merged: Record<string, unknown> = { ...under }
   for (const [key, value] of Object.entries(over)) {
-    merged[key] = key in merged ? mergeLayers(merged[key], value) : value
+    const next = Object.hasOwn(merged, key) ? mergeLayers(merged[key], value) : value
+    Object.defineProperty(merged, key, { value: next, enumerable: true, writable: true, configurable: true })
   }
   return merged
 }
@@ -618,29 +627,45 @@ export abstract class SettingsProvider extends Service {
       }
       // Every mode derives from the section as it stands NOW, at the front of
       // the queue — never from whatever the caller last saw.
-      const current = this.section(ns) ?? {}
+      // publish() 会同步整体替换 this.document，记下其身份供 persist 窗口做
+      // 外部变更检测。
+      let docAtFront = this.document
+      let before = this.section(ns) ?? {}
       // The revision check belongs HERE, not at call time: the queue orders
       // writes but cannot tell a fresh writer from one holding a snapshot
       // that a predecessor already superseded.
       if (expectedRevision !== undefined && expectedRevision !== registration.revision) {
         throw new SettingsConflictError(ns, expectedRevision, registration.revision)
       }
-      const section = mode === 'merge'
-        ? mergeLayers(current, snapshot) as Record<string, unknown>
-        : mode === 'replace'
-          ? snapshot
-          : (snapshot['ops'] as SettingsPathOp[]).reduce(applyPathOp, current)
-      const next = deepFreeze(this.resolve(registration.schema, registration.base, section, registration.validate))
-      await this.persist(ns, section)
-      // The write reached storage either way; the cache must say so. Commit
-      // only when this registration is still the namespace owner — a fiber
-      // disposed (or replaced) mid-persist must not receive the notification.
-      this.document[ns] = section
-      // TODO(settings-replacement-resync): Re-resolve any replacement registration
-      // from this persisted section so an old in-flight write cannot leave it stale.
-      if (this.registrations.get(ns) === registration && !this.isStopped()) {
-        this.bumpRevision(registration, current, section)
-        this.commit(registration, next, 'update')
+      // publish-during-persist 竞态：publish()（外部文档变更入口，文件 watcher
+      // 类提供者必然使用）不经过写队列。若外部 publish 落在 persist 窗口内，
+      // 无条件 `this.document[ns] = section` 会把外部编辑在缓存与存储中静默
+      // 抹掉。检测到 document 身份变化时，把本次增量重放到外部节上重新落盘，
+      // 直到 document 在一整个 persist 往返内保持不变（replace 模式的语义就是
+      // 整节替换，重放结果不变，仅重走同一收敛路径）。
+      for (let attempt = 0; ; attempt += 1) {
+        const section = mode === 'merge'
+          ? mergeLayers(before, snapshot) as Record<string, unknown>
+          : mode === 'replace'
+            ? snapshot
+            : (snapshot['ops'] as SettingsPathOp[]).reduce(applyPathOp, before)
+        const next = deepFreeze(this.resolve(registration.schema, registration.base, section, registration.validate))
+        await this.persist(ns, section)
+        // The write reached storage either way; the cache must say so. Commit
+        // only when this registration is still the namespace owner — a fiber
+        // disposed (or replaced) mid-persist must not receive the notification.
+        if (this.document === docAtFront || attempt >= 4) {
+          this.document[ns] = section
+          // TODO(settings-replacement-resync): Re-resolve any replacement registration
+          // from this persisted section so an old in-flight write cannot leave it stale.
+          if (this.registrations.get(ns) === registration && !this.isStopped()) {
+            this.bumpRevision(registration, before, section)
+            this.commit(registration, next, 'update')
+          }
+          break
+        }
+        docAtFront = this.document
+        before = this.section(ns) ?? {}
       }
     })
     this.writeQueues.set(ns, run)

@@ -6,6 +6,7 @@
  * @module @studyclaw/chat-service/src/settings
  */
 
+import { createHash } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
@@ -159,6 +160,23 @@ async function withCredentialLock<T>(workspaceRoot: string, fn: () => Promise<T>
     return await current
   } finally {
     if (credentialLocks.get(workspaceRoot) === current) credentialLocks.delete(workspaceRoot)
+  }
+}
+
+/** Workspace-wide read/modify/write serialization for config.yaml (M3：此前
+ * saveProvider/deleteProvider/activateProvider/updateSettings/setCredential
+ * 全部无锁 RMW，并发保存会互相覆盖丢字段——例如 api_key_env 被覆盖后凭据
+ * 变孤儿、界面显示「未配置」)。锁序固定为 config → credential，避免死锁。 */
+const configLocks = new Map<string, Promise<unknown>>()
+
+async function withConfigLock<T>(workspaceRoot: string, fn: () => Promise<T>): Promise<T> {
+  const previous = configLocks.get(workspaceRoot) ?? Promise.resolve()
+  const current = previous.then(fn, fn)
+  configLocks.set(workspaceRoot, current)
+  try {
+    return await current
+  } finally {
+    if (configLocks.get(workspaceRoot) === current) configLocks.delete(workspaceRoot)
   }
 }
 
@@ -346,8 +364,19 @@ export function validateModelBaseUrl(rawUrl: string): string {
   return trimmed.replace(/\/+$/, '')
 }
 
+/** M6：模型目录探测缓存——sessionModels 每次打开选模目录会对全部已配 Key
+ * 的 provider 并行打 `/models`（5s 超时），无缓存时离线/慢端点必卡选模 UI。
+ * 键用 baseUrl + 密钥摘要（不落明文）；`refresh: true` 强制绕过（设置页
+ * 「从端点获取」按钮永远实时）。 */
+const MODEL_DISCOVERY_TTL_MS = 5 * 60_000
+const modelDiscoveryCache = new Map<string, { models: ProviderModelPayload[]; ts: number }>()
+
+function discoveryCacheKey(base: string, apiKey: string | null): string {
+  return `${base}|${apiKey === null || apiKey === '' ? '-' : createHash('sha256').update(apiKey).digest('hex').slice(0, 16)}`
+}
+
 /** Probe `GET {baseUrl}/models` (read-only, no persistence). */
-export async function discoverModels(input: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null }): Promise<ProviderModelPayload[]> {
+export async function discoverModels(input: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null; refresh?: boolean }): Promise<ProviderModelPayload[]> {
   const base = validateModelBaseUrl(input.baseUrl)
   if (base === '') throw new Error('Base URL 不能为空')
   let apiKey = input.apiKey?.trim() ?? null
@@ -359,6 +388,11 @@ export async function discoverModels(input: { baseUrl: string; apiKey?: string |
       throw new Error('环境变量名不在允许列表内（仅支持各 Provider 的 API_KEY 命名）')
     }
     apiKey = process.env[input.apiKeyEnv.trim()] ?? null
+  }
+  const cacheKey = discoveryCacheKey(base, apiKey)
+  if (input.refresh !== true) {
+    const cached = modelDiscoveryCache.get(cacheKey)
+    if (cached !== undefined && Date.now() - cached.ts < MODEL_DISCOVERY_TTL_MS) return cached.models
   }
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (apiKey !== null && apiKey !== '') headers['Authorization'] = `Bearer ${apiKey}`
@@ -373,7 +407,9 @@ export async function discoverModels(input: { baseUrl: string; apiKey?: string |
     const hint = response.status === 401 || response.status === 403 ? '，请检查 API Key 是否正确' : ''
     throw new Error(`端点返回 HTTP ${response.status}${hint}`)
   }
-  return parseModelsPayload(await response.json())
+  const models = parseModelsPayload(await response.json())
+  modelDiscoveryCache.set(cacheKey, { models, ts: Date.now() })
+  return models
 }
 
 /** Duplicate-provider creation guard (409 in the RPC envelope). */
@@ -414,100 +450,112 @@ export async function saveProvider(workspaceRoot: string, input: {
   // 显示名称在 UI 中是可选字段（placeholder「可选」），留空时回退为 id——
   // 行卡片与设置负载本来就用 `name || id` 兜底展示。
   const name = input.name.trim() || id
-  const config = await readConfig(workspaceRoot)
-  const existing = config.providers?.[id]
-  if (existing !== undefined && input.overwrite !== true) {
-    throw new ProviderExistsError(id)
-  }
-  const providers: Record<string, ProviderConfigYaml> = { ...(config.providers ?? {}) }
-  providers[id] = {
-    // 先展开既有 profile：未知键与未改字段原样保留（merge，非重建）。
-    ...(existing ?? {}),
-    id,
-    name,
-    model: input.model.trim(),
-    base_url: input.baseUrl?.trim() || null,
-    api_key_env: existing?.api_key_env ?? null,
-    ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
-    ...(input.maxConcurrency !== undefined ? { max_concurrency: input.maxConcurrency } : {}),
-    ...(input.models !== undefined && input.models !== null ? {
-      models: input.models.map(model => ({
-        id: model.id,
-        name: model.name,
-        context_window: model.contextWindow,
-        max_tokens: model.maxTokens,
-      })),
-    } : {}),
-  }
-  let nextConfig: ConfigYaml = { ...config, providers }
-  // DSH write-time posture: a saved provider the reader can never resolve is
-  // the top misconfiguration, so the first serviceable save auto-activates
-  // (the reader only consults `active_provider` / `llm.provider`).
-  const active = activeProviderId(nextConfig)
-  const saved = providers[id]
-  if ((active === '' || providers[active] === undefined) && saved.model !== '' && (saved.base_url ?? '') !== '') {
-    nextConfig = { ...nextConfig, active_provider: id, llm: { ...nextConfig.llm, provider: id } }
-  }
-  await writeConfig(workspaceRoot, nextConfig)
-  return settingsPayload(workspaceRoot)
+  return withConfigLock(workspaceRoot, async () => {
+    const config = await readConfig(workspaceRoot)
+    const existing = config.providers?.[id]
+    if (existing !== undefined && input.overwrite !== true) {
+      throw new ProviderExistsError(id)
+    }
+    const providers: Record<string, ProviderConfigYaml> = { ...(config.providers ?? {}) }
+    providers[id] = {
+      // 先展开既有 profile：未知键与未改字段原样保留（merge，非重建）。
+      ...(existing ?? {}),
+      id,
+      name,
+      model: input.model.trim(),
+      base_url: input.baseUrl?.trim() || null,
+      api_key_env: existing?.api_key_env ?? null,
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.maxConcurrency !== undefined ? { max_concurrency: input.maxConcurrency } : {}),
+      ...(input.models !== undefined && input.models !== null ? {
+        models: input.models.map(model => ({
+          id: model.id,
+          name: model.name,
+          context_window: model.contextWindow,
+          max_tokens: model.maxTokens,
+        })),
+      } : {}),
+    }
+    let nextConfig: ConfigYaml = { ...config, providers }
+    // DSH write-time posture: a saved provider the reader can never resolve is
+    // the top misconfiguration, so the first serviceable save auto-activates
+    // (the reader only consults `active_provider` / `llm.provider`).
+    const active = activeProviderId(nextConfig)
+    const saved = providers[id]
+    if ((active === '' || providers[active] === undefined) && saved.model !== '' && (saved.base_url ?? '') !== '') {
+      nextConfig = { ...nextConfig, active_provider: id, llm: { ...nextConfig.llm, provider: id } }
+    }
+    await writeConfig(workspaceRoot, nextConfig)
+    return settingsPayload(workspaceRoot)
+  })
 }
 
 /** Remove a provider; the active pointer falls back to the first remaining. */
 export async function deleteProvider(workspaceRoot: string, providerId: string): Promise<SettingsPayload> {
-  const config = await readConfig(workspaceRoot)
-  const existing = config.providers?.[providerId]
-  if (existing === undefined) throw new Error(`Provider ${providerId} 不存在`)
-  if (existing.api_key_env !== null && existing.api_key_env !== undefined) {
-    const credentials = await readCredentials(workspaceRoot)
-    delete credentials[existing.api_key_env]
-    await writeCredentials(workspaceRoot, credentials)
-  }
-  const providers = { ...(config.providers ?? {}) }
-  delete providers[providerId]
-  // The active pointer may be the explicit field or the llm-segment synthesis.
-  // Removing the active provider falls back to the first remaining provider;
-  // an empty pointer keeps the reader's first-entry fallback meaningful (no
-  // phantom 'deepseek' route that no profile backs).
-  const active = config.active_provider ?? config.llm?.provider ?? ''
-  if (active === providerId) {
-    const fallback = Object.keys(providers)[0] ?? ''
-    const nextConfig: ConfigYaml = { ...config, providers, active_provider: fallback, llm: { ...config.llm, provider: fallback } }
-    await writeConfig(workspaceRoot, nextConfig)
+  return withConfigLock(workspaceRoot, async () => {
+    const config = await readConfig(workspaceRoot)
+    const existing = config.providers?.[providerId]
+    if (existing === undefined) throw new Error(`Provider ${providerId} 不存在`)
+    if (existing.api_key_env !== null && existing.api_key_env !== undefined) {
+      await withCredentialLock(workspaceRoot, async () => {
+        const credentials = await readCredentials(workspaceRoot)
+        delete credentials[existing.api_key_env!]
+        await writeCredentials(workspaceRoot, credentials)
+      })
+    }
+    const providers = { ...(config.providers ?? {}) }
+    delete providers[providerId]
+    // The active pointer may be the explicit field or the llm-segment synthesis.
+    // Removing the active provider falls back to the first remaining provider;
+    // an empty pointer keeps the reader's first-entry fallback meaningful (no
+    // phantom 'deepseek' route that no profile backs).
+    const active = config.active_provider ?? config.llm?.provider ?? ''
+    if (active === providerId) {
+      const fallback = Object.keys(providers)[0] ?? ''
+      const nextConfig: ConfigYaml = { ...config, providers, active_provider: fallback, llm: { ...config.llm, provider: fallback } }
+      await writeConfig(workspaceRoot, nextConfig)
+      return settingsPayload(workspaceRoot)
+    }
+    await writeConfig(workspaceRoot, { ...config, providers })
     return settingsPayload(workspaceRoot)
-  }
-  await writeConfig(workspaceRoot, { ...config, providers })
-  return settingsPayload(workspaceRoot)
+  })
 }
 
 /** Activate one provider (the active pointer + llm display segment). */
 export async function activateProvider(workspaceRoot: string, providerId: string): Promise<SettingsPayload> {
-  const config = await readConfig(workspaceRoot)
-  const provider = config.providers?.[providerId]
-  if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
-  // DSH write-time refusal: activation is what makes build/default chat use
-  // the profile, so refuse unserviceable ones with the missing field named.
-  const label = provider.name ?? providerId
-  if ((provider.model ?? '') === '') throw new Error(`供应商 ${label} 未设置默认模型，激活前请在编辑器中选择`)
-  if ((provider.base_url ?? '') === '') throw new Error(`供应商 ${label} 缺少 Base URL，激活前请在编辑器中补全`)
-  await writeConfig(workspaceRoot, { ...config, active_provider: providerId, llm: { ...config.llm, provider: providerId } })
-  return settingsPayload(workspaceRoot)
+  return withConfigLock(workspaceRoot, async () => {
+    const config = await readConfig(workspaceRoot)
+    const provider = config.providers?.[providerId]
+    if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
+    // DSH write-time refusal: activation is what makes build/default chat use
+    // the profile, so refuse unserviceable ones with the missing field named.
+    const label = provider.name ?? providerId
+    if ((provider.model ?? '') === '') throw new Error(`供应商 ${label} 未设置默认模型，激活前请在编辑器中选择`)
+    if ((provider.base_url ?? '') === '') throw new Error(`供应商 ${label} 缺少 Base URL，激活前请在编辑器中补全`)
+    await writeConfig(workspaceRoot, { ...config, active_provider: providerId, llm: { ...config.llm, provider: providerId } })
+    return settingsPayload(workspaceRoot)
+  })
 }
 
 /** Store one provider's API key into `.studyclaw/credentials.json`. */
 export async function setCredential(workspaceRoot: string, providerId: string, apiKey: string): Promise<SettingsPayload> {
-  const config = await readConfig(workspaceRoot)
-  const provider = config.providers?.[providerId]
-  if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
-  const ref = deriveKeyRef(providerId)
-  await withCredentialLock(workspaceRoot, async () => {
-    const credentials = await readCredentials(workspaceRoot)
-    credentials[ref] = apiKey
-    await writeCredentials(workspaceRoot, credentials)
+  // M3：config 段与凭据段同锁序（config → credential）串行，与并发保存的
+  // provider 编辑互不丢更新。
+  return withConfigLock(workspaceRoot, async () => {
+    const config = await readConfig(workspaceRoot)
+    const provider = config.providers?.[providerId]
+    if (provider === undefined) throw new Error(`Provider ${providerId} 不存在`)
+    const ref = deriveKeyRef(providerId)
+    await withCredentialLock(workspaceRoot, async () => {
+      const credentials = await readCredentials(workspaceRoot)
+      credentials[ref] = apiKey
+      await writeCredentials(workspaceRoot, credentials)
+    })
+    const providers = { ...(config.providers ?? {}) }
+    providers[providerId] = { ...provider, api_key_env: ref }
+    await writeConfig(workspaceRoot, { ...config, providers })
+    return settingsPayload(workspaceRoot)
   })
-  const providers = { ...(config.providers ?? {}) }
-  providers[providerId] = { ...provider, api_key_env: ref }
-  await writeConfig(workspaceRoot, { ...config, providers })
-  return settingsPayload(workspaceRoot)
 }
 
 /** Partial update: llm segment fields and/or ui.default_mode. */
@@ -523,53 +571,55 @@ export async function updateSettings(workspaceRoot: string, partial: {
   permissionPreset?: string
   plugins?: Record<string, boolean>
 }): Promise<SettingsPayload> {
-  const config = await readConfig(workspaceRoot)
-  const llm = config.llm ?? {}
-  const nextLlm: NonNullable<ConfigYaml['llm']> = { ...llm }
-  if (partial.provider !== undefined) nextLlm.provider = partial.provider.trim()
-  if (partial.model !== undefined) nextLlm.model = partial.model.trim()
-  if (partial.apiKeyEnv !== undefined) {
-    const value = partial.apiKeyEnv.trim()
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
-      throw new Error('API key 环境变量名必须是字母、数字和下划线组成，且不能以数字开头')
+  return withConfigLock(workspaceRoot, async () => {
+    const config = await readConfig(workspaceRoot)
+    const llm = config.llm ?? {}
+    const nextLlm: NonNullable<ConfigYaml['llm']> = { ...llm }
+    if (partial.provider !== undefined) nextLlm.provider = partial.provider.trim()
+    if (partial.model !== undefined) nextLlm.model = partial.model.trim()
+    if (partial.apiKeyEnv !== undefined) {
+      const value = partial.apiKeyEnv.trim()
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+        throw new Error('API key 环境变量名必须是字母、数字和下划线组成，且不能以数字开头')
+      }
+      nextLlm.api_key_env = value
     }
-    nextLlm.api_key_env = value
-  }
-  if (partial.apiBase !== undefined) nextLlm.api_base = partial.apiBase === null ? null : partial.apiBase.trim() || null
-  if (partial.temperature !== undefined) nextLlm.temperature = partial.temperature
-  if (partial.maxConcurrency !== undefined) nextLlm.max_concurrency = partial.maxConcurrency
-  const nextUi: NonNullable<ConfigYaml['ui']> = { ...(config.ui ?? {}) }
-  if (partial.defaultMode !== undefined) {
-    if (!['socratic', 'quick', 'feynman', 'debug'].includes(partial.defaultMode)) {
-      throw new Error('默认学习模式无效')
+    if (partial.apiBase !== undefined) nextLlm.api_base = partial.apiBase === null ? null : partial.apiBase.trim() || null
+    if (partial.temperature !== undefined) nextLlm.temperature = partial.temperature
+    if (partial.maxConcurrency !== undefined) nextLlm.max_concurrency = partial.maxConcurrency
+    const nextUi: NonNullable<ConfigYaml['ui']> = { ...(config.ui ?? {}) }
+    if (partial.defaultMode !== undefined) {
+      if (!['socratic', 'quick', 'feynman', 'debug'].includes(partial.defaultMode)) {
+        throw new Error('默认学习模式无效')
+      }
+      nextUi.default_mode = partial.defaultMode
     }
-    nextUi.default_mode = partial.defaultMode
-  }
-  const nextAgent = { ...(config.agent ?? {}) }
-  if (partial.agentPreset !== undefined) {
-    if (!AGENT_PRESETS.some(item => item.id === partial.agentPreset)) throw new Error('Agent preset 无效')
-    nextAgent.preset = partial.agentPreset
-  }
-  const nextPermissions = { ...(config.permissions ?? {}) }
-  if (partial.permissionPreset !== undefined) {
-    if (!PERMISSION_PRESETS.some(item => item.id === partial.permissionPreset)) throw new Error('权限 preset 无效')
-    nextPermissions.preset = partial.permissionPreset
-  }
-  const nextPlugins = { ...(config.plugins ?? {}) }
-  if (partial.plugins !== undefined) {
-    for (const [id, enabled] of Object.entries(partial.plugins)) {
-      if (!['learning', 'generic-tools', 'sandbox', 'lsp'].includes(id)) throw new Error(`插件不存在: ${id}`)
-      nextPlugins[id] = enabled
+    const nextAgent = { ...(config.agent ?? {}) }
+    if (partial.agentPreset !== undefined) {
+      if (!AGENT_PRESETS.some(item => item.id === partial.agentPreset)) throw new Error('Agent preset 无效')
+      nextAgent.preset = partial.agentPreset
     }
-  }
-  const changed = JSON.stringify(nextLlm) !== JSON.stringify(llm) || JSON.stringify(nextUi) !== JSON.stringify(config.ui ?? {})
-    || JSON.stringify(nextAgent) !== JSON.stringify(config.agent ?? {}) || JSON.stringify(nextPermissions) !== JSON.stringify(config.permissions ?? {})
-    || JSON.stringify(nextPlugins) !== JSON.stringify(config.plugins ?? {})
-  if (!changed) {
-    // FL-16：无改动是正常操作（幂等保存），旧实现抛「没有需要更新的设置字段」
-    // 让前端把"什么都没改就点保存"报成红色失败弹窗。直接返回当前 payload。
+    const nextPermissions = { ...(config.permissions ?? {}) }
+    if (partial.permissionPreset !== undefined) {
+      if (!PERMISSION_PRESETS.some(item => item.id === partial.permissionPreset)) throw new Error('权限 preset 无效')
+      nextPermissions.preset = partial.permissionPreset
+    }
+    const nextPlugins = { ...(config.plugins ?? {}) }
+    if (partial.plugins !== undefined) {
+      for (const [id, enabled] of Object.entries(partial.plugins)) {
+        if (!['learning', 'generic-tools', 'sandbox', 'lsp'].includes(id)) throw new Error(`插件不存在: ${id}`)
+        nextPlugins[id] = enabled
+      }
+    }
+    const changed = JSON.stringify(nextLlm) !== JSON.stringify(llm) || JSON.stringify(nextUi) !== JSON.stringify(config.ui ?? {})
+      || JSON.stringify(nextAgent) !== JSON.stringify(config.agent ?? {}) || JSON.stringify(nextPermissions) !== JSON.stringify(config.permissions ?? {})
+      || JSON.stringify(nextPlugins) !== JSON.stringify(config.plugins ?? {})
+    if (!changed) {
+      // FL-16：无改动是正常操作（幂等保存），旧实现抛「没有需要更新的设置字段」
+      // 让前端把"什么都没改就点保存"报成红色失败弹窗。直接返回当前 payload。
+      return settingsPayload(workspaceRoot)
+    }
+    await writeConfig(workspaceRoot, { ...config, llm: nextLlm, ui: nextUi, agent: nextAgent, permissions: nextPermissions, plugins: nextPlugins })
     return settingsPayload(workspaceRoot)
-  }
-  await writeConfig(workspaceRoot, { ...config, llm: nextLlm, ui: nextUi, agent: nextAgent, permissions: nextPermissions, plugins: nextPlugins })
-  return settingsPayload(workspaceRoot)
+  })
 }

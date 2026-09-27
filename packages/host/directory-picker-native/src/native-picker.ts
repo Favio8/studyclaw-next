@@ -47,6 +47,16 @@ function isMissingCommand(error: unknown): boolean {
   return errorCode(error) === 'ENOENT'
 }
 
+/** zenity/kdialog 的退出码 1 兼有「用户取消」与「对话框启动失败」两种语义：
+ *  无图形会话/DISPLAY 时 GTK/Qt 也会以退出码 1 退出，一律返回 null 会违反
+ *  FL-02 契约（null 仅表示用户取消）。stderr 命中启动失败特征时按不可用
+ *  处理——消息带「原生目录选择器」关键词，前端据此回落目录浏览。 */
+function throwIfDialogUnavailable(error: unknown): void {
+  if (/(unable to init server|cannot open display|cannot connect to (?:x server|display)|could not connect to display|qt\.qpa|could not load the qt platform)/i.test(errorStderr(error))) {
+    throw new Error('原生目录选择器无法启动（缺少可用的图形显示环境）：请改用目录浏览选择项目')
+  }
+}
+
 /**
  * Open the platform directory picker.
  * @param signal - caller/connection lifetime; abort closes the dialog or
@@ -110,7 +120,10 @@ async function pickWithPlatform(
       return outputPath(result.stdout)
     } catch (error: unknown) {
       if (signal.aborted) throw error
-      if (errorCode(error) === 1) return null
+      if (errorCode(error) === 1) {
+        throwIfDialogUnavailable(error)
+        return null
+      }
       if (!isMissingCommand(error)) throw error
     }
     try {
@@ -120,7 +133,10 @@ async function pickWithPlatform(
       return outputPath(result.stdout)
     } catch (error: unknown) {
       if (signal.aborted) throw error
-      if (errorCode(error) === 1) return null
+      if (errorCode(error) === 1) {
+        throwIfDialogUnavailable(error)
+        return null
+      }
       if (isMissingCommand(error)) {
         // FL-45：三层皆不可用 → "不可用"错误（消息包含向导识别的
         // 「原生目录选择器」关键词，前端自动回落目录浏览）。

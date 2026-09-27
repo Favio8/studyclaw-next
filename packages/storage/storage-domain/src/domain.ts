@@ -97,6 +97,13 @@ export type DomainGlobalHandleOf<S extends DomainSpec> =
 export interface Domain<S extends DomainSpec> {
   /** Domain name from the spec. */
   readonly name: string
+
+  /**
+   * T-11：open 时被隔离的坏记录（schema 不匹配/手改文件/schema 演进）。
+   * 空数组表示存储完好；非空时这些记录已被跳过（应用保持可用），可据此
+   * 诊断或修复，详见各表的写时校验。
+   */
+  readonly quarantined: ReadonlyArray<{ table: string; key: string; reason: string }>
   /** Global singleton handle; a spec without `global` has no usable handle (`never`). */
   readonly global: DomainGlobalHandleOf<S>
   /**
@@ -144,6 +151,9 @@ export class DomainImpl {
   private readonly tables = new Map<string, KvTableImpl<string, unknown>>()
   private globalValue: unknown
   private readonly globalHandle?: DomainGlobal<unknown>
+  /** T-11：open 时被隔离的坏记录（schema 不匹配/手改文件/schema 演进），
+   *  诊断面可见——旧实现任一条坏记录让整个 domain 打不开且无恢复路径。 */
+  readonly quarantined: Array<{ table: string; key: string; reason: string }>
 
   /** Tail of the write chain; every link settles (rejections are observed by the caller's slice). */
   private chain: Promise<void> = Promise.resolve()
@@ -162,6 +172,8 @@ export class DomainImpl {
    * the spec, so the entry set IS the table set.
    * @param globalValue - Validated stored global, or the spec's `initial`
    * when the medium held none; `undefined` when the spec declares no global.
+   * @param quarantined - Records skipped at open for schema mismatch (T-11),
+   * surfaced for diagnostics instead of failing the whole open.
    * @param onClosed - Facility hook run once after teardown completes; frees
    * the domain name for a later open.
    */
@@ -171,9 +183,11 @@ export class DomainImpl {
     private readonly unit: KvUnit,
     records: Map<string, Map<string, unknown>>,
     globalValue: unknown,
+    quarantined: Array<{ table: string; key: string; reason: string }>,
     private readonly onClosed: () => void,
   ) {
     this.name = spec.name
+    this.quarantined = quarantined
     const host: TableHost = {
       domainName: spec.name,
       unit,
@@ -182,20 +196,27 @@ export class DomainImpl {
       emitChanged: (change) => { this.emitChanged(change) },
     }
     for (const [table, tableRecords] of records) {
-      this.tables.set(table, new KvTableImpl(host, table, tableRecords))
+      this.tables.set(table, new KvTableImpl(host, table, tableRecords, spec.tables[table]?.valueSchema))
     }
     if (spec.global !== undefined) {
+      const globalSchema = spec.global.schema
       this.globalValue = globalValue
       this.globalHandle = {
         get: () => {
           this.assertReadable()
           return this.globalValue
         },
-        set: value => this.enqueue(async () => {
-          await this.unit.setGlobal(value)
-          this.globalValue = value
-          this.emitChanged({ domain: this.name, table: '', key: '', operation: 'put', value })
-        }),
+        set: value => {
+          // T-11：写时校验——非法全局值在落盘前拒绝，避免下次 open 时
+          // invalid-record 把整个 domain 打不开。校验同样放在 job 内，
+          // 保证以 Promise 拒绝而非同步抛出。
+          return this.enqueue(async () => {
+            assertRecord(this.name, '', '', globalSchema, value)
+            await this.unit.setGlobal(value)
+            this.globalValue = value
+            this.emitChanged({ domain: this.name, table: '', key: '', operation: 'put', value })
+          })
+        },
       }
     }
   }
@@ -282,6 +303,8 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
     private readonly host: TableHost,
     private readonly tableName: string,
     private readonly records: Map<string, unknown>,
+    /** T-11：表级 zod schema，写入前校验；缺失（理论不可达）时跳过校验。 */
+    private readonly schema?: { safeParse(value: unknown): { success: boolean; error?: unknown } },
   ) {}
 
   get(key: K): V | undefined {
@@ -305,7 +328,10 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
   }
 
   put(key: K, value: V): Promise<void> {
+    // T-11：写时校验放在 job 内（而非 put 的同步前缀）——put 是非 async 函数，
+    // 同步 throw 不会变成 Promise 拒绝，调用方的 rejects 断言会拿到裸异常。
     return this.host.enqueue(async () => {
+      if (this.schema !== undefined) assertRecord(this.host.domainName, this.tableName, key, this.schema, value)
       await this.host.unit.putRecord(this.tableName, key, value)
       this.records.set(key, value)
       this.emitPut(key, value)
@@ -338,6 +364,8 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
         )
       }
       const next = fn(this.records.get(key) as V)
+      // T-11：update 的产出值同样在落盘前校验（fn 在链上执行，校验随之内联）。
+      if (this.schema !== undefined) assertRecord(this.host.domainName, this.tableName, key, this.schema, next)
       await this.host.unit.putRecord(this.tableName, key, next)
       this.records.set(key, next)
       this.emitPut(key, next)
@@ -354,4 +382,16 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
       value,
     })
   }
+}
+
+/** T-11：写时校验——schema 不匹配时以 invalid-record 拒绝（位置信息齐全）。 */
+function assertRecord(domain: string, table: string, key: string, schema: { safeParse(value: unknown): { success: boolean; error?: unknown } }, value: unknown): void {
+  const result = schema.safeParse(value)
+  if (result.success) return
+  const slot = table === '' ? 'global' : `record '${key}' in table '${table}'`
+  throw new DomainError(
+    'invalid-record',
+    `domain '${domain}': ${slot} does not match its schema`,
+    { detail: { table, key }, cause: result.error },
+  )
 }

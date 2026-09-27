@@ -114,29 +114,50 @@ describe('DomainFacility.open', () => {
     expect(domain.table('rows').size).toBe(0)
   })
 
-  it('rejects stored records that fail their schema, naming table and key', async () => {
+  it('T-11：拒绝 schema 不符的写入（落盘前 fail-fast，介质不受污染）', async () => {
+    const { facility } = await harness()
+    const domain = await facility.open(spec)
+    // 缺字段 / 类型错误在 put 前即被拒——坏记录不再有机会 brick domain。
+    await expect(domain.table('items').put('bad', { label: 'x' } as never))
+      .rejects.toMatchObject({ code: 'invalid-record', detail: { table: 'items', key: 'bad' } })
+    await expect(domain.table('items').put('bad2', { label: 'x', count: 'NaN' } as never))
+      .rejects.toMatchObject({ code: 'invalid-record' })
+    await expect(domain.table('items').update('nope', () => ({ label: 'x', count: 1 })))
+      .rejects.toMatchObject({ code: 'missing-key' })
+    // update 产出非法值时同样拒绝。
+    await domain.table('items').put('a', { label: 'first', count: 1 })
+    await expect(domain.table('items').update('a', () => ({ label: 'first' } as never)))
+      .rejects.toMatchObject({ code: 'invalid-record' })
+    // 全局值写入前校验。
+    await expect(domain.global.set({ theme: 42 } as never)).rejects.toMatchObject({ code: 'invalid-record' })
+    // 被拒的写入没有落介质：表里只有合法那条。
+    expect(domain.table('items').size).toBe(1)
+  })
+
+  it('T-11：open 时隔离坏记录而非整体失败（诊断面可见，其余记录可用）', async () => {
     const pool = new MemoryMediaPool()
     {
       const { facility } = await harness({ pool })
-      await (await facility.open(spec)).table('items').put('bad', { label: 'x', count: 2 })
+      await (await facility.open(spec)).table('items').put('good', { label: 'x', count: 2 })
     }
+    // 模拟手改文件/schema 演进：一条记录坏掉。
     pool.media.get('demo')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
     const { facility } = await harness({ pool })
-    await expect(facility.open(spec)).rejects.toMatchObject({
-      code: 'invalid-record',
-      detail: { table: 'items', key: 'bad' },
-    })
+    const domain = await facility.open(spec)
+    // 坏记录被跳过并登记，好记录照常可用。
+    expect(domain.table('items').get('good')).toEqual({ label: 'x', count: 2 })
+    expect(domain.table('items').get('bad')).toBeUndefined()
+    expect(domain.quarantined).toMatchObject([{ table: 'items', key: 'bad' }])
   })
 
-  it('rejects a stored global that fails its schema with the global marker', async () => {
+  it('T-11：open 时隔离坏 global 并回落 initial', async () => {
     const pool = new MemoryMediaPool()
     pool.versions.set('demo', 1)
     pool.media.set('demo', { tables: new Map(), global: { theme: 42 } })
     const { facility } = await harness({ pool })
-    await expect(facility.open(spec)).rejects.toMatchObject({
-      code: 'invalid-record',
-      detail: { table: '', key: '' },
-    })
+    const domain = await facility.open(spec)
+    expect(domain.global.get()).toEqual({ theme: 'plain' })
+    expect(domain.quarantined).toMatchObject([{ table: '', key: '' }])
   })
 
   it('passes through a backend version mismatch', async () => {

@@ -115,26 +115,43 @@ export class DomainFacility {
       try {
         const snapshot = await unit.loadAll()
         const tables = new Map<string, Map<string, unknown>>()
+        // T-11：坏记录隔离而非整体失败——手改文件/schema 演进/旧版本写入的
+        // 非法记录曾让整个 domain 打不开且无恢复路径；现在逐条 try，跳过并
+        // 登记到 domain.quarantined（诊断面），应用保持可用。
+        const quarantined: Array<{ table: string; key: string; reason: string }> = []
         for (const [table, tableSpec] of Object.entries(spec.tables)) {
           const records = new Map<string, unknown>()
           for (const [key, raw] of Object.entries(snapshot.tables[table] ?? {})) {
-            records.set(key, parseRecord(spec.name, table, key, () => tableSpec.valueSchema.parse(raw)))
+            try {
+              records.set(key, tableSpec.valueSchema.parse(raw))
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : String(error)
+              quarantined.push({ table, key, reason })
+              this.ctx.logger.warn(`domain '${spec.name}': quarantined record '${key}' in table '${table}' (${reason})`)
+            }
           }
           tables.set(table, records)
         }
         // A null stored global means "never written": serve `initial` without
-        // materializing it — the first `set` writes.
+        // materializing it — the first `set` writes. A malformed stored global
+        // is quarantined the same way (fall back to `initial`).
         const globalSpec = spec.global
-        const globalValue = globalSpec === undefined
-          ? undefined
-          : snapshot.global === null
-            ? globalSpec.initial
-            : parseRecord(spec.name, '', '', () => globalSpec.schema.parse(snapshot.global))
+        let globalValue = globalSpec === undefined ? undefined : globalSpec.initial
+        if (globalSpec !== undefined && snapshot.global !== null) {
+          try {
+            globalValue = globalSpec.schema.parse(snapshot.global)
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            quarantined.push({ table: '', key: '', reason })
+            this.ctx.logger.warn(`domain '${spec.name}': quarantined malformed global (${reason})`)
+            globalValue = globalSpec.initial
+          }
+        }
         // The onClosed hook runs strictly after teardown completes: writes
         // landing during the drain still emit domain/changed, and the domain
         // stays resolvable (the package invariant cross-checks each event)
         // until fully closed — only then does the name free up for reopening.
-        const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, () => {
+        const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, quarantined, () => {
           this.domains.delete(spec.name)
           this.reserved.delete(spec.name)
         })
@@ -174,20 +191,6 @@ export class DomainFacility {
    */
   async closeAll(): Promise<void> {
     await Promise.all([...this.domains.values()].map(domain => domain.close()))
-  }
-}
-
-/** Run one zod parse, translating failure to `invalid-record` with its location. */
-function parseRecord<T>(domain: string, table: string, key: string, parse: () => T): T {
-  try {
-    return parse()
-  } catch (error) {
-    const slot = table === '' ? 'global' : `record '${key}' in table '${table}'`
-    throw new DomainError(
-      'invalid-record',
-      `domain '${domain}': stored ${slot} does not match its schema`,
-      { detail: { table, key }, cause: error },
-    )
   }
 }
 

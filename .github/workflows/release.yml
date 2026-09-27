@@ -17,11 +17,11 @@ jobs:
     name: Release gate (typecheck + tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4.4.0
         with:
           version: 11.7.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: pnpm
@@ -63,11 +63,11 @@ jobs:
               dist/*.deb
               dist/latest-linux.yml
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4.4.0
         with:
           version: 11.7.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: pnpm
@@ -97,7 +97,7 @@ jobs:
             cp -v "$f" packaged/
           done
           ls -la packaged/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: apps/desktop/packaged/*
@@ -108,11 +108,11 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4.4.0
         with:
           version: 11.7.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: pnpm
@@ -143,7 +143,7 @@ jobs:
             echo "NPM_TOKEN 未配置——仅 dry-run 验证，不实际发布。"
             npm publish "$tgz" --access public --dry-run "${tag_args[@]}"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-npm-tgz
           path: artifacts/studyclaw-cli-*.tgz
@@ -155,7 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           pattern: release-*
@@ -163,7 +163,7 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
       - name: Create GitHub Release and upload installers
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}

@@ -126,7 +126,17 @@ export function useChatStream() {
    *  的 macrotask 边界是双流窗口：用户新消息绕过 streaming 守卫开第二条流，
    *  drain 到点又 registerActiveChat 抢占 abort 把新流冻成半截且无错误行，
    *  停止键也管不到即将 drain 的流。同步调用让 false→true 在同一 macrotask
-   *  内完成，用户输入插不进来；React 批处理下亦无 UI 闪烁。 */
+   *  内完成，用户输入插不进来；React 批处理下亦无 UI 闪烁。
+   *
+   *  A4 队列状态机不变量（drain 与 stop 的统一语义）：
+   *   - **除 abort 外的每个终态都推进队列**：成功、业务 error 帧、网络重试
+   *     耗尽。旧实现只有成功路径 drain，失败终态后排队的消息永久卡在队列里
+   *     （streaming 已置 false，用户看不到任何提示，也不能靠"再发一轮"带出来，
+   *     因为那只会再排一条）——用户连发三条、第一条失败，后两条静默丢失。
+   *   - **abort（用户停止/切换对话）永不 drain**：排队文本属于旧会话，只能
+   *     由 clearStaleQueue 在归属变化时清掉。
+   *   - drain 一律走同一个归属守卫（queueOwner vs 当前激活项目/会话），
+   *     守卫不过就丢弃并横幅提示，不静默。 */
   const drainQueueIfOwned = useCallback(() => {
     const state = useAppStore.getState();
     const next = state.shiftQueuedMessage();
@@ -546,6 +556,9 @@ export function useChatStream() {
             useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零
             unregisterActiveChat(abort);
             lastFailure = { requestId, kind: "business" }; // UI-1：业务 error 后重试复用 requestId（服务端 void 旧 turn 后新开）
+            // A4：业务 error 也是终态，队列照常推进（旧实现只在这里 return，
+            // 排队消息永久卡死；用户连发多条时后面的几条静默丢失）。
+            drainQueueIfOwned();
             return;
           }
           // 成功完成：收尾（done 已定格消息卡，此处清全局流态）
@@ -590,10 +603,15 @@ export function useChatStream() {
       setStreamPhase(null);
       useAppStore.setState({ toolRunning: 0 }); // 爪爪 searching 计数归零 // 循环穷尽（重试耗尽等）同样不残留相位
       unregisterActiveChat(abort);
+      // A4：重试耗尽同样是非 abort 终态，队列继续推进（与成功/业务 error 一致）。
+      drainQueueIfOwned();
     },
     [
       appendMessage,
       cancelPendingFlush,
+      clearStaleQueue,
+      commitLastAgent,
+      drainQueueIfOwned,
       flashStatusBanner,
       handleEvent,
       setPendingAsk,

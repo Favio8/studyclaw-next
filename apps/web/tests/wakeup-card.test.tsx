@@ -8,6 +8,8 @@ const { storeState, wakeupMocks, getStateMock } = vi.hoisted(() => ({
   },
   wakeupMocks: {
     submitWakeupAnswer: vi.fn(),
+    // W-1：WakeupCard 卸载时中止在途评测流（组件新增的 cleanup 导入）。
+    abortActiveWakeupEval: vi.fn(),
   },
   // 爪爪结果脉冲（P1）：WakeupCard 评测后经 getState 写入。
   // 注意 afterEach 的 clearAllMocks 只清调用记录不清实现，但 mock 工厂
@@ -24,6 +26,7 @@ vi.mock("../src/store/useAppStore", () => ({
 }));
 vi.mock("../src/lib/wakeup", () => ({
   submitWakeupAnswer: wakeupMocks.submitWakeupAnswer,
+  abortActiveWakeupEval: wakeupMocks.abortActiveWakeupEval,
 }));
 vi.mock("../src/lib/panelData", () => ({
   refreshCourseList: vi.fn(() => Promise.resolve()),

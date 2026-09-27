@@ -10,8 +10,9 @@
  * - 「下次再测」：即作答后遗留的唤醒态可手动收起。
  */
 
-import { useCallback, useState } from "react";
-import { submitWakeupAnswer } from "@/src/lib/wakeup";
+import { useCallback, useEffect, useState } from "react";
+import { abortActiveWakeupEval, submitWakeupAnswer } from "@/src/lib/wakeup";
+import { isAbortError } from "@/src/lib/chatStream";
 import { Clawzy } from "@/src/components/mascot";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { WakeupCard as WakeupCardType } from "@/src/types/api";
@@ -26,6 +27,10 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
     text: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // W-1：组件卸载（切课/切项目/收起）时中止在途评测流——否则服务端继续跑完
+  // 计费，且迟到事件会写进已切换项目的 store。
+  useEffect(() => () => abortActiveWakeupEval(), []);
 
   // P1 onboarding 轮换：标题猫随交互轮换 idle → 判题 thinking → 结果 celebrate/encourage
   const mascotState = busy ? "thinking" : feedback === null ? "idle" : feedback.passed ? "celebrate" : "encourage";
@@ -53,6 +58,8 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
           : `✗ 未命中：${result.feedback || "看看复习提示"}（下次复习 ${result.nextReviewAt ?? "-"}）`,
       });
     } catch (cause) {
+      // 切换/收起导致的中止不是失败：静默（quizFlow 同语义）。
+      if (isAbortError(cause)) return;
       setError(cause instanceof Error ? cause.message : "评测失败，请稍后再试");
     } finally {
       setBusy(false);

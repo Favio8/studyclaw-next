@@ -59,6 +59,10 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
   });
   try {
     const { tasks } = await api.quiz(courseId, mode, 5, dueOnly);
+    // W-2：切课守卫——await 期间用户切项目时，旧课程的题卡不得覆盖新课程的
+    // quiz 状态（Console.tsx / panelData.ts 均有同类守卫，唯独此处缺失）：
+    // 覆盖后再作答即用新 courseId + 旧 taskId 提交，评测落到错课程。
+    if (useAppStore.getState().activeCourseId !== courseId) return;
     // FL-28：池为空时旧实现只写入空数组，界面毫无反应（死胡同交互）——用户点
     // "开始练习"后既没有题也没有提示。这里显式给出可操作的下一步。
     useAppStore.getState().setQuiz({

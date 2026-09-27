@@ -34,6 +34,7 @@ import { Clawzy } from "@/src/components/mascot";
 import { useSessionActions, suppressAutoSelectOnce } from "@/src/hooks/useSessionActions";
 import { abortActiveChat } from "@/src/lib/chatStream";
 import { abortActiveEval } from "@/src/lib/quizFlow";
+import { abortActiveWakeupEval } from "@/src/lib/wakeup";
 import { api } from "@/src/lib/api";
 import { relativeTime } from "@/src/lib/format";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
@@ -261,6 +262,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         // 否则服务端继续跑完计费、store 被旧流事件污染。
         abortActiveChat();
         abortActiveEval();
+        abortActiveWakeupEval();
         // FL-10：移除当前项目 → 本地指针同步清空（后端已回落/清空
         // lastOpenedPath），整个控制台回到空态，而不是悬空挂在已移除项目上。
         const store = useAppStore.getState();

@@ -117,14 +117,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-/** 本地资料上传不能复用 JSON request：浏览器须自行生成 multipart boundary。 */
-async function uploadFiles<T>(path: string, files: File[]): Promise<T> {
+/** 本地资料上传不能复用 JSON request：浏览器须自行生成 multipart boundary。
+ *  W-12：signal 让调用方可取消——大文件上传网络挂起时旧实现 busy 永久 true，
+ *  只能刷新页面（无超时/取消的任何入口）。 */
+async function uploadFiles<T>(path: string, files: File[], signal?: AbortSignal): Promise<T> {
   const form = new FormData();
   for (const file of files) {
     // 目录选择器会提供相对路径；它能让同名资料在归档后仍可辨识来源。
     form.append("files", file, file.webkitRelativePath || file.name);
   }
-  const response = await fetch(path, { method: "POST", headers: { ...authHeaders() }, body: form });
+  const response = await fetch(path, { method: "POST", headers: { ...authHeaders() }, body: form, signal });
   const text = await response.text();
   // UI-25：同 request——非 JSON 响应转可读的 ApiError。
   let body: unknown = {};
@@ -456,8 +458,9 @@ export const api = {
     rpc<{ courses: CourseSummary[]; missing: boolean }>("workspaces.courses", { path }),
 
   /** FL-19：buildJobId 可为 null（未配置模型不启动构建）；FL-12：消费
-   * rejected（超限/落盘失败清单）与 buildError（构建失败原因）。 */
-  uploadSources: (courseId: string, files: File[]) =>
+   * rejected（超限/落盘失败清单）与 buildError（构建失败原因）。
+   *  W-12：signal 供调用方取消（弹窗关闭/切项目时中止在途上传）。 */
+  uploadSources: (courseId: string, files: File[], signal?: AbortSignal) =>
     uploadFiles<{
       added: string[];
       buildJobId: string | null;
@@ -466,6 +469,7 @@ export const api = {
     }>(
       `/api/courses/${courseId}/sources`,
       files,
+      signal,
     ),
 
   /** 网页链接 Ingest（api_spec §6.7）：URL -> 正文入 sources -> 增量构建。 */

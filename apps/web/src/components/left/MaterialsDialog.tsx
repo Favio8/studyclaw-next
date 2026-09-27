@@ -97,6 +97,10 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
   // FE-4：轮询生命周期绑定——关闭/卸载后不再 setState 空转最长 30 分钟。
   const buildPollSignalRef = useRef({ aborted: false });
   useEffect(() => () => { buildPollSignalRef.current.aborted = true; }, []);
+  // W-12：上传取消句柄——弹窗关闭/卸载时 abort 在途 multipart fetch。旧实现
+  // 无 signal/超时：大文件上传网络挂起时 busy 永久 true，只能刷新页面。
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { uploadAbortRef.current?.abort(); uploadAbortRef.current = null; }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pickedFiles, setPickedFiles] = useState<File[]>([]);
   const [urlInput, setUrlInput] = useState("");
@@ -162,11 +166,14 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
     }
     setBusy(true);
     setUploading(true); // 爪爪 uploading 姿态
+    // W-12：本次上传的取消句柄（弹窗关闭/卸载时 abort）。
+    const uploadAbort = new AbortController();
+    uploadAbortRef.current = uploadAbort;
     try {
       // FL-12：旧实现只解构 {added, buildJobId}——超限被拒的文件（rejected）
       // 与构建失败原因（buildError）静默消失，用户看到"已归档 N 份"却不知道
       // 有文件没进来。
-      const { added, buildJobId, buildError, rejected } = await api.uploadSources(activeCourseId, pickedFiles);
+      const { added, buildJobId, buildError, rejected } = await api.uploadSources(activeCourseId, pickedFiles, uploadAbort.signal);
       // 重名序号反馈：后端归档 `foo.pdf` + 再次同名会落盘为 `foo_2.pdf` 等
       // （绝不覆盖既有资料），这里把落盘名原样反馈给用户。
       const dupNames = added.filter((name) => /_\d+\.[^./\\]+$/.test(name));
@@ -196,11 +203,14 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);
     } catch (cause) {
+      // W-12：用户关闭弹窗导致的取消不是失败——静默（不闪错误横幅）。
+      if (uploadAbort.signal.aborted) return;
       // list 顺序与 added 一一对应，我们据此判断“重名”仅用于提示；
       // 后端已保证绝不覆盖。inplace 拒绝也走统一错误协议。
       setError(errorMessage(cause));
       flashStatusBanner(`✗ ${errorMessage(cause)}`);
     } finally {
+      if (uploadAbortRef.current === uploadAbort) uploadAbortRef.current = null;
       setBusy(false);
       setUploading(false); // 爪爪退出 uploading 姿态
     }

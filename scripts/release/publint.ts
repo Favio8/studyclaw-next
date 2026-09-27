@@ -7,20 +7,18 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { readdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { latestCliTarball } from './latest-tgz.ts'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const outDir = join(repoRoot, 'artifacts')
-const tarballs = readdirSync(outDir)
-  .filter(name => /^studyclaw-cli-\d+\.\d+\.\d+.*\.tgz$/.test(name))
-  .sort((a, b) => b.localeCompare(a))
-if (tarballs.length === 0) {
+const tarball = latestCliTarball(outDir)
+if (tarball === null) {
   console.error('[release:publint] ✗ artifacts/ 下没有 studyclaw-cli-*.tgz：请先运行 pnpm run release:pack')
   process.exit(1)
 }
-const tgz = join(outDir, tarballs[0]!)
+const tgz = tarball.path
 const publintBin = join(repoRoot, 'node_modules', '.bin', 'publint')
 const result = spawnSync(publintBin, [tgz, '--profile=node'], { stdio: 'inherit', shell: process.platform === 'win32' })
 process.exit(result.status ?? 1)

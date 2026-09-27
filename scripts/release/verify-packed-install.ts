@@ -11,10 +11,11 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { latestCliTarball } from './latest-tgz.ts'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const outDir = join(repoRoot, 'artifacts')
@@ -24,15 +25,13 @@ function fail(message: string): never {
   process.exit(1)
 }
 
-const tarballs = readdirSync(outDir)
-  .filter(name => /^studyclaw-cli-\d+\.\d+\.\d+.*\.tgz$/.test(name))
-  .sort((a, b) => b.localeCompare(a))
-if (tarballs.length === 0) {
+const tarball = latestCliTarball(outDir)
+if (tarball === null) {
   fail('artifacts/ 下没有 studyclaw-cli-*.tgz：请先运行 pnpm run release:pack')
 }
-const latest = tarballs[0]!
+const latest = tarball.name
 console.log(`[release:verify] 验证 ${latest}`)
-const tarballPath = join(outDir, latest)
+const tarballPath = tarball.path
 
 // 1. tarball 结构断言交给安装树（跨平台无 tar 依赖）：装完后 bin 入口必须
 //    存在、lib/types 中间产物不得泄漏（files glob 配置错误在此现形）。

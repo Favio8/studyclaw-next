@@ -8,6 +8,47 @@
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
 
+第五轮对抗性审查修复·第二批（P0+P1 之外的 Medium/Low 与加固项，
+提交 `60fe311`/`f5a532a`/`8fa6cf7`）：
+
+### 修复
+
+- 审批期间 abort 的裸 Error 穿出工具执行层（executeWithRetry 不捕获）→
+  结构化 TOOL_CANCELLED；
+- write_file 目标为 Windows 保留设备名（CON/NUL/PRN/COM1…）时假成功 →
+  显式拒绝；
+- evaluate_answer/create_card/generate_dynamic_card 的长文本参数无上限 →
+  4000 字符封顶（prompt 成本放大防护）；
+- workspacePath 异盘绝对路径 containment 失效（Windows 跨盘逃逸原语）→
+  isAbsolute 显式拒绝；LSP file_path 纳入同一 containment；
+- learning 包硬编码 `.studyclaw/` → 未迁移旧布局工作区的到期调度与热力图
+  静默失效，补 v2/旧布局回退；
+- builder 状态文件写无 fsync → write+fsync+rename；源文件无大小上限 →
+  64MB 守卫 + degraded 上报；
+- 布局迁移半迁移永久化（rename 失败仍写 marker）→ 失败不写 marker 下次重试；
+- gitops `git add -A` 把题池（含答案）与 eval-ledger 提交进用户 git 历史 →
+  状态目录 .gitignore 排除（已被历史跟踪的文件需用户自行 untrack）；
+- 动态卡 task_id 同毫秒跨批碰撞 → 随机后缀；到期选卡按概念去重（公平性，
+  不足时同概念补位）；
+- SSE 解析器对齐规范：多 data 行 \n 连接、坏帧跳过不炸流、decoder flush、
+  孤立 \r、无空格 field 形态；
+- refreshCourseList 切工作区守卫缺失 → 旧工作区 courses 不再覆盖新工作区；
+- 热力图日回放详情无课程归属 → 切项目即清空；
+- 聊天 abort 路径不恢复 syncState（左栏/爪爪永久"同步中"）与陈旧队列残留
+  （误导横幅）→ 补齐；流式收尾提交加会话归属；
+- 资料上传未配模型时静默不构建 → 显式告知；设置弹层打开时 Ctrl+K 叠开
+  Palette → 让位；
+- terminal 管道行数无上界 → 1000 行截断+单次告警；/api/acp 路由抛错时
+  request 条目残留 → finally 清理；静态托管无缓存/安全头 → no-cache HTML /
+  immutable hash 资产 / nosniff；SIGINT 监听器空闲态摘除后不重装 →
+  prompt 前幂等重装。
+
+### 内部
+
+- apiproxy 数值参数补范围（temperature 0~2 / maxConcurrency 1~32）；
+  catch-all 与 ENOENT 错误脱敏（路径不再外泄，细节落日志）；
+  updateSettings 的 api_key_env 对齐 API_KEY_ENV_RE（任意标识符不再被接受）。
+
 发布后第五轮对抗性审查修复（P0+P1 共 20 项，全部配回归测试；
 报告见仓库外文档区《对抗性审查报告_2026-09-27_第五轮》）：
 

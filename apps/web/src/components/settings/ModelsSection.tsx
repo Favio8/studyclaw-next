@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
 import type {
@@ -134,6 +135,8 @@ function ProviderEditorCard({
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ProviderModelPayload[] | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // P2：API Key 明文切换——type=password 且无 eye 按钮，粘贴后无法核对。
+  const [keyVisible, setKeyVisible] = useState(false);
 
   // 每次渲染后把最新表单快照存入 ref（渲染期不写 ref，effect 期允许）。
   const draftRef = useRef<AddCardDraft | null>(null);
@@ -237,8 +240,18 @@ function ProviderEditorCard({
 
   function adoptCandidates() {
     if (!candidates) return;
-    const selected = candidates.filter((m) => checked.has(m.id));
-    setRows((current) => [...current, ...draftsFrom(selected)]);
+    // P1-5：按模型 id 去重——候选默认过滤了已在列表中的模型，但用户可手动勾选
+    // 重复项；旧实现直接 append，保存后 models 数组含重复 id（后端不校验唯一性），
+    // 行卡片出现两行同一模型。
+    const existing = new Set(rows.map((row) => row.id.trim()));
+    const selected = candidates.filter((m) => checked.has(m.id) && !existing.has(m.id));
+    const skipped = candidates.filter((m) => checked.has(m.id) && existing.has(m.id)).length;
+    if (skipped > 0) {
+      useAppStore.getState().flashStatusBanner(`已跳过 ${skipped} 个列表中已存在的模型`);
+    }
+    if (selected.length > 0) {
+      setRows((current) => [...current, ...draftsFrom(selected)]);
+    }
     setCandidates(null);
   }
 
@@ -283,16 +296,28 @@ function ProviderEditorCard({
       {/* 主字段：API Key。其余字段全部收进折叠区。 */}
       <label className="flex flex-col gap-1.5 text-xs text-text-secondary">
         API Key
-        <input
-          type="password"
-          autoComplete="new-password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          className={inputClass}
-          placeholder={provider?.apiKeyConfigured ? "保留当前密钥，留空不修改" : "输入 API Key"}
-          name={`${uid}_secret_value`}
-          {...autofillGuardProps}
-        />
+        <div className="relative">
+          <input
+            type={keyVisible ? "text" : "password"}
+            autoComplete="new-password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className={`${inputClass} pr-10`}
+            placeholder={provider?.apiKeyConfigured ? "保留当前密钥，留空不修改" : "输入 API Key"}
+            name={`${uid}_secret_value`}
+            {...autofillGuardProps}
+          />
+          {/* P2：显示/隐藏明文切换。 */}
+          <button
+            type="button"
+            aria-label={keyVisible ? "隐藏 API Key" : "显示 API Key"}
+            title={keyVisible ? "隐藏 API Key" : "显示 API Key"}
+            onClick={() => setKeyVisible((v) => !v)}
+            className="absolute top-1/2 right-2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-text-faint transition-colors hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+          >
+            {keyVisible ? <EyeOff size={14} strokeWidth={1.8} aria-hidden /> : <Eye size={14} strokeWidth={1.8} aria-hidden />}
+          </button>
+        </div>
         {provider?.apiKeyConfigured ? (
           <span className="text-xs text-accent-pass">● 已配置</span>
         ) : (
@@ -637,6 +662,9 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   const [catalogRetry, setCatalogRetry] = useState(0);
   // X4：添加卡按目录条目缓存整卡草稿（切换条目不丢输入）。
   const addDraftsRef = useRef(new Map<string, AddCardDraft>());
+  // P2：空目录的添加卡被用户手动收起后，不因 SettingsDialog 的 loaded 刷新
+  // （如去通用页签保存）而反复重开。
+  const [dismissedEmptyAdd, setDismissedEmptyAdd] = useState(false);
 
   // SettingsDialog loads its payload asynchronously. Keep the section in
   // sync when it becomes available after the models tab has mounted, while
@@ -647,9 +675,9 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
       // An empty provider directory needs an editor to get started. A
       // provider that exists but lacks a key uses the dsh setup-row posture
       // and must not open a second add card beside it.
-      if (initial.providers.length === 0) setAdding(true);
+      if (initial.providers.length === 0 && !dismissedEmptyAdd) setAdding(true);
     }
-  }, [initial]);
+  }, [initial, dismissedEmptyAdd]);
 
   useEffect(() => {
     let alive = true;
@@ -702,17 +730,30 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
 
   async function handleSave(profile: EditorProfile, apiKey: string) {
     const wasActive = payload?.activeProviderId ?? "";
-    let saved = await api.saveProvider(profile);
+    const saved = await api.saveProvider(profile);
+    const label = profile.name || profile.id;
+    let finalPayload = saved;
     if (apiKey) {
-      saved = await api.setProviderCredential(profile.id, apiKey);
+      try {
+        finalPayload = await api.setProviderCredential(profile.id, apiKey);
+      } catch (cause) {
+        // P1-4：配置已落盘但 Key 保存失败——旧实现不刷新 payload（行不显示、
+        // 状态不一致）且把异常抛回卡片，用户重试必撞 409 覆盖确认、文案还对不上。
+        // 现在：payload 照刷新（行立即可见）、卡片正常收起、横幅指明补救路径
+        // （编辑该行补填 Key，编辑态带 overwrite 不会再撞 409）。
+        setPayload(saved);
+        setDismissedSetup((current) => new Set([...current, profile.id]));
+        closeAllCards();
+        flashStatusBanner(`⚠ ${label} 的配置已保存，但 API Key 保存失败：${errorMessage(cause)}。请点击该行「编辑」补填 Key 后再保存。`);
+        return;
+      }
     }
-    setPayload(saved);
+    setPayload(finalPayload);
     // 保存后不再对该行重开 setup 姿态（即使仍未贴 Key）。
     setDismissedSetup((current) => new Set([...current, profile.id]));
     closeAllCards();
-    const label = profile.name || profile.id;
     flashStatusBanner(
-      saved.activeProviderId === profile.id && wasActive !== profile.id
+      finalPayload.activeProviderId === profile.id && wasActive !== profile.id
         ? `已保存并激活 ${label}（新对话与课程构建将使用它）`
         : `模型配置已保存（${label}）`,
     );
@@ -904,7 +945,11 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
               entry={selectedEntry}
               creating
               onSave={handleSaveWithConflict}
-              onCancel={() => setAdding(false)}
+              onCancel={() => {
+                setAdding(false);
+                // P2：空目录下手动收起添加卡后记住选择，不随 loaded 刷新重开。
+                if (providers.length === 0) setDismissedEmptyAdd(true);
+              }}
               draftCache={addDraftsRef.current}
             />
           ) : (
@@ -927,7 +972,8 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
             onClick={() => { setEditingId(null); setDeclaring(false); setAdding(true); }}
             className="flex-1 rounded-xl border border-border-line px-3 py-2 text-sm text-text-muted hover:bg-bg-card disabled:opacity-40"
           >
-            ＋ 添加供应商
+            {/* P2：目录加载期间说明按钮禁用原因（旧实现无提示地灰住）。 */}
+            {catalog === null ? "加载目录中…" : "＋ 添加供应商"}
           </button>
           <button
             type="button"

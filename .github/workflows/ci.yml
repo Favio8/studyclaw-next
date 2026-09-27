@@ -80,3 +80,34 @@ jobs:
       - run: pnpm run release:pack
       - run: pnpm run release:verify
       - run: pnpm run release:publint
+
+  # 整机冒烟：真实 `electron .` 拉起 sidecar → 开窗加载 → 走应用自身退出路径
+  # （before-quit → stopHost）→ sidecar 无残留。desktop.yml 只打包不跑应用，
+  # 这条链路此前只有"本机手工跑过一次"的证据；进 CI 后优雅退出路径的退化
+  # （如 before-quit 不再收 sidecar、窗口起不来、tap 注入丢失）会在 push 当天现形。
+  # SMOKE_STRICT=1：优雅退出未生效本身即判失败（默认会因"强杀留孤儿是已知限制"
+  # 而跳过 residue 断言，CI 上不允许走那条兜底路径）。
+  desktop-smoke:
+    name: Desktop smoke (windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 组装 Host sidecar（CLI bundle + Web 静态导出 + 运行时闭包）——源码形态
+      # 跑 `electron .` 需要 resources/host/bin.js 与 resources/web。
+      - name: Assemble host sidecar
+        run: node scripts/assemble-host.mjs --build
+        working-directory: apps/desktop
+      - name: Smoke the app end to end
+        run: node scripts/smoke-desktop.mjs
+        working-directory: apps/desktop
+        env:
+          SMOKE_STRICT: '1'

@@ -42,8 +42,12 @@ const { flashStatusBanner, apiMocks, catalog, ApiError } = vi.hoisted(() => {
 });
 
 vi.mock("../src/store/useAppStore", () => ({
-  useAppStore: (selector: (state: { flashStatusBanner: typeof flashStatusBanner }) => unknown) =>
-    selector({ flashStatusBanner }),
+  useAppStore: Object.assign(
+    (selector: (state: { flashStatusBanner: typeof flashStatusBanner }) => unknown) =>
+      selector({ flashStatusBanner }),
+    // P1-5：adoptCandidates 的跳过提示走 getState().flashStatusBanner。
+    { getState: () => ({ flashStatusBanner }) },
+  ),
 }));
 
 apiMocks.providerCatalog.mockImplementation(async () => ({ catalog }));
@@ -365,5 +369,61 @@ describe("ModelsSection 防自动填充", () => {
     expect(keyInput).toHaveAttribute("autocomplete", "new-password");
     expect(keyInput).toHaveAttribute("data-form-type", "other");
     expect(keyInput).toHaveAttribute("data-1p-ignore", "true");
+  });
+});
+
+describe("ModelsSection Key 保存失败一致性（P1-4）", () => {
+  it("配置已保存但 Key 保存失败：行仍可见、横幅指明补救路径、绝不重试 saveProvider", async () => {
+    apiMocks.saveProvider.mockResolvedValue(makePayload([configuredProvider]));
+    apiMocks.setProviderCredential.mockRejectedValue(new ApiError("INTERNAL_ERROR", "磁盘写入失败", 500));
+    render(<ModelsSection initial={makePayload([configuredProvider])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByPlaceholderText("保留当前密钥，留空不修改"), { target: { value: "sk-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(apiMocks.saveProvider).toHaveBeenCalledTimes(1);
+      expect(apiMocks.setProviderCredential).toHaveBeenCalledWith("acme", "sk-new");
+    });
+    // 横幅：配置已保存 + Key 失败 + 补救路径（编辑该行补填）。
+    const banner = flashStatusBanner.mock.calls.at(-1)?.[0] as string;
+    expect(banner).toContain("配置已保存");
+    expect(banner).toContain("API Key 保存失败");
+    expect(banner).toContain("编辑");
+    // 绝不二次 saveProvider（旧实现用户重试时撞 409 覆盖确认）。
+    expect(apiMocks.saveProvider).toHaveBeenCalledTimes(1);
+    // payload 已刷新：行仍在列表中（状态一致）。
+    expect(screen.getByText("Acme")).toBeInTheDocument();
+  });
+});
+
+describe("ModelsSection 模型候选去重（P1-5）", () => {
+  it("采纳时跳过列表中已存在的模型并提示，行不重复", async () => {
+    apiMocks.discoverModels.mockResolvedValue({
+      models: [
+        { id: "m1", name: "M1", contextWindow: 128000, maxTokens: 8192 },
+        { id: "m2", name: "M2", contextWindow: null, maxTokens: null },
+      ],
+    });
+    render(<ModelsSection initial={makePayload([configuredProvider])} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    await openAdvancedFold();
+    fireEvent.click(screen.getByRole("button", { name: /从端点获取/ }));
+
+    await screen.findByRole("dialog", { name: "选择要添加的模型" });
+    // 手动勾选已在列表中的 m1（复现用户操作；默认不勾选）。
+    fireEvent.click(screen.getByLabelText(/m1/));
+    fireEvent.click(screen.getByRole("button", { name: /采纳所选（2）/ }));
+
+    // 跳过提示 + 行数不增加（m1 不重复、m2 追加）。
+    await waitFor(() => {
+      const banner = flashStatusBanner.mock.calls.at(-1)?.[0] as string;
+      expect(banner).toContain("已跳过 1 个列表中已存在的模型");
+    });
+    const modelIdInputs = screen.getAllByLabelText(/模型 ID /);
+    expect(modelIdInputs).toHaveLength(2);
+    expect(modelIdInputs[0]).toHaveValue("m1");
+    expect(modelIdInputs[1]).toHaveValue("m2");
   });
 });

@@ -139,6 +139,12 @@ function wireStdin(): void {
   })
   process.on('SIGINT', onSigint)
   process.stdin.resume()
+  // C-6：resume 后 stdin 句柄常驻事件循环——交互命令（quiz/review/chat）跑完
+  // 后进程永不退出（代理实测挂起；测试全部注入自定义 prompt，wireStdin 零覆盖
+  // 故长期潜伏）。unref 让 stdin 不再兜底事件循环；等待输入期间由 defaultPrompt
+  // 显式 ref 保证进程不提前退出。文件重定向型 stdin（fs.ReadStream）无
+  // ref/unref，可选链兜底。
+  ;(process.stdin as { unref?: () => void }).unref?.()
 }
 
 function deliverLine(line: string): void {
@@ -158,7 +164,19 @@ async function defaultPrompt(question: string): Promise<string> {
   const queued = stdinQueued.shift()
   if (queued !== undefined) return queued
   if (stdinEnded) throw new EndOfInput()
-  return new Promise((resolve, reject) => {
-    pendingPrompt = { resolve, reject }
+  // C-6：等待用户输入期间重新 ref——unref 的 stdin 不会阻止进程退出，没有
+  // 这一步会在两次提问之间（无其他在途 IO 时）提前退出。结算后（resolve 与
+  // reject 两条路径）再 unref，命令结束后进程可自然排空。
+  const stdin = process.stdin as { ref?: () => void; unref?: () => void }
+  stdin.ref?.()
+  return await new Promise<string>((resolve, reject) => {
+    const settle = (done: () => void): void => {
+      stdin.unref?.()
+      done()
+    }
+    pendingPrompt = {
+      resolve: line => settle(() => resolve(line)),
+      reject: error => settle(() => reject(error)),
+    }
   })
 }

@@ -580,6 +580,9 @@ export class LearningAgentService {
     const historyDir = join(stateDirOf(workspaceRoot), 'history')
     const projectId = basename(workspaceRoot)
     const files = await readdir(historyDir, { withFileTypes: true }).catch(() => [])
+    // PERF：每个会话只读一次——旧实现 load 之后 project 内部再全量重读一遍
+    // （O(2×总事件数)）；project 接受预载行后启动扫描减半。宽松预过滤不可行：
+    // 每个有对话的会话都带 inbox/queued 行，必须走精确判定。
     for (const file of files) {
       const match = /^session_(.+)\.events\.jsonl$/.exec(file.name)
       if (!file.isFile() || match === null) continue
@@ -599,7 +602,7 @@ export class LearningAgentService {
             dequeued.delete(turnId)
           }
         }
-        const projection = await events.project(sessionId).catch(() => null)
+        const projection = await events.project(sessionId, rows).catch(() => null)
         const needsRecovery = projection?.phase !== 'disposed' && (pendingTurns.size > 0 || dequeued.size > 0
           || (projection !== null && projection !== undefined && (projection.pendingAsk !== null || projection.pendingApprovals.length > 0))
           || (projection !== null && projection !== undefined && projection.maintenanceJobs.some(job => job.status === 'queued' || job.status === 'running'))

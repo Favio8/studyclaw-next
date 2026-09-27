@@ -399,8 +399,8 @@ export class SessionEventStore {
     await this.append(targetSessionId, ...copied, { ts: utcTs(), type: 'session/fork', payload: { parentSessionId: sourceSessionId, forkSeq: rows.at(-1)?.seq ?? 0 } })
   }
 
-  async project(sessionId: string): Promise<SessionProjection> {
-    const rows = await this.load(sessionId)
+  async project(sessionId: string, preloaded?: readonly SessionEventEnvelope[]): Promise<SessionProjection> {
+    const rows = preloaded ?? await this.load(sessionId)
     const messages: SessionProjection['messages'] = []
     const tools: SessionProjection['tools'] = []
     const pendingApprovals: SessionProjection['pendingApprovals'] = []

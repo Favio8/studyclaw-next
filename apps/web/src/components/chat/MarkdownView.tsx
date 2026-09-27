@@ -13,6 +13,7 @@
  *   viz 段交给 InteractiveViz（围栏是行级构造，切分点永远落在块边界）。
  */
 
+import { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import InteractiveViz from "./InteractiveViz";
@@ -139,6 +140,19 @@ const MARKDOWN_COMPONENTS = {
   ),
 };
 
+/** PERF：分段按内容 memo——流式每帧只有增长的尾段重解析，稳定前缀不再
+ *  逐帧重跑 remark（react-markdown 无内部 memo，长回复下这是主要帧耗时）。 */
+const MemoMarkdown = memo(function MdSegment({ code }: { code: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {code}
+    </ReactMarkdown>
+  );
+});
+
 export default function MarkdownView({
   content,
   bubble,
@@ -155,7 +169,7 @@ export default function MarkdownView({
       </p>
     );
   }
-  const segments = splitVizSegments(content);
+  const segments = useMemo(() => splitVizSegments(content), [content]);
   return (
     <div
       data-markdown-view=""
@@ -163,13 +177,10 @@ export default function MarkdownView({
     >
       {segments.map((seg) =>
         seg.type === "md" ? (
-          <ReactMarkdown
+          <MemoMarkdown
             key={seg.key}
-            remarkPlugins={REMARK_PLUGINS}
-            components={MARKDOWN_COMPONENTS}
-          >
-            {seg.code}
-          </ReactMarkdown>
+            code={seg.code}
+          />
         ) : (
           <InteractiveViz
             key={seg.key}

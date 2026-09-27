@@ -33,7 +33,47 @@ async function progressBoardPath(courseDir: string): Promise<string> {
 
 /** progress.md meta line regexes (Python progress.py parity). */
 const MASTERY_RE = /-\s*\*\*总体掌握度\*\*[:：]\s*([\d.]+)%/
+const DUE_RE = /-\s*\*\*待复习卡片数\*\*[:：]\s*(\d+)/
 const UPDATED_RE = /-\s*\*\*最后更新时间\*\*[:：]\s*([\d\- :]+)/
+
+/** 与 builder `renderMastery` 同一单元格口径（emoji 阈值 🟢/🟡/🔴）。 */
+function renderMasteryCell(mastery: number): string {
+  const emoji = mastery >= 0.7 ? '🟢' : mastery >= 0.4 ? '🟡' : '🔴'
+  return `${emoji} ${Math.round(mastery * 100)}%`
+}
+
+/** 写侧转义（对齐 course-builder progress.ts 的 escapeCell）：`\`、`|` 与换行。 */
+function escapeCell(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\s*[\r\n]+\s*/g, ' ')
+}
+
+/** F-11 转义感知拆分（对齐 tools/handlers 的 splitProgressCells）：按未转义
+ *  的 `|` 切分并还原转义序列——裸 split('|') 会把名字含 `\|` 的行整行错位。 */
+function splitProgressCells(row: string): string[] {
+  const cells: string[] = []
+  let current = ''
+  let escaped = false
+  for (const ch of row) {
+    if (escaped) {
+      current += ch
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+    if (ch === '|') {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (escaped) current += '\\'
+  cells.push(current.trim())
+  return cells
+}
 
 export function utcTs(date = new Date()): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -105,7 +145,7 @@ export class SyncApplier {
       const rows = updates.map(update => {
         const name = facts.get(update.id)?.name ?? update.id
         const chapter = facts.get(update.id)?.chapter ?? ''
-        return `| ${update.id} | ${name} | ${chapter} | ${Math.round(update.score * 100)}% | 0 | 0% | 2.5 | | none |`
+        return `| ${update.id} | ${escapeCell(name)} | ${escapeCell(chapter)} | ${renderMasteryCell(update.score)} | 0 | 0% | 2.5 | | none |`
       })
       const newBoard = [`# 学习进度`, '', `- **总体掌握度**：${Math.round(mean(updates.map(u => u.score)) * 100)}%`, `- **待复习卡片数**：0`, `- **最后更新时间**：${utcTs().replace('T', ' ').slice(0, 16)}`, '', ...header, ...rows, '']
       await atomicWrite(path, newBoard.join('\n'))
@@ -122,17 +162,18 @@ export class SyncApplier {
     const normId = (raw: string): string => raw.trim().replace(/^`|`$/g, '')
     /** 拆出净内容列（去掉表行首尾管道造成的空单元），保证回写后仍是标准 9 列。 */
     const rowCells = (line: string): string[] | null => {
-      let cells = line.split('|').map(cell => cell.trim())
+      let cells = splitProgressCells(line)
       if ((cells[0] ?? '') === '') cells = cells.slice(1)
       if (cells.length > 0 && (cells[cells.length - 1] ?? '') === '') cells = cells.slice(0, -1)
       return cells.length >= 3 ? cells : null
     }
     const headerCells = headerIdx >= 0 ? rowCells(lines[headerIdx]!) : null
     const masteryIdx = headerCells !== null ? Math.max(0, headerCells.indexOf('mastery')) : 3
+    const reviewIdx = headerCells !== null ? headerCells.indexOf('next_review_at') : 7
     if (headerIdx >= 0) {
       for (let i = headerIdx + 2; i < lines.length; i += 1) {
         const line = lines[i]!
-        if (!line.trim().startsWith('|')) break
+        if (!line.trim().startsWith('|')) continue
         const separatorProbe = line.trim().slice(1, -1).replace(/[|\-\s:]/g, '')
         if (separatorProbe === '') continue
         const cells = rowCells(line)
@@ -142,8 +183,8 @@ export class SyncApplier {
         if (update === undefined) continue
         seen.add(id)
         const before = parseMastery(cells[masteryIdx] ?? '0')
-        cells[masteryIdx] = `${Math.round(update.score * 100)}%`
-        lines[i] = `| ${cells.join(' | ')} |`
+        cells[masteryIdx] = renderMasteryCell(update.score)
+        lines[i] = `| ${cells.map(escapeCell).join(' | ')} |`
         parts.push(`${id} 掌握度 ${Math.round(before * 100)}%→${Math.round(update.score * 100)}%`)
       }
     }
@@ -151,14 +192,36 @@ export class SyncApplier {
       if (seen.has(update.id)) continue
       const name = facts.get(update.id)?.name ?? update.id
       const chapter = facts.get(update.id)?.chapter ?? ''
-      const row = `| ${update.id} | ${name} | ${chapter} | ${Math.round(update.score * 100)}% | 0 | 0% | 2.5 | | none |`
+      const row = `| ${update.id} | ${escapeCell(name)} | ${escapeCell(chapter)} | ${renderMasteryCell(update.score)} | 0 | 0% | 2.5 | | none |`
       const insertAt = headerIdx >= 0 ? headerIdx + 2 : 0
       lines.splice(Math.min(insertAt, lines.length), 0, row)
       parts.push(`${update.id} 掌握度 0%→${Math.round(update.score * 100)}%`)
     }
     if (parts.length === 0) return ''
+    // H5：行更新后必须重算表头汇总——旧实现把 MASTERY_RE 替换回捕获的原值
+    // （no-op），总体掌握度/待复习卡片数/更新时间停留在上一次全量保存的状态，
+    // 进度面板读到陈旧汇总。这里基于更新后的全表重新计算三个 meta 值。
+    const nowDate = new Date()
+    const today = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`
+    let masterySum = 0
+    let masteryCount = 0
+    let due = 0
+    for (let i = headerIdx >= 0 ? headerIdx + 2 : 0; i < lines.length; i += 1) {
+      const line = lines[i]!
+      if (!line.trim().startsWith('|')) continue
+      const separatorProbe = line.trim().slice(1, -1).replace(/[|\-\s:]/g, '')
+      if (separatorProbe === '') continue
+      const cells = rowCells(line)
+      if (cells === null) continue
+      masterySum += parseMastery(cells[masteryIdx] ?? '0')
+      masteryCount += 1
+      const reviewRaw = (cells[reviewIdx] ?? '').trim()
+      if (reviewRaw !== '' && reviewRaw !== '-' && reviewRaw.slice(0, 10) <= today) due += 1
+    }
+    const overall = masteryCount > 0 ? masterySum / masteryCount : 0
     const updatedText = lines.join('\n')
-      .replace(MASTERY_RE, (_m, value: string) => `- **总体掌握度**：${value}%`)
+      .replace(MASTERY_RE, () => `- **总体掌握度**：${Math.round(overall * 100)}%`)
+      .replace(DUE_RE, () => `- **待复习卡片数**：${due}`)
       .replace(UPDATED_RE, () => `- **最后更新时间**：${utcTs().replace('T', ' ').slice(0, 16)}`)
     await atomicWrite(path, updatedText)
     return parts.join('；')
@@ -166,7 +229,10 @@ export class SyncApplier {
 }
 
 function parseMastery(raw: string): number {
-  if (raw.endsWith('%')) return Math.min(1, Number(raw.slice(0, -1)) / 100)
+  // 单元格可能是 renderMastery 产物（`🟢 80%`）：裸 Number('🟢 80') 是 NaN，
+  // 会把旧掌握度当成 0 参与"before→after"文案与汇总均值。
+  const match = /[🟢🟡🔴]?\s*(\d+(?:\.\d+)?)\s*%/.exec(raw)
+  if (match !== null) return Math.min(1, Number(match[1]) / 100)
   const value = Number(raw)
   return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0
 }

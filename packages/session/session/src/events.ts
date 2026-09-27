@@ -255,6 +255,13 @@ async function replaceEventFile(tmp: string, target: string): Promise<void> {
 /** Durable event store used by Agent runtime and ACP replay. */
 export class SessionEventStore {
   private static readonly appendLocks = new Map<string, Promise<void>>()
+  /**
+   * PERF：append 的 seq 编号此前依赖每次全文件重读+逐行解析（O(n²)，长会话
+   * 每个 token delta 一次）。进程内按路径缓存「上次写入后的 size/mtime/行数」：
+   * stat 命中则跳过重读；任何外部写入（跨进程/手改）都会改变 size 或 mtime，
+   * 缓存自动失效回落到容错重读，不改变 durability 语义。
+   */
+  private static readonly appendState = new Map<string, { size: number; mtimeMs: number; rows: number }>()
   constructor(readonly historyDir: string) {}
 
   pathFor(sessionId: string): string {
@@ -281,11 +288,29 @@ export class SessionEventStore {
     await previousLock
     try {
       await mkdir(this.historyDir, { recursive: true })
-      const raw = await readFile(path, 'utf8').catch(() => null)
-      const { rows: existing, damaged } = raw === null ? { rows: [] as SessionEventEnvelope[], damaged: false } : scanRowsTolerant(raw, sessionId)
-      const next = events.map((event, index) => sessionEventEnvelope.parse({ ...event, seq: existing.length + index + 1 }))
+      // 缓存命中（外部无写入）→ 直接续写；未命中 → 容错重读并重建缓存。
+      let existingCount: number
+      let damaged = false
+      let rawForHeal: string | null = null
+      let healRows: SessionEventEnvelope[] = []
+      const currentStat = await stat(path).catch(() => null)
+      const cached = SessionEventStore.appendState.get(path)
+      if (currentStat !== null && cached !== undefined && currentStat.size === cached.size && currentStat.mtimeMs === cached.mtimeMs) {
+        existingCount = cached.rows
+      } else {
+        const raw = await readFile(path, 'utf8').catch(() => null)
+        const { rows: existing, damaged: isDamaged } = raw === null ? { rows: [] as SessionEventEnvelope[], damaged: false } : scanRowsTolerant(raw, sessionId)
+        rawForHeal = raw
+        healRows = existing
+        damaged = isDamaged
+        existingCount = existing.length
+      }
+      const next = events.map((event, index) => sessionEventEnvelope.parse({ ...event, seq: existingCount + index + 1 }))
       const chunk = serializeRows(next)
-      if (raw !== null && !damaged) {
+      // 分支判定与缓存解耦：缓存命中必然是健康纯追加（能进缓存的只有成功
+      // 写入后的健康状态）；未命中才按重读结果走 新建/追加/自愈。
+      const cacheHit = currentStat !== null && cached !== undefined && currentStat.size === cached.size && currentStat.mtimeMs === cached.mtimeMs
+      if (cacheHit || (rawForHeal !== null && !damaged)) {
         // P0-6：健康路径不再整文件重写（大日志下 O(n)/次且断电丢整本），
         // 改为纯追加 + 每批 fsync——半行损坏在下次读取时被容错截断。
         const handle = await open(path, 'a')
@@ -295,7 +320,7 @@ export class SessionEventStore {
         } finally {
           await handle.close()
         }
-      } else if (raw === null || !damaged) {
+      } else if (rawForHeal === null) {
         // 新文件：一次性原子写入初始事件。
         const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         await writeFile(tmp, chunk, 'utf8')
@@ -303,10 +328,17 @@ export class SessionEventStore {
       } else {
         // 自愈：原件备份 .corrupt-<时间戳>，以合法前缀 + 新事件原子重建。
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-        await writeFile(`${path}.corrupt-${stamp}`, raw, 'utf8').catch(() => undefined)
+        await writeFile(`${path}.corrupt-${stamp}`, rawForHeal, 'utf8').catch(() => undefined)
         const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        await writeFile(tmp, serializeRows(existing) + chunk, 'utf8')
+        await writeFile(tmp, serializeRows(healRows) + chunk, 'utf8')
         await replaceEventFile(tmp, path)
+      }
+      // 回填缓存：以写入后的真实 stat 为准，供下一批 append 快速路径使用。
+      const afterStat = await stat(path).catch(() => null)
+      if (afterStat !== null) {
+        SessionEventStore.appendState.set(path, { size: afterStat.size, mtimeMs: afterStat.mtimeMs, rows: existingCount + events.length })
+      } else {
+        SessionEventStore.appendState.delete(path)
       }
       return next
     } finally {
@@ -341,8 +373,13 @@ export class SessionEventStore {
       if (!Number.isInteger(throughChatIndex) || throughChatIndex < 0) throw new Error('分支位置无效')
       let chatIndex = 0
       let cutoff = -1
-      // 与投影同口径：被 input/voided 剔除的输入不计入对话边界。
-      const voidedSeqs = new Set(source.filter(row => row.type === 'input/voided').map(row => Number(row.payload['seq'] ?? 0)).filter(seq => Number.isInteger(seq) && seq > 0))
+      // 与投影同口径：被 input/voided 剔除的输入、被 assistant/voided 补偿
+      // 的回复都不计入对话边界。只剔除前者时，分支点前存在孤儿回复会让
+      // 对话序号比投影多 1，throughChatIndex 截断位置前移一条。
+      const voidedSeqs = new Set(source
+        .filter(row => row.type === 'input/voided' || row.type === 'assistant/voided')
+        .map(row => Number(row.payload['seq'] ?? 0))
+        .filter(seq => Number.isInteger(seq) && seq > 0))
       for (const row of source) {
         if (row.type !== 'user/input' && row.type !== 'assistant/message') continue
         if (voidedSeqs.has(row.seq)) continue

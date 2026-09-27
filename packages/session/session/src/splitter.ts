@@ -57,10 +57,22 @@ export function extractSync(text: string): [string, SyncBlock | null] {
 function syncJsonText(text: string, start: number): string | null {
   const open = text.indexOf('{', start)
   if (open < 0) return null
+  // 括号配平必须跳过 JSON 字符串字面量：changelog/concept 值里出现 `{`/`}`
+  // （如代码片段 "fix foo() { bar }"）会让深度提前归零或越界，payload 被
+  // 静默丢弃（progress.md 不更新且无报错）。畸形输入本就落在 JSON.parse
+  // 的 catch 里，扫描器只需对合法 JSON 正确即可。
   let depth = 0
+  let inString = false
   for (let i = open; i < text.length; i += 1) {
-    if (text[i] === '{') depth += 1
-    else if (text[i] === '}') {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{') depth += 1
+    else if (ch === '}') {
       depth -= 1
       if (depth === 0) return text.slice(open, i + 1)
     }
@@ -128,7 +140,10 @@ export function* streamSplit(chunks: Iterable<string>): Generator<StreamEvent> {
       if (!thinkOpen) {
         const openIdx = buffer.indexOf('<think>')
         if (openIdx >= 0) {
-          if (openIdx > 0 && openIdx <= flushLen) yield { kind: 'text', delta: buffer.slice(0, openIdx) }
+          // 完整标记命中时，标记前的正文必然安全——尾保区只防"不完整标记"
+          // 跨块泄漏，不防完整标记。此前要求 openIdx <= flushLen，标记落在尾
+          // 保区内时标记前正文既不输出、又在 slice 中被整段丢弃。
+          if (openIdx > 0) yield { kind: 'text', delta: buffer.slice(0, openIdx) }
           buffer = buffer.slice(openIdx + '<think>'.length)
           thinkOpen = true
           continue
@@ -213,7 +228,9 @@ export class ToolStreamSplitter {
       if (!this.thinkOpen) {
         const openIdx = this.buffer.indexOf('<think>')
         if (openIdx >= 0) {
-          if (openIdx > 0 && openIdx <= flushLen) emit('text', this.buffer.slice(0, openIdx))
+          // 与 streamSplit 同源修复：完整标记命中即无条件输出标记前正文，
+          // 不再受尾保区 flushLen 限制（详见 streamSplit 内注释）。
+          if (openIdx > 0) emit('text', this.buffer.slice(0, openIdx))
           this.buffer = this.buffer.slice(openIdx + '<think>'.length)
           this.thinkOpen = true
           continue

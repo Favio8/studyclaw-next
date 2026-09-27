@@ -9,6 +9,7 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { parseProgressTable } from '@studyclaw/tools'
 import { TUTOR_MODES, TUTOR_SYSTEM, TUTOR_USER, renderTemplate } from './prompts.ts'
 import type { LearningMode } from './models.ts'
 import { SessionError } from './store.ts'
@@ -56,27 +57,17 @@ export async function loadCourseState(courseDir: string): Promise<CourseState> {
   }
   const concepts: CourseState['concepts'] = []
   const progressText = await readFile(await resolveStateFile(courseDir, 'progress.md'), 'utf8').catch(() => '')
-  const lines = progressText.split(/\r?\n/)
-  let inTable = false
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('|') && trimmed.includes('concept_id')) { inTable = true; continue }
-    if (!inTable) continue
-    if (!trimmed.startsWith('|')) break
-    const cells = trimmed.split('|').map(cell => cell.trim())
-    // split('|') keeps a leading empty cell: [ '', id, name, chapter, mastery, evals, ... ]
-    if (cells.length < 6) continue
-    const separator = cells.slice(1).join('').replace(/[-\s:]/g, '')
-    if (separator === '') continue
-    const masteryRaw = cells[4] ?? '0'
-    const mastery = masteryRaw.endsWith('%') ? Number(masteryRaw.slice(0, -1)) / 100 : Number(masteryRaw)
+  // 复用 tools 的表格解析器：手写解析曾同时踩三个坑——掌握度单元格带 emoji
+  // 前缀（`🟢 80%`）时 Number() 为 NaN → 全部概念按 0 报给模型；遇非表格行
+  // break 丢弃后续概念；passRate 硬编码 0。解析器已统一处理（F-11 家族）。
+  for (const record of parseProgressTable(progressText)) {
     concepts.push({
-      conceptId: cells[1]!,
-      name: cells[2]!,
-      chapter: cells[3]!,
-      mastery: Number.isFinite(mastery) ? Math.max(0, Math.min(1, mastery)) : 0,
-      evals: Number(cells[5] ?? 0) || 0,
-      passRate: 0,
+      conceptId: record.conceptId,
+      name: record.name,
+      chapter: record.chapter,
+      mastery: record.mastery,
+      evals: record.evals,
+      passRate: record.passRate,
     })
   }
   return { title, version, chapters, concepts }

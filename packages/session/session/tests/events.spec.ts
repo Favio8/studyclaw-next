@@ -45,6 +45,24 @@ describe('SessionEventStore', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('append 行缓存：外部直写后缓存失效，seq 续排不重复（H2）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-cache-'))
+    const store = new SessionEventStore(root)
+    await store.append('s', { ts: '2026-08-22T12:00:00.000Z', type: 'turn/start', payload: {} })
+    await store.append('s', { ts: '2026-08-22T12:00:00.004Z', type: 'turn/end', payload: {} })
+    const path = store.pathFor('s')
+    // 模拟另一进程直接追加一行：size/mtime 变化必须使快速路径缓存失效。
+    await writeFile(path, (await readFile(path, 'utf8'))
+      + `${JSON.stringify({ seq: 3, ts: '2026-08-22T12:00:05.000Z', type: 'user/input', payload: { content: '外部' } })}\n`, 'utf8')
+    const appended = await store.append('s', { ts: '2026-08-22T12:00:06.000Z', type: 'turn/start', payload: {} })
+    expect(appended.map(row => row.seq)).toEqual([4])
+    await expect(store.load('s').then(rows => rows.map(row => row.seq))).resolves.toEqual([1, 2, 3, 4])
+    // 缓存命中路径（无外部写入）继续追加依然健康。
+    await store.append('s', { ts: '2026-08-22T12:00:07.000Z', type: 'turn/end', payload: {} })
+    await expect(store.load('s').then(rows => rows.map(row => row.seq))).resolves.toEqual([1, 2, 3, 4, 5])
+    await rm(root, { recursive: true, force: true })
+  })
+
   it('appends, validates sequence, and projects an agent session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-events-'))
     const store = new SessionEventStore(root)

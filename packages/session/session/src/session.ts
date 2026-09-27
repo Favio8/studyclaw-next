@@ -195,8 +195,12 @@ export class TutorSession {
   /** Resolve the real session id (verify an explicit id, resume latest, or create). */
   async init(): Promise<void> {
     if (this.sessionId !== '') {
+      // 事件日志优先：运行时子 Agent 等场景的会话 id（如 `<id>-child-<ts>`）
+      // 不满足遗留 store 的 `YYYYMMDD-HHMMSS` 校验，pathFor 会直接抛错——
+      // 只要事件流存在即视为有效会话，不回落 legacy 文件检查。
+      if (this.eventStore !== null && await this.eventStore.exists(this.sessionId)) return
       const path = this.store.pathFor(this.sessionId)
-      if ((await stat(path).catch(() => null)) === null && (this.eventStore === null || !(await this.eventStore.exists(this.sessionId)))) {
+      if ((await stat(path).catch(() => null)) === null) {
         throw new SessionError(`会话不存在: ${this.sessionId}`)
       }
       return

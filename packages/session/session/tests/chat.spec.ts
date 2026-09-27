@@ -283,4 +283,31 @@ describe('TutorSession chat loop', () => {
     expect(replayed).toContain('已被系统省略（演示甲）')
     await rm(root, { recursive: true, force: true })
   })
+
+  it('init 优先事件日志：运行时子 Agent 的不透明 id 不被 legacy 正则拒绝（H1）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-chat-child-'))
+    const { courseDir, wsRoot } = await seedCourse(root)
+    const eventStore = new SessionEventStore(join(courseDir, 'history'))
+    // createLearningAgent 的子会话 id 形如 `<parent>-child-<ts>`，不满足
+    // legacy SessionStore 的 `YYYYMMDD-HHMMSS` 校验；只要事件流存在即有效。
+    const childId = `20260907-120000-child-ab12cd34`
+    await eventStore.append(childId, { ts: utcTs(), type: 'session/create', payload: { mode: 'debug' } })
+    const session = new TutorSession(courseDir, wsRoot, {
+      sessionId: childId,
+      persistLegacy: false,
+      eventStore,
+      toolRegistry: defaultToolRegistry(courseDir, wsRoot),
+      toolClientFactory: () => new FakeLlmClient({ rounds: [{ text: '子代理回复。' }] }),
+    })
+    await session.init()
+    expect(session.sessionId).toBe(childId)
+    // 事件流路径下 assistant/message 由宿主 AgentLoop 落盘；这里断言回合
+    // 能正常跑完并流式产出正文（修复前 init 直接抛「非法会话 ID」）。
+    let streamed = ''
+    for await (const event of session.chatEvents('排查这个报错')) {
+      if (event.kind === 'token') streamed += event.delta
+    }
+    expect(streamed).toContain('子代理回复')
+    await rm(root, { recursive: true, force: true })
+  })
 })

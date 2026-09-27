@@ -7,6 +7,7 @@
  *   3. 恶意 Origin → 403（先于 token 判定）；
  *   4. GET /api/* → 405（方法守卫）；
  *   5. 静态托管：/ 注入 token tap、无扩展名路由 SPA 回落、编码穿越不泄漏；
+ *   5b. 编码穿越（裸 socket 版）：直发未经客户端归一化的路径，验证服务端自身；
  *   6. 上传路由边界：无工作区 → 409（先于 busboy 解析）；
  *   7. C-1 回归：优雅关停（SIGINT）后 host.json 与 host.lock 真正删除；
  *   8. 实例锁自愈：同一 home 下强杀残留 lock 后重启可抢回。
@@ -19,6 +20,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +53,10 @@ async function startHost(reuseHome?: string): Promise<HostHandle> {
   mkdirSync(dist, { recursive: true });
   writeFileSync(join(dist, "index.html"), "<html><head><meta charset=\"utf-8\"></head><body>sc-ui</body></html>", "utf8");
   writeFileSync(join(dist, "app.js"), "console.log('sc')\n", "utf8");
+  // 穿越金丝雀：放在 dist 的上一级。静态托管的根包含校验一旦被移除，
+  // `/..%2fcanary-secret.txt` 这类路径就能把它读出来——断言它永不被下发，
+  // 比只断言状态码更能抓住回归。
+  writeFileSync(join(home, "canary-secret.txt"), "CANARY-SECRET-DO-NOT-SERVE", "utf8");
   // 复用同一 home（实例锁自愈用例）时，上一实例强杀残留的 host.json 会让就绪
   // 轮询立刻读到陈旧端口/token——先删掉，只认新实例写的那份。
   rmSync(join(home, "host.json"), { force: true });
@@ -134,6 +140,30 @@ async function waitForExit(child: ChildProcess, timeoutMs = 20_000): Promise<voi
       resolve();
     };
     child.once("exit", done);
+  });
+}
+
+/**
+ * 裸 socket 发一个未经 WHATWG URL 归一化的请求。fetch/undici 的 URL 解析器会把
+ * `%2e%2e` 当 double-dot 段归一化掉（请求根本到不了服务端），只有裸 socket 才能
+ * 验证服务端自己对编码点号的处理。
+ */
+async function rawGet(target: string): Promise<{ status: number; body: string }> {
+  const sock = net.connect(host!.port, "127.0.0.1");
+  return new Promise((resolvePromise, rejectPromise) => {
+    let raw = "";
+    sock.setTimeout(8_000, () => {
+      sock.destroy();
+      rejectPromise(new Error(`raw request timed out: ${target}`));
+    });
+    sock.on("data", chunk => { raw += chunk.toString("utf8"); });
+    sock.on("error", rejectPromise);
+    sock.on("close", () => {
+      const status = Number(/^HTTP\/1\.\d (\d+)/.exec(raw)?.[1] ?? 0);
+      const split = raw.indexOf("\r\n\r\n");
+      resolvePromise({ status, body: split < 0 ? "" : raw.slice(split + 4) });
+    });
+    sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${host!.port}\r\nConnection: close\r\n\r\n`);
   });
 }
 
@@ -236,6 +266,32 @@ describe("serve HTTP 边界（集成）", () => {
       expect([200, 400, 403]).toContain(res.status);
       expect(body).not.toContain("root:");
       if (res.status === 200) expect(body).toContain("sc-ui");
+    }
+  }, 15_000);
+
+  it("编码穿越：裸 socket 直发未归一化路径也不泄漏文件内容", async () => {
+    // 上一个用例里 `%2e%2e` 是被**客户端** URL 解析器归一化的，服务端那条路径
+    // 压根没收到——证明不了服务端自己的行为。这里用裸 socket 把原始字节发给
+    // 服务端：当前由 bin.ts 的 `new URL()` 归一化 + static-host 的根包含校验两
+    // 道防线负责（任一道被移除都会在这里现形：归一化没了 → 解码成 `..` → 穿越）。
+    for (const target of ["/%2e%2e/%2e%2e/%2e%2e/etc/passwd", "/%2e%2e%2f%2e%2e%2fetc/passwd", "/..%2f..%2fetc/passwd"]) {
+      const { status, body } = await rawGet(target);
+      // 归一化后落 dist 内 → SPA 回落 200；带编码斜杠的穿越 → 服务端 403；
+      // 解码失败/空路径 → 400；带扩展名未命中 → 404。任何形态都不得泄内容。
+      expect([200, 400, 403, 404]).toContain(status);
+      expect(body).not.toContain("root:");
+      if (status === 200) expect(body).toContain("sc-ui");
+    }
+  }, 15_000);
+
+  it("目录穿越够不到 dist 上一级的金丝雀文件", async () => {
+    // 金丝雀放在 home/（dist 的上一级）。三种写法：被客户端/服务端归一化成
+    // dist 内路径（404 或 SPA 回落）、保留编码到达服务端（必须 403）。任一种
+    // 都不该把金丝雀内容带出来——根包含校验被移除时这条会红。
+    for (const target of ["/%2e%2e/canary-secret.txt", "/..%2fcanary-secret.txt", "/%2e%2e%2fcanary-secret.txt"]) {
+      const { status, body } = await rawGet(target);
+      expect([200, 400, 403, 404]).toContain(status);
+      expect(body).not.toContain("CANARY-SECRET-DO-NOT-SERVE");
     }
   }, 15_000);
 

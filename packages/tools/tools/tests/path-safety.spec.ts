@@ -102,3 +102,24 @@ describe('read_source 课程资料路径安全（对抗性审查：resolveSource
     expect(view.lines[0]).toEqual({ n: 1, text: '# line1' })
   })
 })
+
+describe('T-1：Windows 8.3 短名别名拒绝', () => {
+  // 本机实测：C: 卷上 `.studyclaw` 有 8.3 别名 `STUDYC~1`，Node realpath 不展开
+  // 短名——字符串 containment 放行 `STUDYC~1/progress.md` 之类引用，点目录/状态
+  // 目录排除被绕过（模型可直读题池答案键）。判定是纯字符串规则，跨平台可测。
+  it('read_file / read_source 拒绝以 ~数字 结尾的路径段', async () => {
+    await expect(handlerReadFile(ctx, { path: 'STUDYC~1/progress.md' })).rejects.toBeInstanceOf(ToolRejected)
+    await expect(handlerReadSource(ctx, { path: 'STUDYC~1/progress.md' })).rejects.toBeInstanceOf(ToolRejected)
+    await expect(handlerReadFile(ctx, { path: 'docs/STUDYC~1/note.md' })).rejects.toBeInstanceOf(ToolRejected)
+  })
+
+  it('write_file 同样拒绝 8.3 形态段', async () => {
+    await expect(handlerWriteFile(ctx, { path: 'STUDYC~1/x.md', content: 'x' })).rejects.toBeInstanceOf(ToolRejected)
+  })
+
+  it('合法文件名不受影响（backup~1.txt 不以 ~数字 结尾，放行）', async () => {
+    await writeFile(join(workspace, 'backup~1.txt'), 'legit', 'utf8')
+    const [, data] = await handlerReadFile(ctx, { path: 'backup~1.txt' })
+    expect((data as { content: string }).content).toBe('legit')
+  })
+})

@@ -83,6 +83,32 @@ describe('progress.md 表格契约（F-11）', () => {
     const board = await loadProgressBoard(path)
     expect(board.concepts[0]).toMatchObject({ conceptId: 'c_old', streak: 0 })
   })
+
+  it('T-9：概念名含 concept_id 子串的行 load→save 往返不丢（旧实现读侧跳过 → eval 擦除该行）', async () => {
+    const path = await makeBoardPath()
+    const lines = [
+      '# 学习进度',
+      '',
+      '- **总体掌握度**：80%',
+      '- **待复习卡片数**：0',
+      '- **最后更新时间**：2026-09-27 10:00',
+      '',
+      `| ${COLUMNS.join(' | ')} |`,
+      `|${COLUMNS.map(() => '---').join('|')}|`,
+      '| `c_meta` | concept_id 字段规范 | 软工 | 🟢 80% | 3 | 100% | 2.50 | 2099-01-01 | none | 2 |',
+      '',
+      '备注：本章讨论 concept_id 的命名约束（含子串的非表格行也不得被当表头）。',
+    ]
+    await writeFile(path, lines.join('\n'), 'utf8')
+    const loaded = await loadProgressBoard(path)
+    expect(loaded.concepts.map(concept => concept.conceptId)).toEqual(['c_meta'])
+    expect(loaded.concepts[0]!.name).toBe('concept_id 字段规范')
+    // 读后立即存（eval 链路正是 load→upsert→save）：该行必须仍在。
+    await saveProgressBoard(path, upsertProgressRecord(loaded, record({ conceptId: 'c_meta', name: 'concept_id 字段规范', chapter: '软工', mastery: 0.8, evals: 4 })))
+    const reloaded = await loadProgressBoard(path)
+    expect(reloaded.concepts).toHaveLength(1)
+    expect(reloaded.concepts[0]).toMatchObject({ conceptId: 'c_meta', evals: 4 })
+  })
 })
 
 describe('SM-2 调度（F-12）', () => {

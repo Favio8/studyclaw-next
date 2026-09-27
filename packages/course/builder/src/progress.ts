@@ -115,6 +115,17 @@ function renderRecordRow(record: ProgressRecord): string {
   return `| ${cells.join(' | ')} |`
 }
 
+/** 表头行精确判定：首单元格（去反斜杠转义与反引号）等于 `concept_id`。
+ *  T-9：旧实现用 includes('concept_id') 子串判定，概念名/章节含该字样的数据行
+ *  （如「concept_id 字段规范」）会被误判为表头跳过——读侧丢行后 eval 的
+ *  load→upsert→save 把该概念当新记录（掌握度归零）且原行被整体擦除。 */
+function isHeaderRow(line: string): boolean {
+  const trimmed = line.trim()
+  const body = trimmed.replace(/^\|/, '').replace(/\|$/, '')
+  const first = splitTableCells(body)[0] ?? ''
+  return first.replace(/^`|`$/g, '').trim() === 'concept_id'
+}
+
 function parseRecordRow(line: string): ProgressRecord | null {
   const body = line.trim().replace(/^\|/, '').replace(/\|$/, '')
   const cells = splitTableCells(body)
@@ -157,7 +168,7 @@ export async function loadProgressBoard(path: string): Promise<ProgressBoard> {
   let inTable = false
   for (const line of lines) {
     const trimmed = line.trim()
-    if (trimmed.startsWith('|') && trimmed.includes('concept_id')) { inTable = true; continue }
+    if (trimmed.startsWith('|') && isHeaderRow(trimmed)) { inTable = true; continue }
     if (!inTable) continue
     // F-11：遇非表格行不再 break——旧实现会把标题含换行的记录之后的
     // 所有概念行静默丢弃。空行/分隔行跳过，后续表格行继续收集。
@@ -176,7 +187,9 @@ export async function saveProgressBoard(path: string, board: ProgressBoard, now 
   const lines = text.split(/\r?\n/)
   let headerIdx = -1
   for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i]!.includes('concept_id')) { headerIdx = i; break }
+    // T-9：精确表头判定（首单元格为 concept_id）——旧 includes 子串会把备注里
+    // 提及 concept_id 的非表格行误判为表头，notes 段落被当作表格区截断。
+    if (lines[i]!.trim().startsWith('|') && isHeaderRow(lines[i]!)) { headerIdx = i; break }
   }
   let notes = ''
   if (headerIdx >= 0) {

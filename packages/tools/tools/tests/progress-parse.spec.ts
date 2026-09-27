@@ -47,3 +47,27 @@ describe('get_course_state 进度表解析', () => {
     expect(view.weakIds).toEqual(['c_ok'])
   })
 })
+
+describe('T-9：概念名含 concept_id 子串不能被当表头跳过', () => {
+  it('读侧保留该行（旧实现整行丢失 → eval 时掌握度/evals 被静默归零）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'studyclaw-progress-t9-'))
+    try {
+      await mkdir(join(dir, '.studyclaw'), { recursive: true })
+      await writeFile(join(dir, '.studyclaw', 'progress.md'), [
+        '# 学习进度',
+        '',
+        '| concept_id | name | chapter | mastery | evals | pass_rate | ef | next_review_at | misattribution | streak |',
+        '|---|---|---|---|---|---|---|---|---|---|',
+        '| `c_meta` | concept_id 字段规范 | 软工 | 🟢 80% | 3 | 100% | 2.50 | 2099-01-01 | none | 2 |',
+        '',
+      ].join('\n'), 'utf8')
+      const local: ToolContext = { courseDir: dir, workspaceRoot: dir }
+      const [, data] = await handlerGetCourseState(local, {})
+      const view = data as { mastery: Record<string, number> }
+      expect(Object.keys(view.mastery)).toEqual(['c_meta'])
+      expect(view.mastery['c_meta']).toBe(0.8)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

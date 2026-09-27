@@ -39,6 +39,18 @@ export const SOURCE_EXCLUDED_FILES = new Set([
 ])
 
 /**
+ * Windows 8.3 短名别名形态（如 `.studyclaw` → `STUDYC~1`）：NTFS 为长名自动
+ * 生成短名，Node 的 realpath **不展开**短名，字符串 containment 会放行——
+ * 模型可用 `STUDYC~1/progress.md` 之类引用绕过点目录/状态目录排除，直读课程
+ * 状态文件（题池含答案键、progress 等）。只拒绝以 `~数字` 结尾的段：合法名
+ * `backup~1.txt`（扩展名在后）不受影响；极少数以 `~数字` 结尾的真备份名
+ * （`notes~2`）被误伤，属可接受的 fail-closed（安全边界不猜意图）。
+ */
+export function isEightDotThreeSegment(segment: string): boolean {
+  return /^[^./\\]+~\d+$/i.test(segment)
+}
+
+/**
  * The course's actual material root: the `.source-root.json` binding for
  * in-place courses, the project root otherwise.
  * @param courseDir - Course (project root) directory.
@@ -51,7 +63,13 @@ export async function courseSourceRoot(courseDir: string): Promise<string> {
     const raw = data?.path
     if (typeof raw === 'string' && raw !== '') {
       const target = resolve(courseDir, raw)
-      return target
+      // T-2：绑定目标此前零校验——被污染的仓库植入指向工作区外绝对路径的
+      // `.source-root.json`，read_source/search_sources 就会以任意目录为资料
+      // 根越界读全部 .md/.txt。限定绑定必须在 courseDir 内，否则忽略该绑定
+      // 回退规范的项目根（不抛错：宿主还有其他调用方依赖宽松语义）。
+      const base = resolve(courseDir)
+      const prefix = base.endsWith(sep) ? base : base + sep
+      if (target === base || target.startsWith(prefix)) return target
     }
   } catch {
     // No binding / unreadable: fall through to the canonical project root.
@@ -99,6 +117,11 @@ export async function resolveSourceRef(courseDir: string, ref: string): Promise<
   const parts = normalized.split('/').filter(part => part !== '')
   if (parts.length === 0 || parts.some(part => part === '.' || part === '..')) {
     throw new ToolRejected(`非法的 path: ${ref}`)
+  }
+  // T-1：8.3 短名别名（STUDYC~1）不展开且字符串 containment 放行——拒绝以
+  // `~数字` 结尾的段，堵住经短名引用 `.studyclaw` 等被排除目录的绕过。
+  if (parts.some(isEightDotThreeSegment)) {
+    throw new ToolRejected('路径段疑似 Windows 8.3 短名别名（如 STUDYC~1），已拒绝')
   }
   const excluded = (await isInplaceCourse(courseDir)) ? INPLACE_SOURCE_EXCLUDED_DIRS : new Set<string>()
   if (parts.some(part => part.startsWith('.') || excluded.has(part))) {

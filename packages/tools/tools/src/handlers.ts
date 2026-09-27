@@ -7,7 +7,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
-import { courseSourceRoot, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
+import { courseSourceRoot, isEightDotThreeSegment, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
 import { ToolRejected } from './result.ts'
 import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
 
@@ -178,6 +178,11 @@ function workspacePath(ctx: ToolContext, value: string): string {
   const target = resolve(root, value)
   const relPath = relative(root, target)
   if (relPath === '' || relPath === '..' || relPath.startsWith('../') || relPath.startsWith('..\\')) throw new ToolRejected('路径必须位于工作区内')
+  // T-1：8.3 短名（如 STUDYC~1 ↔ .studyclaw）realpath 不展开、字符串
+  // containment 放行——通用文件工具同样拒绝，与 resolveSourceRef 同口径。
+  if (relPath.split(/[\\/]/).some(isEightDotThreeSegment)) {
+    throw new ToolRejected('路径段疑似 Windows 8.3 短名别名（如 STUDYC~1），已拒绝')
+  }
   return target
 }
 
@@ -547,6 +552,17 @@ function splitProgressCells(row: string): string[] {
   return cells
 }
 
+/** 表头行精确判定：首单元格（去反引号）等于 `concept_id`。不能用 includes 子串——
+ *  T-9：概念名含 "concept_id" 字样（如「concept_id 字段规范」）的数据行会被误判
+ *  为表头 continue 跳过，读侧丢行；eval 的 load→upsert→save 链路随即将该概念
+ *  当新记录（掌握度/evals/streak 归零）且原行被整体擦除——写读往返不一致。 */
+function isProgressHeaderRow(line: string): boolean {
+  const trimmed = line.trim()
+  const body = trimmed.slice(1, trimmed.endsWith('|') ? -1 : undefined)
+  const first = splitProgressCells(body)[0] ?? ''
+  return first.replace(/^`|`$/g, '').trim() === 'concept_id'
+}
+
 /** progress.md concept rows: `| id | name | chapter | mastery | ... |`.
  *  导出供 session/context 等读侧复用——此前各处手写解析，emoji 掌握度单元格
  *  `Number('🟢 80')` → NaN 的错法只在部分文件修过（F-11 家族）。 */
@@ -556,7 +572,7 @@ export function parseProgressTable(text: string): Array<{ conceptId: string; nam
   let inTable = false
   for (const line of lines) {
     const trimmed = line.trim()
-    if (trimmed.startsWith('|') && trimmed.includes('concept_id')) { inTable = true; continue }
+    if (trimmed.startsWith('|') && isProgressHeaderRow(trimmed)) { inTable = true; continue }
     if (!inTable) continue
     // F-11：遇非表格行不 break——旧版本写入的含换行备注之后可能还有概念行。
     if (!trimmed.startsWith('|')) continue

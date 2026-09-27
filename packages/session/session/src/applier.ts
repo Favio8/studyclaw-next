@@ -154,7 +154,14 @@ export class SyncApplier {
     const lines = text.split(/\r?\n/)
     let headerIdx = -1
     for (let i = 0; i < lines.length; i += 1) {
-      if (lines[i]!.includes('concept_id')) { headerIdx = i; break }
+      // T-9：精确表头判定（与 tools/builder 同口径）——概念名含 "concept_id"
+      // 字样的数据行（如「concept_id 字段规范」）不能被误判为表头，否则新行
+      // 插入位置与 notes 边界全部错位。
+      const line = lines[i]!
+      if (line.trim().startsWith('|')) {
+        const cells = splitProgressCells(line.trim().replace(/^\|/, '').replace(/\|$/, ''))
+        if ((cells[0] ?? '').replace(/^`|`$/g, '').trim() === 'concept_id') { headerIdx = i; break }
+      }
     }
     const seen = new Set<string>()
     const parts: string[] = []

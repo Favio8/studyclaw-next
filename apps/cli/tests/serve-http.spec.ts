@@ -38,6 +38,8 @@ interface HostHandle {
   dist: string;
   port: number;
   token: string;
+  /** 真正跑 serve 的进程 pid（host.json 记录的是 bin.ts 的 pid）。 */
+  pid: number;
 }
 
 const homes: string[] = [];
@@ -67,9 +69,9 @@ async function startHost(reuseHome?: string): Promise<HostHandle> {
       try {
         // host.json 由 writeFile 非原子写入——全量负载下轮询可能读到写了一半的
         // 文件，解析失败时下一轮再试（端口/token 就绪前不返回）。
-        const cfg = JSON.parse(readFileSync(hostJsonPath, "utf8")) as { port?: number; token?: string | null };
-        if (typeof cfg.port === "number" && typeof cfg.token === "string") {
-          return { child, home, dist, port: cfg.port, token: cfg.token };
+        const cfg = JSON.parse(readFileSync(hostJsonPath, "utf8")) as { port?: number; token?: string | null; pid?: number };
+        if (typeof cfg.port === "number" && typeof cfg.token === "string" && typeof cfg.pid === "number") {
+          return { child, home, dist, port: cfg.port, token: cfg.token, pid: cfg.pid };
         }
       } catch {
         // 半写状态：继续轮询。
@@ -94,11 +96,19 @@ function killHard(h: HostHandle): void {
   }
 }
 
-/** 优雅信号：POSIX 整组发（wrapper + 内层 serve 都收到），Windows 直接强杀。 */
+/** 优雅信号：POSIX 直发真正跑 serve 的进程（host.json 的 pid），Windows 直接强杀。
+ *  不依赖 tsx wrapper 的信号中继——wrapper 自己收到 SIGINT 会先退，内层的清理
+ *  时序不该押在 wrapper 的存活上；组信号只作内层已消失时的兜底。 */
 function signalGracefully(h: HostHandle, signal: "SIGINT" | "SIGTERM"): void {
   if (isWin) {
     h.child.kill();
     return;
+  }
+  try {
+    process.kill(h.pid, signal);
+    return;
+  } catch {
+    // 内层已退或不可信号：退回进程组。
   }
   try {
     process.kill(-h.child.pid, signal);
@@ -254,28 +264,33 @@ describe("serve 关停与实例锁", () => {
   it("实例锁自愈：同一 home 下强杀残留 lock 后重启可抢回", async () => {
     // 专用实例：关停用例已把共享实例优雅关停（lock 已删），不能复用它的 home。
     const stale = await startHost();
-    const up = await fetch(`http://127.0.0.1:${stale.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
-    expect(up.status).toBe(200);
-    const stalePidBefore = await readLockPid(stale.home);
-    expect(stalePidBefore).toBeGreaterThan(0);
-
-    const exiting = waitForExit(stale.child);
-    killHard(stale);
-    await exiting;
-    // 强杀跳过清理：lock 残留，且锁里的 pid 已随进程消失。
-    expect(existsSync(join(stale.home, "host.lock"))).toBe(true);
-    const stalePid = await readLockPid(stale.home);
-    expect(stalePid).toBe(stalePidBefore);
-
-    // 同一 home 重启：acquireHostInstanceLock 发现陈旧 pid → 抢走锁并起服务。
-    const second = await startHost(stale.home);
     try {
-      const health = await fetch(`http://127.0.0.1:${second.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
-      expect(health.status).toBe(200);
-      // 锁已易主（不是残留的旧 pid）——这条才是"自愈"的实质断言。
-      expect(await readLockPid(stale.home)).not.toBe(stalePid);
+      const up = await fetch(`http://127.0.0.1:${stale.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
+      expect(up.status).toBe(200);
+      const stalePidBefore = await readLockPid(stale.home);
+      expect(stalePidBefore).toBeGreaterThan(0);
+
+      const exiting = waitForExit(stale.child);
+      killHard(stale);
+      await exiting;
+      // 强杀跳过清理：lock 残留，且锁里的 pid 已随进程消失。
+      expect(existsSync(join(stale.home, "host.lock"))).toBe(true);
+      const stalePid = await readLockPid(stale.home);
+      expect(stalePid).toBe(stalePidBefore);
+
+      // 同一 home 重启：acquireHostInstanceLock 发现陈旧 pid → 抢走锁并起服务。
+      const second = await startHost(stale.home);
+      try {
+        const health = await fetch(`http://127.0.0.1:${second.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
+        expect(health.status).toBe(200);
+        // 锁已易主（不是残留的旧 pid）——这条才是"自愈"的实质断言。
+        expect(await readLockPid(stale.home)).not.toBe(stalePid);
+      } finally {
+        stop(second);
+      }
     } finally {
-      stop(second);
+      // 断言失败也要收掉这个专用实例，别把 serve 进程留给后续测试/CI。
+      stop(stale);
     }
   }, 60_000);
 });

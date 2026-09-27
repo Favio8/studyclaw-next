@@ -269,6 +269,16 @@ if (!gotLock) { app.quit() } else {
     stopHost()
     if (process.platform !== 'darwin') app.quit()
   })
+  // POSIX 上 SIGTERM/SIGINT 的默认行为是直接终止进程，JS 侧的 before-quit
+  // （→ stopHost 收 sidecar）根本不跑：系统关机/会话结束/`kill` 一下就把
+  // Host sidecar 留成孤儿。显式转成 app.quit() 走正常退出路径。
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      if (quitting) return
+      quitting = true
+      app.quit()
+    })
+  }
 }
 
 // contextIsolation 之后的诊断信息最小暴露面（供未来的桌面诊断 UI 使用）。

@@ -69,7 +69,21 @@ if (!existsSync(hostJsonPath)) {
   killTree(child.pid)
   process.exit(1)
 }
-const cfg = JSON.parse(readFileSync(hostJsonPath, 'utf8'))
+// host.json 同理由非原子 writeFile 写出：existsSync 命中时可能只写了一半，
+// 裸 JSON.parse 会抛未捕获异常崩栈（CLI 集成测试对同一场景专门做了重试）。
+let cfg = null
+for (let i = 0; i < 20 && cfg === null; i++) {
+  try {
+    cfg = JSON.parse(readFileSync(hostJsonPath, 'utf8'))
+  } catch {
+    await new Promise(r => setTimeout(r, 250))
+  }
+}
+if (cfg === null) {
+  console.error('[smoke] FAIL: host.json 无法解析\n', out.slice(-1500))
+  killTree(child.pid)
+  process.exit(1)
+}
 console.log('[smoke] host.json =', hostJsonPath)
 console.log('[smoke] port =', cfg.port)
 
@@ -87,12 +101,18 @@ const html = await ui.text()
 console.log('[smoke] GET / via sidecar →', ui.status, 'token-injected:', html.includes('__STUDYCLAW__'))
 
 // 退出：优先走应用自身的退出路径（before-quit → stopHost），验证收尾；
-// 优雅退出宽限内未生效才兜底强杀，并标记 graceful=false（强杀留孤儿是已知
-// 产品限制，此路径不断言 residue）。
+// 优雅退出宽限内未生效才兜底强杀，并标记 graceful=false。
+// residue 只在优雅退出成功时纳入 pass 条件：强杀路径留下孤儿 sidecar 是已知
+// 产品限制，不该让冒烟把"已知限制"判成失败；但优雅路径一旦不生效，R6 就被
+// 跳过——所以这里显式告警，并可用 SMOKE_STRICT=1 把"优雅退出失败"本身判失败。
 const gracefulStop = () => {
   if (process.platform === 'win32') {
     // 无 /F：向 GUI 窗口发 WM_CLOSE 关闭请求 → Electron 走正常退出流程。
-    spawnSync('taskkill', ['/PID', String(child.pid)], { stdio: 'ignore' })
+    // taskkill 对无响应窗口/拒绝访问会失败，退出码必须看（否则静默走兜底）。
+    const killed = spawnSync('taskkill', ['/PID', String(child.pid)], { stdio: 'ignore' })
+    if (killed.status !== 0) {
+      console.log('[smoke] taskkill 关闭请求失败，status =', killed.status, killed.error?.code ?? '')
+    }
   } else {
     child.kill('SIGTERM')
   }
@@ -101,7 +121,7 @@ gracefulStop()
 await new Promise(r => setTimeout(r, 6000))
 let graceful = !pidAlive(child.pid)
 if (!graceful) {
-  console.log('[smoke] 优雅退出宽限未生效，兜底强杀')
+  console.log('[smoke] 优雅退出宽限未生效，兜底强杀（R6 residue 断言被跳过）')
   killTree(child.pid)
 }
 await new Promise(r => setTimeout(r, 2000))
@@ -109,7 +129,8 @@ const residue = pidAlive(cfg.pid) ? 1 : 0
 console.log('[smoke] graceful exit:', graceful, '| sidecar residue:', residue)
 rmSync(userData, { recursive: true, force: true })
 
+const strict = process.env.SMOKE_STRICT === '1'
 const pass = fatalErrors.length === 0 && ui.ok && html.includes('__STUDYCLAW__')
-  && (graceful ? residue === 0 : true)
+  && (graceful ? residue === 0 : !strict)
 console.log(pass ? '[smoke] RESULT: PASS' : '[smoke] RESULT: FAIL')
 process.exit(pass ? 0 : 1)

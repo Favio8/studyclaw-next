@@ -43,10 +43,14 @@ npm config set registry https://registry.npmmirror.com/
 token，仅限 `@studyclaw` scope 的 read/write），然后：
 
 ```bash
-gh run rerun <release.yml 的 npm job id> --failed   # 或重跑整个 release workflow
+gh run list --workflow=release.yml --limit 5      # 先取 run id（不是 job id）
+gh run rerun <run-id> --failed                    # 只重跑失败的 job
 ```
 
-release.yml 会自动：打 beta dist-tag → 上传 GitHub Release → 发布 npm。
+release.yml 的实际顺序：`gate`（typecheck + 测试）通过后，**npm 发布与三平台
+桌面打包并行**，两者都成功后 `github-release` job 才创建 Release 并上传全部
+产物。也就是说 npm 包通常比 GitHub Release 更早可安装——排障时别把"Release
+还没出现"当成"npm 没发"。
 
 ### 发布后验证
 
@@ -87,4 +91,6 @@ gh release upload v0.1.0-beta artifacts/StudyClaw-0.1.0-portable-win-x64.zip --c
   `-c.directories.output=dist5` 绕过（CI fresh runner 无此问题）
 - 本机直连 GitHub 超时时，Electron 下载设
   `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`
-- 发布后 CI 的 release-gate 会复核 pack/verify/publint，失败会自动标记
+- 发布**前**：release.yml 的 npm job 自己会跑一遍 pack → verify（真装一遍并
+  运行）→ publint，任一步失败就不会发布；ci.yml 的 release-gate 在每次
+  push/PR 也跑同一套门禁，问题更早现形

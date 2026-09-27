@@ -47,8 +47,9 @@
   SPA 回落、三种编码穿越不泄漏、上传路由 409 边界、SIGINT 优雅关停后
   host.json/host.lock 真正删除（C-1 回归）、实例锁强杀自愈；
 - smoke-desktop 退出段改走应用自身退出路径（SIGTERM / taskkill 无 /F），
-  sidecar 残留纳入 pass 条件（旧实现用外部强杀却声称验证 R6）；并剔除
-  调用方环境继承的 ELECTRON_RUN_AS_NODE（会让 electron 退化为纯 Node）。
+  sidecar 残留在优雅退出成功时纳入 pass 条件（旧实现用外部强杀却声称验证
+  R6）；并剔除调用方环境继承的 ELECTRON_RUN_AS_NODE（会让 electron 退化为
+  纯 Node）。
 
 ### 安全
 

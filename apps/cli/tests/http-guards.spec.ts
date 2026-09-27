@@ -106,7 +106,7 @@ describe('sanitizeErrorMessage（BUG-005）', () => {
   it('净化 URL 用户信息段，正常中文错误消息原样保留', () => {
     expect(sanitizeErrorMessage('connect ECONNREFUSED https://user:p4ssw0rd@internal.host/api'))
       .toBe('connect ECONNREFUSED https://***:***@internal.host/api')
-    const plain = 'ENOENT: no such file C:\\Users\\Favio\\.studyclaw\\creds.json'
+    const plain = 'ENOENT: no such file C:\\Users\\someone\\.studyclaw\\creds.json'
     expect(sanitizeErrorMessage(plain)).toBe(plain)
   })
 })

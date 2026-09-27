@@ -11,7 +11,7 @@
 
 **请勿以公开 Issue / Discussion 披露安全问题。**
 
-优先使用 GitHub [私密安全公告](https://github.com/Favio8/studyclaw/security/advisories/new)上报；
+优先使用 GitHub [私密安全公告](https://github.com/Favio8/studyclaw-next/security/advisories/new)上报；
 不便使用 GitHub 时可邮件联系 `favio9758@gmail.com`（主题注明 `[security]`）。
 
 请在报告中包含：

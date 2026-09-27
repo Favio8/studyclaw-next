@@ -427,3 +427,34 @@ describe("ModelsSection 模型候选去重（P1-5）", () => {
     expect(modelIdInputs[1]).toHaveValue("m2");
   });
 });
+
+describe("ModelsSection 覆盖路径的 Key 失败一致性（N-1）", () => {
+  it("409 覆盖后存 Key 失败：配置已保存横幅 + 确认框关闭 + 无三次重试", async () => {
+    apiMocks.saveProvider
+      .mockRejectedValueOnce(new ApiError("provider-exists", "Provider acme 已存在", 200))
+      .mockResolvedValueOnce(makePayload([configuredProvider]));
+    apiMocks.setProviderCredential.mockRejectedValue(new ApiError("INTERNAL_ERROR", "磁盘写入失败", 500));
+    render(<ModelsSection initial={makePayload([])} />);
+    await screen.findByText("选择供应商");
+    await screen.findByPlaceholderText("acme-gateway");
+
+    // 创建态撞已存在 id → 409 → 覆盖确认框。
+    fireEvent.change(screen.getByPlaceholderText("acme-gateway"), { target: { value: "acme" } });
+    fireEvent.change(screen.getByPlaceholderText("输入 API Key"), { target: { value: "sk-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    const dialog = await screen.findByRole("dialog", { name: "Provider 已存在" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "覆盖" }));
+
+    // 覆盖保存成功但 Key 失败：统一横幅路径（而非闷在确认框里）。
+    await waitFor(() => {
+      const banner = flashStatusBanner.mock.calls.at(-1)?.[0] as string;
+      expect(banner).toContain("配置已保存");
+      expect(banner).toContain("API Key 保存失败");
+    });
+    // saveProvider 恰 2 次（创建 1 + 覆盖 1），无第三次重试。
+    expect(apiMocks.saveProvider).toHaveBeenCalledTimes(2);
+    expect(apiMocks.saveProvider.mock.calls[1][0].overwrite).toBe(true);
+    // 确认框已关闭。
+    expect(screen.queryByRole("dialog", { name: "Provider 已存在" })).not.toBeInTheDocument();
+  });
+});

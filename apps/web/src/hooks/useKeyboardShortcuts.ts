@@ -81,6 +81,12 @@ export function useKeyboardShortcuts() {
           void createNewSession();
           return;
         }
+        // 右栏折叠：收进去把宽度让给中栏对话（右栏头部按钮同效）。
+        if (key === "b") {
+          event.preventDefault();
+          state.setRightPanelCollapsed(!state.rightPanelCollapsed);
+          return;
+        }
         const n = Number(event.key);
         if (n >= 1 && n <= 4) {
           event.preventDefault();

@@ -157,6 +157,9 @@ interface AppState {
 
   // -- 右栏面板 --------------------------------------------------------------------
   activeTab: PanelTab;
+  /** 右栏折叠：收进去把宽度让给中栏对话（右栏头部按钮 / Ctrl+B 切换）。
+   *  折叠不等于卸载——RightPanel 保持挂载，展开即恢复原 Tab 与进行中状态。 */
+  rightPanelCollapsed: boolean;
   badges: Record<PanelTab, boolean>;
   progress: ProgressPayload | null;
   /** 进度链路加载失败信息；null=正常。失败时 ProgressTab 渲染错误态+重试而非永久骨架。 */
@@ -217,6 +220,7 @@ interface AppState {
   setWorkspacePath: (path: string | null) => void;
   setComposerDraft: (key: string, draft: string) => void;
   setActiveTab: (tab: PanelTab) => void;
+  setRightPanelCollapsed: (collapsed: boolean) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
   setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
@@ -267,6 +271,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   focusConceptId: null,
   modeBanner: null,
   activeTab: "progress",
+  rightPanelCollapsed: false as boolean,
   badges: { progress: false, syllabus: false, heatmap: false, quiz: false },
   progress: null,
   progressError: null,
@@ -392,6 +397,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeTab: tab,
       badges: { ...state.badges, [tab]: false }, // 查看即清除角标
     })),
+  setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
   toggleBadge: (tab, on) =>
     set((state) => ({ badges: { ...state.badges, [tab]: on } })),
   setPanelData: (patch) => set(patch),

@@ -1,13 +1,17 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { storeState, setActiveTab } = vi.hoisted(() => {
+const { storeState, setActiveTab, setRightPanelCollapsed } = vi.hoisted(() => {
   const setActiveTab = vi.fn();
+  const setRightPanelCollapsed = vi.fn();
   return {
     setActiveTab,
+    setRightPanelCollapsed,
     storeState: {
       activeTab: "progress" as const,
       setActiveTab,
+      rightPanelCollapsed: false as boolean,
+      setRightPanelCollapsed,
       badges: { progress: false, syllabus: true, heatmap: false, quiz: false },
     },
   };
@@ -48,5 +52,23 @@ describe("RightPanel", () => {
     expect(syllabusTab).toHaveAttribute("title", "大纲（Ctrl+2）");
     fireEvent.click(syllabusTab);
     expect(setActiveTab).toHaveBeenCalledWith("syllabus");
+  });
+
+  it("头部有折叠右栏按钮，点击收起（Ctrl+B 同效）", () => {
+    render(<RightPanel />);
+    const collapse = screen.getByRole("button", { name: "折叠右栏" });
+    expect(collapse).toHaveAttribute("title", "折叠右栏（Ctrl+B）");
+    fireEvent.click(collapse);
+    expect(setRightPanelCollapsed).toHaveBeenCalledWith(true);
+  });
+
+  it("折叠态下 RightPanel 自身照常渲染（隐藏由 Console 的 section 负责，故不卸载）", () => {
+    storeState.rightPanelCollapsed = true;
+    render(<RightPanel />);
+    // 折叠不等于卸载：Tab 与内容仍在 DOM 里，Console 只是把外层 section display:none。
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
+    expect(screen.getByRole("tabpanel", { name: "进度" })).toHaveTextContent("进度内容");
+    expect(screen.getByRole("button", { name: "折叠右栏" })).toBeTruthy();
+    storeState.rightPanelCollapsed = false;
   });
 });

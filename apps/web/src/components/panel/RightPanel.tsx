@@ -15,7 +15,7 @@ import QuizTab from "@/src/components/panel/QuizTab";
 import AgentRuntimePanel from "@/src/components/panel/AgentRuntimePanel";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { PanelTab } from "@/src/store/useAppStore";
-import { BarChart3, Flame, Map, Target } from "lucide-react";
+import { BarChart3, Flame, Map, PanelRightClose, Target } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 const TABS: Array<{ id: PanelTab; icon: LucideIcon; label: string }> = [
@@ -29,6 +29,7 @@ export default function RightPanel() {
   const activeTab = useAppStore((s) => s.activeTab);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const badges = useAppStore((s) => s.badges);
+  const setRightPanelCollapsed = useAppStore((s) => s.setRightPanelCollapsed);
 
   return (
     <div
@@ -36,7 +37,9 @@ export default function RightPanel() {
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col gap-3 bg-bg-root/45 px-3 py-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
     >
-      <div role="tablist" aria-label="学习面板" className="grid shrink-0 grid-cols-4 gap-0.5 rounded-lg border border-border-line bg-bg-card p-1">
+      {/* 头部：Tab 条 + 折叠钮（收进去把宽度让给中栏对话；Ctrl+B 同效） */}
+      <div className="flex shrink-0 items-center gap-1.5">
+        <div role="tablist" aria-label="学习面板" className="grid flex-1 grid-cols-4 gap-0.5 rounded-lg border border-border-line bg-bg-card p-1">
         {TABS.map((tab) => {
           const active = activeTab === tab.id;
           const Icon = tab.icon;
@@ -68,6 +71,16 @@ export default function RightPanel() {
             </button>
           );
         })}
+        </div>
+        <button
+          type="button"
+          aria-label="折叠右栏"
+          title="折叠右栏（Ctrl+B）"
+          onClick={() => setRightPanelCollapsed(true)}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-faint transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+        >
+          <PanelRightClose size={15} strokeWidth={1.8} aria-hidden />
+        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pr-0.5 [scrollbar-gutter:stable]">

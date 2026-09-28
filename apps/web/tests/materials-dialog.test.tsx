@@ -17,6 +17,7 @@ const { storeState, apiMocks } = vi.hoisted(() => {
       courses: [{ id: "course-1", title: "Java OOP" }],
       setActiveCourse: vi.fn(),
       setBuildStatus: vi.fn(),
+      setLastImport: vi.fn(),
       flashStatusBanner: vi.fn(),
       setCourses: vi.fn(),
       // 爪爪 uploading 态输入源（P1）：测试内不关心调用

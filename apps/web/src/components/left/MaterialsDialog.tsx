@@ -36,23 +36,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败";
 }
 
-/** 轮询 build job 至 done/failed（与 NewProjectWizard 同款策略）。 */
+/** 轮询 build job 至 done/failed（与 NewProjectWizard 同款策略）。
+ *  返回构建结果摘要，供调用方写入 store.lastImport（对话框关掉后仍可见）。 */
 async function awaitBuild(
   jobId: string,
   courseId: string,
   report: (msg: string) => void,
   signal?: { aborted: boolean },
-): Promise<void> {
+): Promise<{ jobId: string; tasksGenerated: number; degraded: number } | null> {
   try {
     // F-7/PERF-8：消费 job.progress 展示"N/M 当前文件"，30 分钟不再黑盒。
     let lastProgress = "";
     for (let attempt = 0; attempt < 3600; attempt += 1) {
       // FE-4：弹窗已关闭/组件卸载时立即停止轮询并停止 setState。
-      if (signal?.aborted) return;
+      if (signal?.aborted) return null;
       const job = await api.job(jobId);
-      if (signal?.aborted) return;
+      if (signal?.aborted) return null;
       if (job.status === "done") {
-        report(`✓ 知识索引构建完成（syllabus 生成，共 ${job.result?.tasksGenerated ?? 0} 张题卡）`);
+        const tasksGenerated = job.result?.tasksGenerated ?? 0;
+        report(`✓ 知识索引构建完成（syllabus 生成，共 ${tasksGenerated} 张题卡）`);
         // FL-05：degraded（抽取失败/零概念块/差卡被闸）此前全线不可见——
         // 用户永远不知道"资料只摄取了一半"。逐条透出。
         const degraded = job.result?.degraded ?? [];
@@ -60,11 +62,11 @@ async function awaitBuild(
           report(`⚠ 构建降级：${degraded.length} 项资料/题卡未正常进入课程`);
           for (const item of degraded) report(`  · ${item}`);
         }
-        return;
+        return { jobId, tasksGenerated, degraded: degraded.length };
       }
       if (job.status === "failed") {
         report(`✗ 构建失败：${job.error ?? "未知错误"}`);
-        return;
+        return null;
       }
       const p = job.progress;
       if (p !== undefined && p.total > 0 && p.finished < p.total) {
@@ -99,6 +101,7 @@ export default function MaterialsDialog({
   const activeCourseLabel = courses.find((course) => course.id === activeCourseId)?.title ?? activeCourseId;
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
   const setBuildStatus = useAppStore((s) => s.setBuildStatus);
+  const setLastImport = useAppStore((s) => s.setLastImport);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   // 爪爪 uploading 态输入源：资料上传期间置位
   const setUploading = useAppStore((s) => s.setUploading);
@@ -213,10 +216,21 @@ export default function MaterialsDialog({
       setPickedFiles([]);
       if (fileRef.current) fileRef.current.value = "";
       setBuildStatus(buildJobId !== null && buildError === undefined ? "running" : "done");
+      // 对话框关掉后仍能看到"刚加了什么、构建出了多少题"——旧实现只剩这条
+      // 1.6s 自动消失的横幅。
+      setLastImport({
+        courseId: activeCourseId,
+        files: added,
+        at: new Date().toISOString(),
+        build: null,
+      });
       if (buildJobId !== null && buildError === undefined) {
-        await awaitBuild(buildJobId, activeCourseId, (msg) => {
+        const outcome = await awaitBuild(buildJobId, activeCourseId, (msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
         }, buildPollSignalRef.current);
+        if (outcome !== null) {
+          setLastImport((prev) => (prev === null || prev.courseId !== activeCourseId ? prev : { ...prev, build: outcome }));
+        }
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);
@@ -252,11 +266,21 @@ export default function MaterialsDialog({
       const result = await api.ingestUrl(activeCourseId, url);
       setUrlInput("");
       setUrlNotice(`✓ 已收录 ${result.added}，后台开始增量构建（${result.buildJobId}）`);
+      // 与上传同款：收录结果落 store，关掉对话框仍可见。
+      setLastImport({
+        courseId: activeCourseId,
+        files: [result.added],
+        at: new Date().toISOString(),
+        build: null,
+      });
       if (result.buildJobId) {
-        await awaitBuild(result.buildJobId, activeCourseId, (msg) => {
+        const outcome = await awaitBuild(result.buildJobId, activeCourseId, (msg) => {
           setUrlNotice((prev) => `${prev ?? ""}
 ${msg}`);
         }, buildPollSignalRef.current);
+        if (outcome !== null) {
+          setLastImport((prev) => (prev === null || prev.courseId !== activeCourseId ? prev : { ...prev, build: outcome }));
+        }
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);
@@ -267,7 +291,7 @@ ${msg}`);
       setUrlBusy(false);
       setNotice(null);
     }
-  }, [activeCourseId, flashStatusBanner, setBuildStatus, setNotice, urlInput]);
+  }, [activeCourseId, flashStatusBanner, setBuildStatus, setLastImport, setNotice, urlInput]);
 
   // -- 勾选导入 -------------------------------------------------------------------
 
@@ -314,11 +338,22 @@ ${msg}`);
       setNotice(
         `✓ 已创建课程 ${created.course}，归档 ${importPaths.length} 份资料，开始构建索引…`,
       );
+      // 与上传/收录同款：新建课程的导入结果也落 store（注意此时 activeCourseId
+      // 还是旧值，用 created.course 记录归属）。
+      setLastImport({
+        courseId: created.course,
+        files: importPaths.map((path) => path.split(/[\\/]/).pop() ?? path),
+        at: new Date().toISOString(),
+        build: null,
+      });
       if (created.buildJobId) {
         // FL-19：轮询绑定弹窗生命周期——关闭弹窗立即停止（旧实现僵尸轮询）。
-        await awaitBuild(created.buildJobId, created.course, (msg) => {
+        const outcome = await awaitBuild(created.buildJobId, created.course, (msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
         }, buildPollSignalRef.current);
+        if (outcome !== null) {
+          setLastImport((prev) => (prev === null || prev.courseId !== created.course ? prev : { ...prev, build: outcome }));
+        }
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);

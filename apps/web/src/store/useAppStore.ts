@@ -160,6 +160,16 @@ interface AppState {
   /** 右栏折叠：收进去把宽度让给中栏对话（右栏头部按钮 / Ctrl+B 切换）。
    *  折叠不等于卸载——RightPanel 保持挂载，展开即恢复原 Tab 与进行中状态。 */
   rightPanelCollapsed: boolean;
+  /** 最近一次导入/收录的结果（上传 / 网页链接 / 勾选新建共用）。对话框关闭后
+   *  仍可见——旧实现只剩一条 1.6s 自动消失的横幅，用户无法确认"资料到底进去
+   *  没有、构建出了多少题"。切课即隐藏，下次导入即覆盖。 */
+  lastImport: {
+    courseId: string;
+    files: string[];
+    at: string;
+    /** null = 构建中或未启动（未配模型）；非空 = 构建结果摘要。 */
+    build: { jobId: string; tasksGenerated: number; degraded: number } | null;
+  } | null;
   badges: Record<PanelTab, boolean>;
   progress: ProgressPayload | null;
   /** 进度链路加载失败信息；null=正常。失败时 ProgressTab 渲染错误态+重试而非永久骨架。 */
@@ -221,6 +231,7 @@ interface AppState {
   setComposerDraft: (key: string, draft: string) => void;
   setActiveTab: (tab: PanelTab) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
+  setLastImport: (value: AppState["lastImport"]) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
   setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
@@ -272,6 +283,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   modeBanner: null,
   activeTab: "progress",
   rightPanelCollapsed: false as boolean,
+  lastImport: null,
   badges: { progress: false, syllabus: false, heatmap: false, quiz: false },
   progress: null,
   progressError: null,
@@ -398,6 +410,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       badges: { ...state.badges, [tab]: false }, // 查看即清除角标
     })),
   setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
+  setLastImport: (lastImport) => set({ lastImport }),
   toggleBadge: (tab, on) =>
     set((state) => ({ badges: { ...state.badges, [tab]: on } })),
   setPanelData: (patch) => set(patch),

@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.1-beta] - 2026-09-28
 
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，
 配套对抗性验证与发布门禁全绿）。
@@ -359,4 +359,5 @@
 - 供应链：vendored xlsx 0.20.3 官方 tgz 封堵 CVE-2023-30533 / CVE-2024-22363，离线可复现；
 - Node 引擎要求 `^22.19.0 || >=24`（Node 20 已 EOL，不再支持）。
 
+[0.1.1-beta]: https://github.com/Favio8/studyclaw-next/releases/tag/v0.1.1-beta
 [0.1.0-beta]: https://github.com/Favio8/studyclaw-next/releases/tag/v0.1.0-beta

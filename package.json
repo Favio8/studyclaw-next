@@ -10,7 +10,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "typecheck": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json && node apps/web/node_modules/next/dist/bin/next typegen apps/web && node apps/web/node_modules/typescript/bin/tsc -p apps/web/tsconfig.json --noEmit",
     "test": "vitest run",
     "smoke:storage": "tsx --tsconfig tsconfig.base.json scripts/smoke-storage.ts",
     "serve": "tsx --tsconfig tsconfig.base.json apps/cli/src/bin.ts serve",

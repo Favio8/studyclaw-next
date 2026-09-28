@@ -165,6 +165,14 @@ describe("MaterialsDialog 上传补充", () => {
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
     storeState.courses = [{ id: "course-1", title: "Java OOP" }];
   });
+
+  it("initialTab=import 时直接落在勾选新建课程页", async () => {
+    apiMocks.workspaceFiles.mockResolvedValue({ root: "D:/ws", files: [] });
+    render(<MaterialsDialog initialTab="import" onClose={vi.fn()} />);
+    // 上传页的说明不该出现，勾选页的枚举提示该出现。
+    await waitFor(() => expect(screen.getByText(/正在枚举项目候选资料/)).toBeInTheDocument());
+    expect(screen.queryByText(/上传到当前课程/)).not.toBeInTheDocument();
+  });
 });
 
 describe("MaterialsDialog 勾选新建课程", () => {
@@ -224,7 +232,7 @@ describe("MaterialsDialog 勾选新建课程", () => {
 describe("MaterialsDialog 焦点管理（W-10）", () => {
   it("打开后焦点落在弹层内（首个可聚焦控件），而非逃逸到背景", () => {
     render(<MaterialsDialog onClose={vi.fn()} />);
-    const dialog = screen.getByRole("dialog", { name: "资料导入/上传" });
+    const dialog = screen.getByRole("dialog", { name: "资料" });
     const active = document.activeElement;
     expect(active).not.toBeNull();
     expect(dialog.contains(active)).toBe(true);
@@ -234,7 +242,6 @@ describe("MaterialsDialog 焦点管理（W-10）", () => {
     const onClose = vi.fn();
     render(<MaterialsDialog onClose={onClose} />);
     fireEvent.keyDown(document, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
+    expect(onClose).toHaveBeenCalledTimes(1);  });
 });
 

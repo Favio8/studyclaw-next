@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions, suppressAutoSelect } = vi.hoisted(() => ({
+const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions, suppressAutoSelect, materialsProps } = vi.hoisted(() => ({
   storeState: {
     courses: [
       {
@@ -55,6 +55,7 @@ const { storeState, selectSession, createSession, renameSession, forkSession, ar
     monitorBuildJob: vi.fn(),
   },
   suppressAutoSelect: vi.fn(),
+  materialsProps: { initialTab: "" as string | undefined, open: false },
 }));
 
 vi.mock("../src/store/useAppStore", () => ({
@@ -69,6 +70,15 @@ vi.mock("../src/hooks/useSessionActions", () => ({
   suppressAutoSelectOnce: suppressAutoSelect,
 }));
 vi.mock("../src/components/left/NewProjectWizard", () => ({ default: () => null }));
+// 资料弹窗：记录调用 props，验证两个入口分别传 upload / import（真组件在
+// materials-dialog.test.tsx 里覆盖）。
+vi.mock("../src/components/left/MaterialsDialog", () => ({
+  default: (props: { initialTab?: string; onClose: () => void }) => {
+    materialsProps.initialTab = props.initialTab;
+    materialsProps.open = true;
+    return <div data-testid="materials-dialog" />;
+  },
+}));
 vi.mock("../src/lib/api", () => ({ api: apiMocks }));
 vi.mock("../src/lib/workspaceActions", () => ({ adoptWorkspace: wsActions.adoptWorkspace, monitorBuildJob: wsActions.monitorBuildJob }));
 
@@ -77,6 +87,8 @@ import LeftNav from "../src/components/left/LeftNav";
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  materialsProps.initialTab = "";
+  materialsProps.open = false;
   storeState.courses = storeState.courses.filter((course) => course.id === "course-1");
   storeState.courseSessions["course-1"] = [
     {
@@ -485,6 +497,53 @@ describe("LeftNav 专项修复回归（P1-1/P1-2/P1-3/P2）", () => {
       expect(storeState.flashStatusBanner).toHaveBeenCalledWith(expect.stringContaining("已存在同名项目")),
     );
     expect(apiMocks.renameWorkspace).not.toHaveBeenCalled();
+  });
+});
+
+describe("LeftNav 资料入口拆分", () => {
+  it("展开态：上传/建新课是两个独立入口，分别传 upload 与 import", async () => {
+    mockWorkspaces();
+    render(<LeftNav />);
+    const upload = await screen.findByRole("button", { name: "上传资料到当前课程" });
+    const create = screen.getByRole("button", { name: "从项目资料建新课" });
+
+    fireEvent.click(upload);
+    expect(materialsProps.open).toBe(true);
+    expect(materialsProps.initialTab).toBe("upload");
+
+    materialsProps.open = false;
+    fireEvent.click(create);
+    expect(materialsProps.initialTab).toBe("import");
+  });
+
+  it("展开态：没有打开课程时上传入口禁用（不再点开才告知先建课）", async () => {
+    mockWorkspaces();
+    storeState.activeCourseId = null;
+    render(<LeftNav />);
+    const upload = await screen.findByRole("button", { name: "上传资料到当前课程" });
+    expect(upload).toBeDisabled();
+    // 建新课始终可用。
+    expect(screen.getByRole("button", { name: "从项目资料建新课" })).toBeEnabled();
+    storeState.activeCourseId = "course-1";
+  });
+
+  it("折叠态：单个资料入口，按有无当前课程决定默认页", async () => {
+    mockWorkspaces();
+    render(<LeftNav collapsed />);
+    const entry = await screen.findByRole("button", { name: "资料：上传到当前课程 / 从项目建新课" });
+    fireEvent.click(entry);
+    expect(materialsProps.open).toBe(true);
+    expect(materialsProps.initialTab).toBe("upload"); // 有打开课程 → 上传页
+
+    materialsProps.open = false;
+    materialsProps.initialTab = "";
+    storeState.activeCourseId = null;
+    cleanup();
+    mockWorkspaces();
+    render(<LeftNav collapsed />);
+    fireEvent.click(await screen.findByRole("button", { name: "资料：上传到当前课程 / 从项目建新课" }));
+    expect(materialsProps.initialTab).toBe("import"); // 无课程 → 建新课页
+    storeState.activeCourseId = "course-1";
   });
 });
 

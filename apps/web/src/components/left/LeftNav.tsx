@@ -139,6 +139,8 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   const [query, setQuery] = useState("");
   const [searchOnExpand, setSearchOnExpand] = useState(false);
   const [materialsOpen, setMaterialsOpen] = useState(false);
+  // 资料弹窗的默认页：左栏两个入口分别指定（上传到当前课 / 从项目建新课）。
+  const [materialsInitialTab, setMaterialsInitialTab] = useState<"upload" | "import">("upload");
   const searchAreaRef = useRef<HTMLDivElement>(null);
   const [remoteSearch, setRemoteSearch] = useState<{ query: string; status: "idle" | "loading" | "ready" | "error"; items: SessionSearchResult[]; hasMore: boolean }>({
     query: "", status: "idle", items: [], hasMore: false,
@@ -1094,11 +1096,14 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </button>
         <button
           type="button"
-          aria-label="导入或上传资料"
-          title="导入或上传资料"
+          aria-label="资料：上传到当前课程 / 从项目建新课"
+          title="资料：上传到当前课程 / 从项目建新课"
           className="mb-3 flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
           onClick={() => {
             closeSearch();
+            // 折叠态只有一个入口：按有没有打开课程决定默认 tab（有课 → 上传，
+            // 没课 → 引导去建新课），弹窗内仍可手动切页。
+            setMaterialsInitialTab(activeCourseId ? "upload" : "import");
             setMaterialsOpen(true);
           }}
         >
@@ -1153,7 +1158,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </div>
       ) : null}
       {wizardOpen ? <NewProjectWizard /> : null}
-        {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
+        {materialsOpen ? <MaterialsDialog initialTab={materialsInitialTab} onClose={() => setMaterialsOpen(false)} /> : null}
       </div>
     );
   }
@@ -1364,20 +1369,37 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         {searching ? renderSearchResults() : wsItems.map(renderWorkspaceGroup)}
       </div>
 
-      <div className="mt-2 space-y-1 shrink-0 border-t border-border-line pt-2">
+      <div className="mt-2 flex shrink-0 items-center gap-1 border-t border-border-line pt-2">
         <button
           type="button"
-          aria-label="导入或上传资料"
-          title="导入/上传课程资料"
+          aria-label="上传资料到当前课程"
+          title="上传资料到当前课程"
+          disabled={!activeCourseId}
           onClick={() => {
             closeSearch();
+            setMaterialsInitialTab("upload");
             setMaterialsOpen(true);
           }}
-          className="flex h-[38px] w-full items-center gap-2 rounded-xl px-2.5 text-[14px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+          className="flex h-[38px] min-w-0 flex-1 items-center gap-2 rounded-xl px-2.5 text-[14px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Upload size={16} strokeWidth={1.8} aria-hidden />
-          <span>导入 / 上传资料</span>
+          <span className="truncate">上传资料</span>
         </button>
+        <button
+          type="button"
+          aria-label="从项目资料建新课"
+          title="从项目资料建新课"
+          onClick={() => {
+            closeSearch();
+            setMaterialsInitialTab("import");
+            setMaterialsOpen(true);
+          }}
+          className="flex h-[38px] min-w-0 flex-1 items-center gap-2 rounded-xl px-2.5 text-[14px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+        >
+          <FolderPlus size={16} strokeWidth={1.8} aria-hidden />
+          <span className="truncate">建新课</span>
+        </button>
+      </div>
         <button
           type="button"
           aria-label="打开设置"
@@ -1391,7 +1413,6 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
           <Settings2 size={16} strokeWidth={1.8} aria-hidden />
           <span>设置</span>
         </button>
-      </div>
 
       {confirmForget ? (
         <div
@@ -1425,7 +1446,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </div>
       ) : null}
       {wizardOpen ? <NewProjectWizard /> : null}
-      {materialsOpen ? <MaterialsDialog onClose={() => setMaterialsOpen(false)} /> : null}
+      {materialsOpen ? <MaterialsDialog initialTab={materialsInitialTab} onClose={() => setMaterialsOpen(false)} /> : null}
       {sessionRenameTarget ? (
         <div
           className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px]"

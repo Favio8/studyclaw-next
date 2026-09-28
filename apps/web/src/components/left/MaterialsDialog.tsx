@@ -83,7 +83,15 @@ async function awaitBuild(
   }
 }
 
-export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
+export default function MaterialsDialog({
+  onClose,
+  initialTab = "upload",
+}: {
+  onClose: () => void;
+  /** 打开时默认落在哪个 tab：左栏两个入口分别传 "upload"（传到当前课）与
+   *  "import"（从项目资料建新课）——二者语义相反，不能混成一个入口。 */
+  initialTab?: TabKind;
+}) {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
   const courses = useAppStore((s) => s.courses);
   // 上传目标显示课程标题而非 UUID（UUID 对用户没有意义）；标题缺失（课程列表
@@ -95,7 +103,7 @@ export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
   // 爪爪 uploading 态输入源：资料上传期间置位
   const setUploading = useAppStore((s) => s.setUploading);
 
-  const [tab, setTab] = useState<TabKind>("upload");
+  const [tab, setTab] = useState<TabKind>(initialTab);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -348,11 +356,11 @@ ${msg}`);
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="资料导入/上传"
+        aria-label="资料"
         className="w-[min(94vw,560px)] overflow-hidden rounded-xl border border-border-line bg-bg-panel shadow-xl"
       >
         <header className="flex h-12 items-center justify-between border-b border-border-line px-4">
-          <h2 className="text-[15px] font-medium text-text-primary">资料导入 / 上传</h2>
+          <h2 className="text-[15px] font-medium text-text-primary">资料</h2>
           <button
             type="button"
             aria-label="关闭"
@@ -363,7 +371,7 @@ ${msg}`);
           </button>
         </header>
 
-        <nav className="flex gap-1 border-b border-border-line px-3 pt-2">
+        <nav className="flex gap-1 border-b border-border-line px-3 pt-2" aria-label="资料操作">
           <button
             type="button"
             className={`flex h-8 items-center gap-1.5 rounded-t-lg px-3 text-[13px] transition-colors ${
@@ -372,6 +380,7 @@ ${msg}`);
                 : "text-text-muted hover:text-text-primary"
             }`}
             onClick={toggleUploadTab}
+            title="把本地文件/网页补充进当前已打开的课程"
           >
             <Upload size={14} strokeWidth={1.8} aria-hidden /> 上传补充
           </button>
@@ -383,6 +392,7 @@ ${msg}`);
                 : "text-text-muted hover:text-text-primary"
             }`}
             onClick={toggleImportTab}
+            title="用项目里已有的文件新建一个课程"
           >
             <FolderPlus size={14} strokeWidth={1.8} aria-hidden /> 勾选新建课程
           </button>

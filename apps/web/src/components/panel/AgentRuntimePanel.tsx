@@ -26,6 +26,9 @@ export default function AgentRuntimePanel() {
   const [status, setStatus] = useState<AgentStatusView | null>(null);
   const [agents, setAgents] = useState<AgentStatusView[]>([]);
   const [details, setDetails] = useState(false);
+  // 运行能力默认收成一行摘要：5 项里 4 项"降级"时逐条平铺只是噪音，
+  // 需要排查再展开（摘要里保留项数与降级数这两个关键数字）。
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!sessionId) { setProjection(EMPTY); setStatus(null); setAgents([]); return; }
@@ -52,6 +55,7 @@ export default function AgentRuntimePanel() {
     status: agents.find((agent) => agent.agentId === child.agentId) ?? null,
   }));
   const capabilities = projection.agentRuntime?.capabilities ?? status?.capabilities ?? [];
+  const degradedCount = capabilities.filter((capability) => !capability.available).length;
   return <section className="shrink-0 rounded-lg border border-border-line bg-bg-panel/70 p-2.5" data-agent-runtime-panel="">
     <div className="mb-2 flex items-center gap-2 text-[12px] text-text-muted">
       <Activity size={14} className={statusPhase === "running" ? "text-accent-focus" : "text-text-faint"} aria-hidden />
@@ -68,9 +72,9 @@ export default function AgentRuntimePanel() {
       {projection.agentConfig ? <div className="truncate" title={`${projection.agentConfig.agentPreset} · ${projection.agentConfig.permissionPreset}`}>权限：{projection.agentConfig.permissionPreset === "read-only" ? "只读" : projection.agentConfig.permissionPreset === "danger-full-access" ? "完全访问" : "项目写入"}</div> : null}
       {projection.compaction.count > 0 ? <div className="text-right">压缩：{projection.compaction.count}</div> : null}
     </div>
-    {capabilities.length > 0 ? <div className="mt-2 border-t border-border-faint pt-2" data-agent-capabilities=""><div className="mb-1 text-[11px] font-medium text-text-muted">运行能力</div><div className="space-y-1">{capabilities.map((capability) => <div key={capability.id} className="flex min-w-0 items-center gap-1.5 text-[11px]" title={capability.available ? capability.id : `${capability.reason ?? "不可用"}${capability.installAction ? ` · ${capability.installAction}` : ""}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${capability.available ? "bg-accent-pass" : "bg-accent-warn"}`} aria-hidden /><span className="truncate text-text-faint">{capability.id}</span><span className={`ml-auto shrink-0 ${capability.available ? "text-accent-pass" : "text-accent-warn"}`}>{capability.available ? "可用" : "降级"}</span></div>)}</div></div> : null}
+    {capabilities.length > 0 ? <div className="mt-2 border-t border-border-faint pt-2" data-agent-capabilities=""><button type="button" aria-expanded={capabilitiesOpen} onClick={() => setCapabilitiesOpen((value) => !value)} className="flex w-full items-center gap-1 text-left text-[11px] font-medium text-text-muted transition-colors hover:text-text-primary"><ChevronDown size={12} className={capabilitiesOpen ? "rotate-180" : ""} aria-hidden /><span>运行能力</span><span className="ml-auto font-normal text-text-faint">{capabilities.length} 项{degradedCount > 0 ? ` · ${degradedCount} 降级` : ""}</span></button>{capabilitiesOpen ? <div className="mt-1 space-y-1">{capabilities.map((capability) => <div key={capability.id} className="flex min-w-0 items-center gap-1.5 text-[11px]" title={capability.available ? capability.id : `${capability.reason ?? "不可用"}${capability.installAction ? ` · ${capability.installAction}` : ""}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${capability.available ? "bg-accent-pass" : "bg-accent-warn"}`} aria-hidden /><span className="truncate text-text-faint">{capability.id}</span><span className={`ml-auto shrink-0 ${capability.available ? "text-accent-pass" : "text-accent-warn"}`}>{capability.available ? "可用" : "降级"}</span></div>)}</div> : null}</div> : null}
     <div className="mt-2 border-t border-border-faint pt-2" data-context-meter="">
-      <div className="mb-1 flex items-center justify-between text-[11px] text-text-faint"><span>上下文</span><span>{contextPercent}%</span></div>
+      <div className="mb-1 flex items-center justify-between text-[11px] text-text-faint"><span>上下文</span><span title={`${projection.usage.inputTokens} / 128000 tokens`}>{contextPercent}%</span></div>
       <div role="progressbar" aria-label="上下文用量" aria-valuemin={0} aria-valuemax={100} aria-valuenow={contextPercent} className="h-1 overflow-hidden rounded-full bg-bg-card"><div className="h-full rounded-full bg-accent-focus transition-[width]" style={{ width: `${contextPercent}%` }} /></div>
     </div>
     <PlanPanel steps={projection.plan.steps} />

@@ -88,10 +88,12 @@ export function useSessionActions() {
         .getState()
         .sessions.find((s) => s.sessionId === sessionId);
       const lastDate = meta?.lastActiveAt ? dateOnly(meta.lastActiveAt) : null;
+      // 标题由面包屑第二段展示，横幅不再重复一遍（旧实现"对话：<title> · 已恢复"
+      // 让同一标题在 header 里出现两次）。
       setSessionBanner(
         lastDate
-          ? `── 对话：${restored.title || "（未命名对话）"} · 已恢复（上次 ${lastDate}）──`
-          : `── 对话：${restored.title || "（未命名对话）"} · 已恢复 ──`,
+          ? `── 已恢复上次对话 · ${lastDate} ──`
+          : `── 已恢复上次对话 ──`,
       );
     } catch {
       if (peekSelectEpoch() !== myEpoch) return; // 同上：过期响应不落地失败态

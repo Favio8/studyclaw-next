@@ -201,6 +201,17 @@ export default function ChatArea() {
                 <Clawzy size={72} ariaLabel="爪爪" />
                 今天学点什么？
               </h1>
+              {/* 快捷键可发现性：此前只有 tooltip 里藏着一句，新用户无从得知。
+                  hero 态（无历史消息）展示一行轻量提示，进入对话后自动消失。 */}
+              <p className="relative mb-3 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[12px] leading-5 text-text-faint">
+                <span><span className="font-mono text-text-caption">Ctrl+K</span> 命令面板</span>
+                <span aria-hidden className="text-text-caption">·</span>
+                <span><span className="font-mono text-text-caption">Ctrl+N</span> 新对话</span>
+                <span aria-hidden className="text-text-caption">·</span>
+                <span><span className="font-mono text-text-caption">Ctrl+B</span> 收起右栏</span>
+                <span aria-hidden className="text-text-caption">·</span>
+                <span><span className="font-mono text-text-caption">Ctrl+1~4</span> 右侧面板</span>
+              </p>
             </>
           ) : (
             <>

@@ -12,7 +12,7 @@
  * - 首次运行姿态：没有任何已配置密钥的 provider 时自动展开 setup 卡
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
@@ -51,6 +51,9 @@ function nextRowKey(): string {
   rowKeySeq += 1;
   return `rk_${Date.now().toString(36)}_${rowKeySeq}`;
 }
+
+/** 「恢复内置列表」二次确认的武装窗口（ms）——够用户看清"确认恢复？"又不拖沓。 */
+const RESTORE_CONFIRM_MS = 2500;
 
 /** 添加卡按目录条目缓存整卡草稿（DSH：切换目录不丢已填内容）。 */
 interface AddCardDraft {
@@ -138,6 +141,25 @@ function ProviderEditorCard({
   const [checked, setChecked] = useState<Set<string>>(new Set());
   // P2：API Key 明文切换——type=password 且无 eye 按钮，粘贴后无法核对。
   const [keyVisible, setKeyVisible] = useState(false);
+  // 「↺ 恢复内置列表」防误触：第一次点击只进入确认态， armed 期间再次点击才真正
+  // 覆盖手改的模型行（旧实现一键丢弃，用户改半天的容量/ID 一次点飞）。
+  const [restoreArmed, setRestoreArmed] = useState(false);
+  const restoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmRestore = useCallback(() => {
+    if (restoreTimerRef.current !== null) {
+      clearTimeout(restoreTimerRef.current);
+      restoreTimerRef.current = null;
+    }
+    setRestoreArmed(false);
+  }, []);
+  const armRestore = useCallback(() => {
+    if (restoreTimerRef.current !== null) clearTimeout(restoreTimerRef.current);
+    setRestoreArmed(true);
+    restoreTimerRef.current = setTimeout(() => {
+      restoreTimerRef.current = null;
+      setRestoreArmed(false);
+    }, RESTORE_CONFIRM_MS);
+  }, []);
 
   // 每次渲染后把最新表单快照存入 ref（渲染期不写 ref，effect 期允许）。
   const draftRef = useRef<AddCardDraft | null>(null);
@@ -148,6 +170,7 @@ function ProviderEditorCard({
   useEffect(() => {
     if (!draftCache || entryId === null) return;
     return () => {
+      if (restoreTimerRef.current !== null) clearTimeout(restoreTimerRef.current);
       if (draftRef.current) {
         // FE-4：草稿缓存永不携带明文 apiKey——切走条目即丢弃未提交密钥。
         const { apiKey: _droppedApiKey, ...rest } = draftRef.current;
@@ -461,11 +484,27 @@ function ProviderEditorCard({
                 {entry && (entry.models?.length ?? 0) > 0 ? (
                   <button
                     type="button"
-                    onClick={() => setRows(draftsFrom(entry?.models ?? []))}
-                    title="放弃当前覆盖，恢复该供应商目录预置的模型列表"
-                    className="rounded-lg border border-border-line px-2 py-1 text-xs text-text-muted hover:bg-bg-card"
+                    onClick={() => {
+                      const preset = entry.models ?? [];
+                      if (!restoreArmed) {
+                        armRestore();
+                        return;
+                      }
+                      disarmRestore();
+                      setRows(draftsFrom(preset));
+                      useAppStore.getState().flashStatusBanner(`已恢复内置列表（${preset.length} 个模型）`);
+                    }}
+                    aria-label={restoreArmed ? "确认恢复内置列表" : "恢复内置列表"}
+                    title={restoreArmed
+                      ? `再次点击确认：放弃当前修改，恢复该供应商目录预置的 ${entry.models?.length ?? 0} 个模型`
+                      : "放弃当前覆盖，恢复该供应商目录预置的模型列表"}
+                    className={`rounded-lg border px-2 py-1 text-xs transition-colors ${
+                      restoreArmed
+                        ? "border-accent-fail bg-accent-fail/10 text-accent-fail"
+                        : "border-border-line text-text-muted hover:bg-bg-card"
+                    }`}
                   >
-                    ↺ 恢复内置列表
+                    {restoreArmed ? "确认恢复？" : "↺ 恢复内置列表"}
                   </button>
                 ) : null}
                 <button

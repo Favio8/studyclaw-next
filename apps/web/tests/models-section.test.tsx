@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { flashStatusBanner, apiMocks, catalog, ApiError } = vi.hoisted(() => {
@@ -298,7 +298,7 @@ describe("ModelsSection 批次1（X2/X3/X4/X5）", () => {
     expect(profile.overwrite).toBe(true);
   });
 
-  it("X3 添加卡有目录来源时显示「恢复内置列表」，点击回到目录预置", async () => {
+  it("X3 恢复内置列表需二次确认：第一次只武装、确认后才覆盖手改", async () => {
     render(<ModelsSection initial={makePayload([])} />);
     await screen.findByText("选择供应商");
     // 等目录到达、编辑器挂载（初始选中 deepseek，无预置模型）。
@@ -306,11 +306,38 @@ describe("ModelsSection 批次1（X2/X3/X4/X5）", () => {
     // 切到 sensenova（预置 1 个模型）。
     fireEvent.change(screen.getByLabelText(/选择供应商/), { target: { value: "sensenova" } });
     await screen.findByDisplayValue("sensenova-6.8-flash-lite");
-    // sensenova 预置模型已在列表；改掉后点「恢复内置列表」应回到预置。
+    // sensenova 预置模型已在列表；改掉后点「恢复内置列表」。
     fireEvent.change(screen.getByLabelText("模型 ID 1"), { target: { value: "custom-x" } });
     expect(screen.getByLabelText("模型 ID 1")).toHaveValue("custom-x");
-    fireEvent.click(screen.getByRole("button", { name: /恢复内置列表/ }));
+
+    // 第一次点击：不恢复，只进入确认态（防误触）。
+    fireEvent.click(screen.getByRole("button", { name: "恢复内置列表" }));
+    expect(screen.getByLabelText("模型 ID 1")).toHaveValue("custom-x");
+    expect(screen.getByRole("button", { name: "确认恢复内置列表" })).toBeInTheDocument();
+
+    // 确认点击：才回到目录预置。
+    fireEvent.click(screen.getByRole("button", { name: "确认恢复内置列表" }));
     expect(screen.getByLabelText("模型 ID 1")).toHaveValue("sensenova-6.8-flash-lite");
+  });
+
+  it("X3b 恢复确认超时后自动解除武装，不再一键覆盖", async () => {
+    // 用真实计时器等过武装窗口：假计时器会让同文件其余用例的 waitFor 全部挂死
+    // （waitFor 依赖 setInterval 推进），因此这里不用 vi.useFakeTimers。
+    render(<ModelsSection initial={makePayload([])} />);
+    await screen.findByText("选择供应商");
+    await screen.findByPlaceholderText("acme-gateway");
+    fireEvent.change(screen.getByLabelText(/选择供应商/), { target: { value: "sensenova" } });
+    await screen.findByDisplayValue("sensenova-6.8-flash-lite");
+    fireEvent.change(screen.getByLabelText("模型 ID 1"), { target: { value: "custom-x" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复内置列表" }));
+    expect(screen.getByRole("button", { name: "确认恢复内置列表" })).toBeInTheDocument();
+    // 越过武装窗口（组件常量 2500ms）：确认态自动解除。
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 2900)); });
+    expect(screen.queryByRole("button", { name: "确认恢复内置列表" })).not.toBeInTheDocument();
+    // 再点一次只是重新武装，仍然不覆盖手改。
+    fireEvent.click(screen.getByRole("button", { name: "恢复内置列表" }));
+    expect(screen.getByLabelText("模型 ID 1")).toHaveValue("custom-x");
   });
 
   it("X4 切换目录条目不丢已填草稿（切走再切回仍在）", async () => {

@@ -85,6 +85,10 @@ async function awaitBuild(
 
 export default function MaterialsDialog({ onClose }: { onClose: () => void }) {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
+  const courses = useAppStore((s) => s.courses);
+  // 上传目标显示课程标题而非 UUID（UUID 对用户没有意义）；标题缺失（课程列表
+  // 尚未加载/课程已删）时回落到 id，至少不给排查埋雷。
+  const activeCourseLabel = courses.find((course) => course.id === activeCourseId)?.title ?? activeCourseId;
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
   const setBuildStatus = useAppStore((s) => s.setBuildStatus);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
@@ -387,9 +391,9 @@ ${msg}`);
         <div className="max-h-[70vh] overflow-y-auto p-4">
           {tab === "upload" ? (
             <div className="space-y-3">
-              <p className="text-[13px] leading-5 text-text-muted">
+              <p className="text-[13px] leading-5 text-text-muted" title={activeCourseId ?? undefined}>
                 {activeCourseId
-                  ? `上传到当前课程：${activeCourseId}（归档至 sources/，随后自动增量构建出题）`
+                  ? `上传到当前课程：${activeCourseLabel}（归档至 sources/，随后自动增量构建出题）`
                   : "当前还没有打开课程 —— 请先用「＋ 新项目」打开/创建一个课程。"}
               </p>
               <label className="flex h-24 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-border-line bg-bg-card text-text-muted transition-colors hover:border-accent-focus hover:text-text-primary">
@@ -405,7 +409,9 @@ ${msg}`);
                 />
               </label>
               <div className="rounded-xl border border-border-line bg-bg-card p-3">
-                <p className="text-[13px] text-text-muted">或收录网页链接（http/https，正文自动入 sources 并增量构建出题）：</p>
+                <p className="text-[13px] text-text-muted">
+                  或收录网页链接（http/https，正文自动入 {activeCourseId ? `「${activeCourseLabel}」的 ` : ""}sources 并增量构建出题）：
+                </p>
                 <div className="mt-2 flex items-center gap-2">
                   <input
                     aria-label="网页链接"

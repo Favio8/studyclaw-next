@@ -14,6 +14,7 @@ const { storeState, apiMocks } = vi.hoisted(() => {
   return {
     storeState: {
       activeCourseId: "course-1",
+      courses: [{ id: "course-1", title: "Java OOP" }],
       setActiveCourse: vi.fn(),
       setBuildStatus: vi.fn(),
       flashStatusBanner: vi.fn(),
@@ -149,6 +150,20 @@ describe("MaterialsDialog 上传补充", () => {
     fireEvent.change(input, { target: { files: [file("a.md")] } });
     expect(screen.getByRole("button", { name: /上传并构建/ })).toBeEnabled();
     expect(apiMocks.uploadSources).not.toHaveBeenCalled();
+  });
+
+  it("上传目标显示课程标题而非 UUID（标题缺失时回落 id）", async () => {
+    render(<MaterialsDialog onClose={vi.fn()} />);
+    // 默认 tab 即上传补充：说明文案带标题、不带 UUID。
+    expect(screen.getByText(/上传到当前课程：Java OOP/)).toBeInTheDocument();
+    expect(screen.queryByText(/course-1/)).not.toBeInTheDocument();
+
+    // 课程列表还没加载到时（标题取不到）回落到 id，不显示 undefined。
+    storeState.courses = [];
+    render(<MaterialsDialog onClose={vi.fn()} />);
+    expect(screen.getByText(/上传到当前课程：course-1/)).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+    storeState.courses = [{ id: "course-1", title: "Java OOP" }];
   });
 });
 

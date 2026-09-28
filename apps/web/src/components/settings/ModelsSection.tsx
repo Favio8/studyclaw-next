@@ -213,7 +213,9 @@ function ProviderEditorCard({
     }
   }
 
-  /** 用表单当前值（未保存的 Base URL + 已键入但未保存的 Key）询问端点。 */
+  /** 用表单当前值（未保存的 Base URL + 已键入但未保存的 Key）询问端点。
+   *  providerId 必须带上：编辑态密钥按设计不回填浏览器（留空=保留原值），
+   *  服务端靠它去解密已存储的凭据；不带就等于不带 Authorization 打过去。 */
   async function discover() {
     setDiscovering(true);
     setDiscoverError(null);
@@ -222,6 +224,7 @@ function ProviderEditorCard({
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim() || undefined,
         apiKeyEnv: apiKey.trim() ? undefined : provider?.apiKeyEnv ?? undefined,
+        providerId: apiKey.trim() ? undefined : provider?.id ?? undefined,
       });
       setCandidates(result.models);
       // 已配置过的候选默认不勾选：采纳选择绝不覆盖用户已调优的容量。

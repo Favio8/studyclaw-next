@@ -149,7 +149,7 @@ export interface HostServices {
     get(): Promise<Record<string, unknown>>
     update(partial: Record<string, unknown>): Promise<Record<string, unknown>>
     catalog(): Promise<Array<Record<string, unknown>>>
-    discover(input: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null }): Promise<Array<Record<string, unknown>>>
+    discover(input: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null; providerId?: string | null }): Promise<Array<Record<string, unknown>>>
     save(input: Record<string, unknown>): Promise<Record<string, unknown>>
     remove(providerId: string): Promise<Record<string, unknown>>
     activate(providerId: string): Promise<Record<string, unknown>>
@@ -551,9 +551,9 @@ const handlers = {
     },
   },
   'settings.discoverModels': {
-    payload: z.object({ baseUrl: z.string().min(1), apiKey: z.string().nullish(), apiKeyEnv: z.string().nullish() }),
+    payload: z.object({ baseUrl: z.string().min(1), apiKey: z.string().nullish(), apiKeyEnv: z.string().nullish(), providerId: z.string().nullish() }),
     async run(
-      payload: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null },
+      payload: { baseUrl: string; apiKey?: string | null; apiKeyEnv?: string | null; providerId?: string | null },
       services: HostServices,
     ): Promise<RpcResponse<{ models: Array<Record<string, unknown>> }>> {
       return ok({ models: await services.settingsService.discover(payload) })
@@ -764,6 +764,21 @@ export async function dispatch(
     }
     if (message.startsWith('审批请求不存在:')) {
       return err('approval-not-found', message)
+    }
+    // 模型端点探测/网页摄取的高层可行动错误：消息里只有 HTTP 状态码、"无法连接"、
+    // "不支持的内容类型"这类提示，不含路径/密钥/内部细节，可以原样透出。
+    // 旧实现把它们吞进"请求失败（详见宿主日志）"——设置页的「从端点获取」于是
+    // 只剩一句无从下手的话，用户无法区分是 Key 错、Base URL 错还是端点没起。
+    if (
+      message.startsWith('端点返回 HTTP')
+      || message.startsWith('无法连接模型端点')
+      || message.startsWith('Base URL')
+      || message.startsWith('环境变量名不在允许列表内')
+      || message.startsWith('不支持的内容类型')
+      || message.startsWith('来源服务器未声明 Content-Type')
+      || message.startsWith('抓取失败: HTTP')
+    ) {
+      return err('invalid-request', message)
     }
     // 加固2：未知错误不回显原始消息（可能含文件路径/内部细节）——细节落日志，
     // 调用方只拿到可行动的高层提示。

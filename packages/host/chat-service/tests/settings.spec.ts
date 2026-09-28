@@ -388,4 +388,56 @@ describe('settings domain', () => {
       await new Promise<void>(resolve => server.close(() => resolve()))
     }
   })
+
+  it('发现端点 401 时区分"未携带密钥"与"密钥被拒"', async () => {
+    const server: Server = createServer((req, res) => {
+      const ok = req.headers.authorization === 'Bearer correct-key'
+      res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' })
+      res.end(ok ? JSON.stringify({ data: [{ id: 'ok-model' }] }) : JSON.stringify({ error: 'unauthorized' }))
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const baseUrl = typeof address === 'object' && address !== null ? `http://127.0.0.1:${address.port}/v1` : ''
+    try {
+      // 不带密钥 → 提示"未携带"，不再冤枉用户的 Key。
+      await expect(discoverModels({ baseUrl })).rejects.toThrow('本次探测未携带 API Key')
+      // 带了错误密钥仍 401 → 才是 Key 的问题。
+      await expect(discoverModels({ baseUrl, apiKey: 'wrong' })).rejects.toThrow('请检查 API Key 是否正确')
+      // 正确密钥 → 正常拿到目录（两条路径的缓存键不同，互不干扰）。
+      const models = await discoverModels({ baseUrl, apiKey: 'correct-key' })
+      expect(models.map(m => m.id)).toEqual(['ok-model'])
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('设置页发现链路：表单空密钥 + providerId → 服务端解析已存凭据并带上', async () => {
+    // 复现用户遇到的 401：编辑既有 provider 时表单密钥按设计留空，旧实现只认
+    // process.env，于是探测永远不带 Authorization。现在由调用方（bin.ts 的
+    // settingsService.discover）按 providerId 解析加密凭据后传进来。
+    let sawAuthorization = ''
+    const server: Server = createServer((req, res) => {
+      sawAuthorization = req.headers.authorization ?? ''
+      res.writeHead(sawAuthorization === '' ? 401 : 200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'stored-model' }] }))
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    const baseUrl = `http://127.0.0.1:${port}/v1`
+    const { root, ws } = await setup()
+    try {
+      await saveProvider(ws, { id: 'stored', name: '已存', model: 'm', baseUrl })
+      await setCredential(ws, 'stored', 'sk-stored-secret')
+      // 模拟 bin.ts 的解析：表单没填 key → 用 loadChatConfig 取已存凭据。
+      const resolved = await loadChatConfig(ws, { providerId: 'stored' })
+      expect(resolved.apiKey).toBe('sk-stored-secret')
+      const models = await discoverModels({ baseUrl, apiKey: resolved.apiKey, refresh: true })
+      expect(models.map(m => m.id)).toEqual(['stored-model'])
+      expect(sawAuthorization).toBe('Bearer sk-stored-secret')
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

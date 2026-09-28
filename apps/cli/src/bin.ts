@@ -687,7 +687,25 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       update: async partial => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '更新设置'); return updateSettings(registry.lastOpenedPath, partial) as unknown as Record<string, unknown> },
       catalog: async () => providerCatalog() as unknown as Array<Record<string, unknown>>,
       // M6：设置页「从端点获取」永远实时探测；sessionModels 的自动发现才走缓存。
-      discover: async input => discoverModels({ ...input, refresh: true }) as unknown as Array<Record<string, unknown>>,
+      // 密钥解析优先级：表单新填 > 已加密存储的凭据（按 providerId 取，与 chat /
+      // sessionModels 同一来源）> 环境变量。旧实现只认前两者中的第一项和
+      // process.env——编辑既有 provider 时表单密钥按设计留空，于是「从端点获取」
+      // 永远不带 Authorization 打过去，稳定 401（用户看到"请检查 API Key"，
+      // 但密钥其实是对的、只是没被带上）。
+      discover: async input => {
+        let apiKey = input.apiKey?.trim() ?? ''
+        const providerId = input.providerId?.trim() ?? ''
+        if (apiKey === '' && providerId !== '' && registry.lastOpenedPath !== '') {
+          const resolved = await loadChatConfig(registry.lastOpenedPath, { providerId }).catch(() => null)
+          apiKey = resolved?.apiKey ?? ''
+        }
+        return discoverModels({
+          baseUrl: input.baseUrl,
+          apiKey: apiKey === '' ? null : apiKey,
+          apiKeyEnv: input.apiKeyEnv ?? null,
+          refresh: true,
+        }) as unknown as Array<Record<string, unknown>>
+      },
       save: async input => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存模型供应商'); return saveProvider(registry.lastOpenedPath, input as Parameters<typeof saveProvider>[1]) as unknown as Record<string, unknown> },
       remove: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '删除模型供应商'); return deleteProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
       activate: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '激活模型供应商'); return activateProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },

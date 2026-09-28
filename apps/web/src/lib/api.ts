@@ -375,8 +375,11 @@ export const api = {
   providerCatalog: () =>
     rpc<{ catalog: ProviderCatalogEntry[] }>("settings.providerCatalog"),
 
-  /** 向端点代理询问模型列表；只读探测，不落盘（api_spec §2.8 v2.6）。 */
-  discoverModels: (payload: { baseUrl: string; apiKey?: string; apiKeyEnv?: string }) =>
+  /** 向端点代理询问模型列表；只读探测，不落盘（api_spec §2.8 v2.6）。
+   *  providerId 供服务端在表单密钥为空时解析**已加密存储**的凭据（编辑态密钥
+   *  按设计不回填浏览器）——不带它时探测不带 Authorization，对已配 Key 的
+   *  provider 必然 401。 */
+  discoverModels: (payload: { baseUrl: string; apiKey?: string; apiKeyEnv?: string; providerId?: string }) =>
     rpc<{ models: ProviderModelPayload[] }>("settings.discoverModels", payload),
 
   /** 项目根候选资料枚举（api_spec §6.3，新项目向导勾选数据源）。 */

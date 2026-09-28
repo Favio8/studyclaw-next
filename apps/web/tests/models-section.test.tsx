@@ -230,12 +230,14 @@ describe("ModelsSection 模型列表", () => {
     await openAdvancedFold();
 
     fireEvent.click(screen.getByRole("button", { name: /从端点获取/ }));
-    // 用表单当前值询问：未键入 Key 时回退凭据引用
+    // 用表单当前值询问：未键入 Key 时回退凭据引用，并带 providerId 让服务端
+    // 解析已加密存储的凭据（编辑态密钥按设计不回填浏览器）。
     await waitFor(() =>
       expect(apiMocks.discoverModels).toHaveBeenCalledWith({
         baseUrl: "https://acme.example/v1",
         apiKey: undefined,
         apiKeyEnv: "ACME_API_KEY",
+        providerId: "acme",
       }),
     );
 

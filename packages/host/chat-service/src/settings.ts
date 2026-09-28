@@ -420,7 +420,13 @@ export async function discoverModels(input: { baseUrl: string; apiKey?: string |
     throw new Error('无法连接模型端点（请检查 Base URL 与网络）')
   }
   if (!response.ok) {
-    const hint = response.status === 401 || response.status === 403 ? '，请检查 API Key 是否正确' : ''
+    // 未携带密钥时的 401/403 与"密钥被拒"是两回事：旧实现一律提示
+    // "请检查 API Key 是否正确"，而编辑既有 provider 时探测本来就不带密钥
+    // （服务端未解析已存凭据时的老路），用户照提示去改一个本来正确的 Key。
+    const carried = apiKey !== null && apiKey !== ''
+    const hint = response.status === 401 || response.status === 403
+      ? carried ? '，请检查 API Key 是否正确' : '（本次探测未携带 API Key）'
+      : ''
     throw new Error(`端点返回 HTTP ${response.status}${hint}`)
   }
   const models = parseModelsPayload(await response.json())

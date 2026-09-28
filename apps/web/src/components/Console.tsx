@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, PanelRightOpen } from "lucide-react";
 import ChatArea from "@/src/components/chat/ChatArea";
 import LeftNav from "@/src/components/left/LeftNav";
 import RightPanel from "@/src/components/panel/RightPanel";
@@ -51,6 +51,10 @@ export default function Console() {
   );
   const [detailsWidth, setDetailsWidth] = useState(DETAILS_DEFAULT);
   const effectiveSidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
+  // 右栏折叠：第三列归零、section display:none（不卸载，Tab/进行中状态保留）。
+  const rightPanelCollapsed = useAppStore((s) => s.rightPanelCollapsed);
+  const setRightPanelCollapsed = useAppStore((s) => s.setRightPanelCollapsed);
+  const effectiveDetailsWidth = rightPanelCollapsed ? 0 : detailsWidth;
   const [dragging, setDragging] = useState<null | "sidebar" | "details">(null);
   // FL-22：宿主心跳。旧版 api.workspaces() 失败被静默吞掉且"左栏错误横幅"
   // 根本不存在——用户只起了 next dev 忘了起 studyclaw serve 时，三栏空壳、
@@ -189,7 +193,7 @@ export default function Console() {
       data-dragging={dragging ? "" : undefined}
       className="relative grid h-screen overflow-hidden bg-bg-panel transition-[grid-template-columns] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] data-[dragging]:transition-none"
       style={{
-        gridTemplateColumns: `${effectiveSidebarWidth}px minmax(0, 1fr) ${detailsWidth}px`,
+        gridTemplateColumns: `${effectiveSidebarWidth}px minmax(0, 1fr) ${effectiveDetailsWidth}px`,
       }}
     >
       {/* 左栏：sidebar-fill 底 + l1 hairline 右边线（DSH sidebarCol） */}
@@ -202,8 +206,8 @@ export default function Console() {
         <ChatArea />
       </main>
 
-      {/* 右栏：l2 hairline 左边线（DSH detailsCol） */}
-      <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-l border-border-line">
+      {/* 右栏：l2 hairline 左边线（DSH detailsCol）；折叠时整体隐藏（不卸载） */}
+      <section className={`min-h-0 min-w-0 flex-col overflow-hidden border-l border-border-line ${rightPanelCollapsed ? "hidden" : "flex"}`}>
         <RightPanel />
       </section>
 
@@ -220,13 +224,26 @@ export default function Console() {
         role="separator"
         aria-orientation="vertical"
         aria-label="调整右栏宽度"
-        onPointerDown={startDrag("details")}
-        className="group absolute bottom-0 top-0 z-10 w-2 translate-x-1/2 cursor-col-resize touch-none"
-        style={{ left: `calc(100% - ${detailsWidth}px)` }}
+        onPointerDown={rightPanelCollapsed ? undefined : startDrag("details")}
+        className={`group absolute bottom-0 top-0 z-10 w-2 translate-x-1/2 cursor-col-resize touch-none ${rightPanelCollapsed ? "hidden" : ""}`}
+        style={{ left: `calc(100% - ${effectiveDetailsWidth}px)` }}
       >
         {/* hover 胶囊（DSH：12×32 圆条，白底 l2 边） */}
         <span className="pointer-events-none absolute top-1/2 left-1/2 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-[10px] border border-border-line bg-bg-panel opacity-0 shadow-lv2 transition-opacity duration-150 group-hover:opacity-100" />
       </div>
+
+      {/* 右栏收起态的浮动展开钮：右边缘垂直居中（与右栏头部折叠钮 / Ctrl+B 同效） */}
+      {rightPanelCollapsed ? (
+        <button
+          type="button"
+          aria-label="展开右栏"
+          title="展开右栏（Ctrl+B）"
+          onClick={() => setRightPanelCollapsed(false)}
+          className="absolute top-1/2 right-2 z-10 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-border-line bg-bg-panel text-text-muted shadow-lv2 transition-colors hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+        >
+          <PanelRightOpen size={15} strokeWidth={1.8} aria-hidden />
+        </button>
+      ) : null}
 
       {/* FL-22：后端未启动横幅（8s 心跳持续探测，恢复后自动消失） */}
       {hostUp === false ? (

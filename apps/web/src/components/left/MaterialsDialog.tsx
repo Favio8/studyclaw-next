@@ -80,8 +80,10 @@ async function awaitBuild(
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     report("✗ 构建超时");
+    return null;
   } catch {
     report("✗ 构建状态查询失败");
+    return null;
   }
 }
 

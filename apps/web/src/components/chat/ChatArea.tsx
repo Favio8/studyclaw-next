@@ -39,7 +39,7 @@ export default function ChatArea() {
   const sessionBanner = useAppStore((s) => s.sessionBanner);
   const wakeupCard = useAppStore((s) => s.wakeupCard);
   const suggestedEntry = useAppStore((s) => s.suggestedEntry);
-  const modeBanner = useAppStore((s) => s.modeB);
+  const modeBanner = useAppStore((s) => s.modeBanner);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const setWizardOpen = useAppStore((s) => s.setWizardOpen);
   const { send, answer, retryLast, stop } = useChatStream();

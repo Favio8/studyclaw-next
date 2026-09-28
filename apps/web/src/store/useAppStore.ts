@@ -231,7 +231,7 @@ interface AppState {
   setComposerDraft: (key: string, draft: string) => void;
   setActiveTab: (tab: PanelTab) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
-  setLastImport: (value: AppState["lastImport"]) => void;
+  setLastImport: (value: AppState["lastImport"] | ((prev: AppState["lastImport"]) => AppState["lastImport"])) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
   setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
@@ -410,7 +410,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       badges: { ...state.badges, [tab]: false }, // 查看即清除角标
     })),
   setRightPanelCollapsed: (rightPanelCollapsed) => set({ rightPanelCollapsed }),
-  setLastImport: (lastImport) => set({ lastImport }),
+  setLastImport: (value) =>
+    set((state) => ({
+      lastImport: typeof value === "function" ? value(state.lastImport) : value,
+    })),
   toggleBadge: (tab, on) =>
     set((state) => ({ badges: { ...state.badges, [tab]: on } })),
   setPanelData: (patch) => set(patch),

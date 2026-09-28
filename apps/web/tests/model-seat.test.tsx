@@ -97,4 +97,58 @@ describe("ModelSeat 输入栏模型座位", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
   });
+
+  it("模型名已含厂商名时不再重复显示 provider（DeepSeek-V4.1-Flash · deepseek）", async () => {
+    apiMocks.sessionModels.mockResolvedValue({
+      current: { provider: "deepseek", model: "DeepSeek-V4.1-Flash" },
+      routable: true,
+      groups: [{ id: "deepseek", name: "DeepSeek", models: [{ id: "DeepSeek-V4.1-Flash", name: "DeepSeek-V4.1-Flash", contextWindow: null, maxTokens: null }] }],
+      failures: [],
+    });
+    storeState.activeModel = { providerId: "deepseek", model: "DeepSeek-V4.1-Flash" };
+    render(<ModelSeat />);
+    const seat = screen.getByRole("button", { name: /DeepSeek-V4\.1-Flash/ });
+    expect(seat.textContent).not.toContain("deepseek");
+    // 完整信息不丢：悬停 title 里仍有 provider / model id。
+    expect(seat.getAttribute("title")).toContain("provider: deepseek");
+    expect(seat.getAttribute("title")).toContain("id: DeepSeek-V4.1-Flash");
+  });
+
+  it("provider 补充信息时仍显示（qwen3.8-27b-fp8 · qwen-lab）", async () => {
+    storeState.activeModel = { providerId: "qwen-lab", model: "qwen3.8-27b-fp8" };
+    render(<ModelSeat />);
+    const seat = screen.getByRole("button", { name: /qwen3\.8-27b-fp8/ });
+    expect(seat.textContent).toContain("qwen-lab");
+  });
+
+  it("设置了思考强度时在座位里带出小徽章", async () => {
+    const withEffort = {
+      ...directory,
+      current: { provider: "acme", model: "acme-small", effort: "high" },
+      groups: [{ ...directory.groups[0], models: [{ ...directory.groups[0].models[0], efforts: [
+        { id: "off", name: "Off" },
+        { id: "high", name: "High", description: "更深的推理" },
+      ] }] }],
+    };
+    apiMocks.sessionModels.mockResolvedValue(withEffort);
+    storeState.activeModel = { providerId: "acme", model: "acme-small", effort: "high" };
+    render(<ModelSeat />);
+    // 先打开一次菜单让目录加载（efforts 的显示名来自目录），否则徽章只能回落原始 id。
+    // 打开前 caption 是 model id（acme-small），打开后目录加载、caption 变成显示名
+    // （Acme Small）——所以两步用不同匹配。
+    fireEvent.click(screen.getByRole("button", { name: /acme-small/ }));
+    await screen.findByRole("menu", { name: "选择模型" });
+    const seat = screen.getByRole("button", { name: /acme small/i });
+    expect(seat.textContent).toContain("High");
+    expect(seat.getAttribute("title")).toContain("思考强度: High");
+  });
+
+  it("未设置思考强度时不显示徽章（不制造噪音）", async () => {
+    apiMocks.sessionModels.mockResolvedValue(directory);
+    storeState.activeModel = { providerId: "acme", model: "acme-small" };
+    render(<ModelSeat />);
+    const seat = screen.getByRole("button", { name: /acme-small/ });
+    expect(seat.textContent).not.toContain("跟随模型默认");
+    expect(seat.getAttribute("title") ?? "").not.toContain("思考强度");
+  });
 });

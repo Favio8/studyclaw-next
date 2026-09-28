@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, RotateCw, Settings2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, RotateCw, Settings2, Sparkles } from "lucide-react";
 import { api } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { SessionModelDirectory, SessionModelEntry, SessionModelGroup, SettingsPayload } from "@/src/types/api";
@@ -104,10 +104,32 @@ export default function ModelSeat() {
   const efforts = currentModel?.efforts ?? [];
   const currentEffort = current?.effort ?? null;
   const currentModelId = current?.model ?? "";
+  // ① 模型名里已经带了厂商名时（DeepSeek-V4.1-Flash · deepseek）不再重复显示
+  // provider；只有它确实补充信息时才显示（如 qwen3.8-27b-fp8 · qwen-lab）。
+  const providerRedundant = currentProvider !== "" && caption.toLowerCase().includes(currentProvider.toLowerCase());
+  // 完整信息进 title：座位只有一行宽，排查时需要的 provider / model id / 思考强度
+  // 不该挤占视觉，悬停即可全量可见（provider 即使在视觉上冗余也要进 title）。
+  const modelTitle = [
+    caption,
+    currentProvider === "" ? "" : `provider: ${currentProvider}`,
+    currentModelId === "" ? "" : `id: ${currentModelId}`,
+    current?.effort ? `思考强度: ${effortName}` : "",
+  ].filter(part => part !== "").join(" · ") || "选择模型";
 
   return <div ref={rootRef} className="relative">
-    <button type="button" aria-expanded={open} aria-haspopup="menu" title="选择模型" onClick={() => { setOpen((value) => !value); setPane("root"); }} className="flex h-7 max-w-[240px] items-center gap-1 rounded-lg bg-bg-card px-2 text-[13px] font-medium leading-5 text-text-primary">
-      <span className="max-w-[150px] truncate">{caption}</span><span className="text-[10px] text-text-faint">{currentProvider ? `· ${currentProvider}` : ""}</span><ChevronDown size={12} aria-hidden />
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-haspopup="menu"
+      title={modelTitle}
+      onClick={() => { setOpen((value) => !value); setPane("root"); }}
+      className="flex h-7 max-w-[260px] items-center gap-1.5 rounded-lg border border-border-faint bg-bg-card/60 px-2 text-[13px] font-medium leading-5 text-text-primary transition-colors hover:bg-bg-card"
+    >
+      <Sparkles size={13} strokeWidth={1.8} className="shrink-0 text-text-faint" aria-hidden />
+      <span className="max-w-[168px] truncate">{caption}</span>
+      {!providerRedundant && currentProvider !== "" ? <span className="shrink-0 text-[10px] font-normal text-text-faint">{currentProvider}</span> : null}
+      {current?.effort ? <span className="shrink-0 rounded bg-bg-panel px-1 text-[10px] font-normal leading-4 text-text-faint">{effortName}</span> : null}
+      <ChevronDown size={12} className="shrink-0 text-text-faint" aria-hidden />
     </button>
     {open ? <div role="menu" aria-label="选择模型" className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-80 rounded-xl border border-border-line bg-bg-panel p-1 shadow-lv3">
       {pane === "root" ? <>

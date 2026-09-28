@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { storeState, apiMocks } = vi.hoisted(() => {
@@ -129,5 +129,20 @@ describe("ChatInput session drafts", () => {
     expect(screen.getByLabelText("已附加课程资料")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "移除附件 sources/intro.md" }));
     expect(storeState.setComposerDraft).toHaveBeenLastCalledWith(draftKey(), "");
+  });
+});
+
+describe("ChatInput 模式分段控件", () => {
+  it("四个模式收成一个 group，激活项 aria-pressed 且点击切换", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    const group = screen.getByRole("group", { name: "学习模式" });
+    // 默认 socratic：苏格拉底为激活态。
+    const socratic = within(group).getByRole("button", { name: "苏格拉底" });
+    expect(socratic).toHaveAttribute("aria-pressed", "true");
+    expect(within(group).getByRole("button", { name: "极速冲刺" })).toHaveAttribute("aria-pressed", "false");
+
+    // 点击切换（store 的 setMode 被调用），且 pressed 状态随 mode 转移。
+    fireEvent.click(within(group).getByRole("button", { name: "费曼输出" }));
+    expect(storeState.setMode).toHaveBeenCalledWith("feynman");
   });
 });

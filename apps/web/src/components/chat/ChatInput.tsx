@@ -281,24 +281,32 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
         ) : null}
 
         <div className="flex items-center justify-between gap-3 px-2 pb-1.5">
-          <div className="flex items-center gap-3">
-            <button type="button" aria-label="打开指令面板" title="指令与快捷操作（Ctrl+K）" onClick={() => setPaletteOpen(true)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-selector text-[14px] leading-none text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"><Plus size={15} strokeWidth={1.8} aria-hidden /></button>
-            <div data-attachment-menu className="relative">
-              <button type="button" aria-label="添加课程资料" title="添加课程资料（也可拖入当前资料）" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-selector text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"><Paperclip size={14} strokeWidth={1.8} aria-hidden /></button>
-              {attachmentMenuOpen ? (
-                <div role="listbox" aria-label="课程资料" className="absolute bottom-[calc(100%+8px)] left-0 z-30 max-h-64 w-72 overflow-y-auto rounded-xl border border-border-line bg-bg-panel p-1.5 shadow-lv3">
-                  {files.length === 0 ? <div className="px-3 py-2 text-xs text-text-faint">当前课程没有可引用资料</div> : files.slice(0, 50).map((file) => {
-                    const attached = value.includes(`@${file.relative}`);
-                    return <button key={file.relative} type="button" role="option" aria-selected={attached} onMouseDown={(event) => { event.preventDefault(); appendAttachment(file); }} className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs ${attached ? "bg-code-inline text-accent-focus" : "text-text-muted hover:bg-bg-card"}`}><FileText size={13} aria-hidden /><span className="min-w-0 flex-1 truncate">{file.relative}</span>{attached ? <span aria-hidden>✓</span> : null}</button>;
-                  })}
-                </div>
-              ) : null}
+          {/* ③ 三段分组：工具 / 模型 / 模式——段间 1px 淡线，颜色从四种降到三种，
+              激活态与悬停都有明确层级。 */}
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex shrink-0 items-center gap-1.5">
+              <button type="button" aria-label="打开指令面板" title="指令与快捷操作（Ctrl+K）" onClick={() => setPaletteOpen(true)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-selector text-[14px] leading-none text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"><Plus size={15} strokeWidth={1.8} aria-hidden /></button>
+              <div data-attachment-menu className="relative">
+                <button type="button" aria-label="添加课程资料" title="添加课程资料（也可拖入当前资料）" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-selector text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"><Paperclip size={14} strokeWidth={1.8} aria-hidden /></button>
+                {attachmentMenuOpen ? (
+                  <div role="listbox" aria-label="课程资料" className="absolute bottom-[calc(100%+8px)] left-0 z-30 max-h-64 w-72 overflow-y-auto rounded-xl border border-border-line bg-bg-panel p-1.5 shadow-lv3">
+                    {files.length === 0 ? <div className="px-3 py-2 text-xs text-text-faint">当前课程没有可引用资料</div> : files.slice(0, 50).map((file) => {
+                      const attached = value.includes(`@${file.relative}`);
+                      return <button key={file.relative} type="button" role="option" aria-selected={attached} onMouseDown={(event) => { event.preventDefault(); appendAttachment(file); }} className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs ${attached ? "bg-code-inline text-accent-focus" : "text-text-muted hover:bg-bg-card"}`}><FileText size={13} aria-hidden /><span className="min-w-0 flex-1 truncate">{file.relative}</span>{attached ? <span aria-hidden>✓</span> : null}</button>;
+                    })}
+                  </div>
+                ) : null}
+              </div>
             </div>
+            <span aria-hidden className="h-4 w-px shrink-0 bg-border-faint" />
             <ModelSeat />
-            <div className="hidden min-[1180px]:flex items-center gap-2">
+            <span aria-hidden className="h-4 w-px shrink-0 bg-border-faint" />
+            {/* ② 模式分段控件：四项收进一个容器，激活项白底+轻投影"浮起"，
+                而不是只换一抹灰底（旧实现在截图里几乎看不出谁选中）。 */}
+            <div role="group" aria-label="学习模式" className="hidden min-[1180px]:flex items-center gap-0.5 rounded-xl border border-border-faint bg-bg-card/50 p-0.5">
               {MODES.map((item) => {
                 const active = item.value === mode;
-                return <button key={item.value} type="button" title={`切换到${item.label}模式`} onClick={() => chooseMode(item)} className={`h-7 rounded-lg px-2 text-[13px] font-medium leading-5 transition-colors ${active ? "bg-bg-card text-text-primary" : "text-text-muted hover:bg-black/[0.06] hover:text-text-primary"}`}>{item.label}</button>;
+                return <button key={item.value} type="button" aria-pressed={active} title={`切换到${item.label}模式`} onClick={() => chooseMode(item)} className={`h-6 rounded-lg px-2 text-[13px] font-medium leading-5 transition-all ${active ? "bg-bg-panel text-text-primary shadow-[0_1px_2px_rgba(0,0,0,0.06)]" : "text-text-muted hover:text-text-primary"}`}>{item.label}</button>;
               })}
             </div>
             <div data-mode-menu className="relative flex min-[1180px]:hidden">

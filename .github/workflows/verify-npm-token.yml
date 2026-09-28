@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # setup-node@v5 会按 lockfile 自动缓存包管理器——必须先装好 pnpm，
+      # 否则它报 "Unable to locate executable file: pnpm"（本临时 workflow 实测）。
+      - uses: pnpm/action-setup@v4.4.0
+        with:
+          version: 11.7.0
       - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0

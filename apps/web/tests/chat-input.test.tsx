@@ -132,17 +132,34 @@ describe("ChatInput session drafts", () => {
   });
 });
 
-describe("ChatInput 模式分段控件", () => {
-  it("四个模式收成一个 group，激活项 aria-pressed 且点击切换", () => {
+describe("ChatInput 模式单控件", () => {
+  it("只显示当前模式，点开菜单可切换（aria-checked 跟随、选中即关）", () => {
     render(<ChatInput onSend={vi.fn()} />);
-    const group = screen.getByRole("group", { name: "学习模式" });
-    // 默认 socratic：苏格拉底为激活态。
-    const socratic = within(group).getByRole("button", { name: "苏格拉底" });
-    expect(socratic).toHaveAttribute("aria-pressed", "true");
-    expect(within(group).getByRole("button", { name: "极速冲刺" })).toHaveAttribute("aria-pressed", "false");
+    // 触发器只显示当前模式；四个模式不再平铺成行（旧分段控件在窄行会把
+    // CJK 按字折断成两行，故收成单控件）。
+    const trigger = screen.getByRole("button", { name: "苏格拉底" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    expect(screen.queryByRole("button", { name: "极速冲刺" })).toBeNull();
 
-    // 点击切换（store 的 setMode 被调用），且 pressed 状态随 mode 转移。
-    fireEvent.click(within(group).getByRole("button", { name: "费曼输出" }));
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu", { name: "切换学习模式" });
+    expect(within(menu).getByRole("menuitemradio", { name: "苏格拉底" })).toHaveAttribute("aria-checked", "true");
+    expect(within(menu).getByRole("menuitemradio", { name: "费曼输出" })).toHaveAttribute("aria-checked", "false");
+
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "费曼输出" }));
     expect(storeState.setMode).toHaveBeenCalledWith("feynman");
+    // 选中后菜单关闭（chooseMode 既有行为）。
+    expect(screen.queryByRole("menu", { name: "切换学习模式" })).toBeNull();
+  });
+
+  it("控件不被行内空间压缩（shrink-0 + 内部 truncate，CJK 不折字）", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "苏格拉底" });
+    const wrapper = trigger.closest("[data-mode-menu]");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper).toHaveClass("shrink-0");
+    // 标签自身也有 truncate 兜底。
+    expect(trigger.querySelector("span")).toHaveClass("truncate");
   });
 });

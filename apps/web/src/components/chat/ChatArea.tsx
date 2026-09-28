@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Plus } from "lucide-react";
 import ChatInput from "@/src/components/chat/ChatInput";
 import MessageCard from "@/src/components/chat/MessageCard";
 import StatsLine from "@/src/components/chat/StatsLine";
@@ -39,8 +39,9 @@ export default function ChatArea() {
   const sessionBanner = useAppStore((s) => s.sessionBanner);
   const wakeupCard = useAppStore((s) => s.wakeupCard);
   const suggestedEntry = useAppStore((s) => s.suggestedEntry);
-  const modeBanner = useAppStore((s) => s.modeBanner);
+  const modeBanner = useAppStore((s) => s.modeB);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
+  const setWizardOpen = useAppStore((s) => s.setWizardOpen);
   const { send, answer, retryLast, stop } = useChatStream();
   const { forkSession } = useSessionActions();
 
@@ -70,11 +71,25 @@ export default function ChatArea() {
   }
 
   if (!activeCourseId) {
+    // 空态：旧实现只让用户"去左栏点添加项目"——中栏这片唯一有注意力的地方
+    // 却是死端（没有 composer、没有按钮）。直接把入口建在这里。
     return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+        <Clawzy size={56} ariaLabel="爪爪" />
         <p className="text-[15px] text-text-muted">还没有学习项目</p>
-        <p className="text-[13px] text-text-faint">
-          在左栏点击「添加项目」打开学习项目，或先启动后端 studyclaw serve
+        <p className="max-w-[380px] text-[13px] leading-6 text-text-faint">
+          项目就是一个文件夹——资料、学习进度都在里面。添加后就能在这里和导师对话。
+        </p>
+        <button
+          type="button"
+          onClick={() => setWizardOpen(true)}
+          className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-border-line bg-bg-panel px-4 text-[14px] font-medium text-text-primary transition-colors hover:bg-bg-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+        >
+          <Plus size={15} strokeWidth={1.8} aria-hidden />
+          添加项目
+        </button>
+        <p className="text-[12px] leading-5 text-text-caption">
+          如果刚刚启动，也可以先确认后端已在运行（studyclaw serve）
         </p>
       </div>
     );
@@ -202,7 +217,8 @@ export default function ChatArea() {
                 今天学点什么？
               </h1>
               {/* 快捷键可发现性：此前只有 tooltip 里藏着一句，新用户无从得知。
-                  hero 态（无历史消息）展示一行轻量提示，进入对话后自动消失。 */}
+                  hero 态（无历史消息）展示一行轻量提示，进入对话后自动消失。
+                  （没有项目的空态由上方 early-return 负责，那里给添加项目入口。） */}
               <p className="relative mb-3 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[12px] leading-5 text-text-faint">
                 <span><span className="font-mono text-text-caption">Ctrl+K</span> 命令面板</span>
                 <span aria-hidden className="text-text-caption">·</span>

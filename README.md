@@ -274,10 +274,11 @@ studyclaw-next/
 ## 路线图
 
 - [x] M0–M4：工作区注册表、课程构建、事件流会话、23 工具与审批、Agent Runtime（对齐 dsh）、三栏控制台、Rubric + SM-2 学习闭环
-- [x] npm 打包链路：CLI 单 Bundle、静态托管、发布三道门禁、供应链 CVE 处理
+- [x] npm 打包与发布链路：CLI 单 Bundle、静态托管、发布三道门禁、供应链 CVE 处理（`@studyclaw/cli@0.1.1-beta` 已实发至 registry.npmjs.org）
 - [x] 吉祥物 Clawzy、交互演示块、选择题本地快判、评测快路由
-- [x] **桌面壳（Electron + sidecar，免装 Node）**：Windows 安装包验证通过，macOS/Linux 借 CI 矩阵
-- [ ] **v0.1.0-beta**：跨平台真机验证（macOS/Linux）、社区 Issue 模板、浏览器级 E2E
+- [x] **桌面壳（Electron + sidecar，免装 Node）**：Windows 安装包验证通过，macOS 有 CI 整机冒烟（Linux 仅出包、未跑应用）
+- [x] 社区 Issue 模板：bug / feature / 安全上报分流（`.github/ISSUE_TEMPLATE/`）
+- [ ] **v0.1.x 收尾**：跨平台真机验证（macOS/Linux 人工各跑一次安装与 `studyclaw status`）、浏览器级 E2E（当前为 jsdom 组件测试 + HTTP/SSE 集成测试，无真浏览器路径）
 - [ ] `studyclaw course` 顶层命令接线
 - [ ] 国际化（i18n）与英文界面
 - [ ] 可选的在线 / 多端同步形态（坚持端到端加密、本地优先不动摇）

@@ -1,0 +1,40 @@
+name: Verify npm token (temporary)
+
+# 临时只读校验：确认 NPM_TOKEN secret 名称正确、令牌有效、且对 @studyclaw
+# 有 read/write。不发布任何包——跑完即删。
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+      - name: Secret present?
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is missing or empty"
+            exit 1
+          fi
+          echo "NPM_TOKEN present (length=${#NPM_TOKEN})"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Authenticate and probe scope (read-only)
+        run: |
+          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/.npmrc
+          echo "--- registry ---"
+          npm config get registry
+          echo "--- ping ---"
+          npm ping --registry https://registry.npmjs.org/ || true
+          echo "--- whoami ---"
+          npm whoami --registry https://registry.npmjs.org/ || echo "(whoami unavailable for this token type)"
+          echo "--- package access granted to this token ---"
+          npm access list packages --registry https://registry.npmjs.org/ || true
+          echo "--- current package visibility ---"
+          npm view @studyclaw/cli version dist-tags --registry https://registry.npmjs.org/ 2>&1 \
+            || echo "(@studyclaw/cli not published yet — expected before the first release)"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

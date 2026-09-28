@@ -11,7 +11,9 @@ const { storeState, selectSession, createSession, renameSession, forkSession, ar
         lastActiveAt: "2026-08-20T00:00:00Z",
       },
     ],
-    activeCourseId: "course-1",
+    // 显式宽成 string | null：用例会切到 null 验证"无打开课程"分支（next build
+    // 连测试文件一起类型检查，推断成 string 会给 `= null` 报 TS2322）。
+    activeCourseId: "course-1" as string | null,
     courseSessions: {
       "course-1": [
         {

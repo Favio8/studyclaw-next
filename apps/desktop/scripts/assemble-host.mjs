@@ -31,7 +31,15 @@ function run(cmd, args, cwd, label, opts = {}) {
   if (env.npm_config_cache === undefined) {
     env.npm_config_cache = join(env.HOME ?? env.USERPROFILE ?? '.', '.npm-cache')
   }
-  const r = spawnSync(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32', env })
+  // shell: true 时 Node 把 `cmd + ' ' + args.join(' ')` 直接交给 shell，**不自动
+  // 加引号**——Node 装在 `C:\Program Files\nodejs` 这类带空格路径时（Windows
+  // 默认安装位置！）可执行文件被劈成 `C:\Program`，报"不是内部或外部命令"，
+  // 整个 `--build` 必败（CI runner 的 node 无空格，所以一直没暴露）。
+  // 修法：自己拼好带引号的命令行，作为单一字符串交给 shell（保留 shell 是为了
+  // Windows 上能跑 npm.cmd 这类 shim）。
+  const quote = (value) => (/[\s&|<>^"]/.test(value) ? `"${value}"` : value)
+  const command = [quote(cmd), ...args.map(quote)].join(' ')
+  const r = spawnSync(command, { cwd, stdio: 'inherit', shell: true, env })
   if (r.status !== 0) {
     // soft：安装器偶发的非致命退出码（如 pnpm 的 ignored-builds 警告）交由
     // 调用方做产物硬校验，脚本在此不直接失败。
@@ -39,7 +47,7 @@ function run(cmd, args, cwd, label, opts = {}) {
       console.warn(`[assemble] ${label ?? `${cmd} ${args.join(' ')}`} exited ${r.status} (soft failure, validating artifacts)`)
       return
     }
-    throw new Error(`[assemble] ${label ?? `${cmd} ${args.join(' ')}`} failed (exit ${r.status})`)
+    throw new Error(`[assemble] ${label ?? `${cmd} ${args.join(' ')}`} failed (exit ${r.status}) [command: ${command}]`)
   }
 }
 

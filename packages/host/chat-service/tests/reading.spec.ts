@@ -37,6 +37,13 @@ const HIGHLIGHT_INPUT = {
 }
 
 describe('ReadingService 标注', () => {
+  it('load：目录与缺失文件都判为不存在', async () => {
+    const root = await workspace()
+    const service = new ReadingService()
+    expect((await service.load(root, 'sources/missing.pdf')).exists).toBe(false)
+    expect((await service.load(root, 'sources')).exists).toBe(false)
+  })
+
   it('add → list → update → remove 全链路，落盘 annotations.json', async () => {
     const root = await workspace()
     const service = new ReadingService()

@@ -59,6 +59,7 @@ import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
 import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from './lib/http-guards.ts'
 import { installHostFileLogging } from './lib/host-logger.ts'
+import { installProcessGuards } from './lib/process-guards.ts'
 import { createStaticHost } from './lib/static-host.ts'
 import type { StaticHost } from './lib/static-host.ts'
 import { quizCommand } from './commands/quiz.ts'
@@ -1727,6 +1728,8 @@ async function migrateSessions(sessionId?: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // 尽早装进程兜底：serve 里任何游离的 rejection 都不该带走整个宿主。
+  installProcessGuards()
   const args = process.argv.slice(2)
   const command = args[0]
   if (command === 'serve') {

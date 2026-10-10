@@ -162,6 +162,13 @@ export default function MarkdownView({
   bubble?: boolean;
   streaming?: boolean;
 }) {
+  // Hook 必须在早退之前调用：bubble 分支提前 return 会让两次渲染的 Hook
+  // 数量不一致（Rules of Hooks）。bubble 路径本就渲染纯文本，不需要分段，
+  // 所以在 memo 内按 bubble 短路，而不是把调用挪到早退之后。
+  const segments = useMemo(
+    () => (bubble ? [] : splitVizSegments(content)),
+    [bubble, content],
+  );
   if (bubble) {
     return (
       <p className="whitespace-pre-wrap break-words text-[16px] leading-6">
@@ -169,7 +176,6 @@ export default function MarkdownView({
       </p>
     );
   }
-  const segments = useMemo(() => splitVizSegments(content), [content]);
   return (
     <div
       data-markdown-view=""

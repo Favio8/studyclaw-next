@@ -5,7 +5,28 @@
 
 ## [Unreleased]
 
-辅助阅读（PRD 需求三）整条线落地，含两处真机验收抓到的交互缺陷修复。
+辅助阅读（PRD 需求三）整条线落地，含本轮排查修复的缺陷。
+
+### 修复
+
+- **打开资料时整读文件**：`reading.load` 判定资料是否存在时用
+  `readFile(path, 'utf8')`，只为拿一个布尔值就把整份 PDF 读进内存再丢弃。
+  实测 200MB 文件 110ms vs `stat` 0.115ms（约三个数量级），且每次点开资料
+  都会走这条路径；扫描版大 PDF 上是纯粹的资源浪费。改用 `stat().isFile()`，
+  目录与缺失文件的判定结果与原先一致；
+- **单进程宿主缺少进程级兜底**：Node ≥15 默认 `unhandled-rejections=throw`，
+  任何一处游离的 Promise 拒绝都会终止 Host，连带所有打开的界面标签页。
+  新增 `unhandledRejection`（记录后继续）与 `uncaughtException`（记录后退出，
+  保留「状态不可信就别苟活」的默认语义）两个监听。诊断一律走 stderr ——
+  `studyclaw acp` 的 stdout 是 NDJSON 协议通道；
+- **MarkdownView 违反 Hooks 规则**：`bubble` 分支在 `useMemo` 之前提前 return，
+  两次渲染的 Hook 数量不一致（行为未定义）。现网由 `message.role` 固定
+  `bubble`，尚未触发，但任何让同一实例翻转该 prop 的改动都会踩上。Hook 上提，
+  分段在 memo 内按 `bubble` 短路；
+- **useFocusTrap 在渲染期写 ref**：latest-ref 模式改为在 effect 内赋值，
+  避免并发渲染下把一次被丢弃的渲染结果留进 ref；
+- **热力图死代码**：`firstDataMonthLabeled` 声明后从未读写（重构残留），
+  删除并把月份标注的说明注释移到它实际描述的逻辑旁。
 
 ### 新增
 
@@ -22,7 +43,7 @@
 - 阅读相关设置项（解析引擎/档位/超时/并发）与 MinerU 探测、安装引导；
 - `apps/web/scripts/e2e-reader.mjs`：真实 Edge 驱动的阅读器端到端验收脚本。
 
-### 修复
+### 修复（阅读线）
 
 - **已高亮的原文无法再次划词**：高亮块是可点 `<button>` 且在 DOM 序上位于
   文本层之后，层级更高——拖拽落在高亮块上时选区被按钮吃掉，划词浮层不出现，
@@ -38,16 +59,19 @@
   变化后重排已渲染页面；
 - **文本层与画布错位**：文本层缺 `.textLayer` 类与 `--total-scale-factor`，
   span 以原始尺寸叠在缩放后的画布上（大小字重叠、选区与视线错位）；
-- 阅读进度不再被 md/其它视图的页码串写；解析视图按 sha 归因，源文件变化时给出
-  可读原因而不是空白页。
+- 解析产物 manifest 改为逐文件持久化（构建中途失败不再整体丢失）。
 
 ### 测试
 
-- `apps/web/tests/reader-highlight-layer.test.tsx`：固化上述两个交互缺陷的回归
-  （高亮覆盖层指针事件语义、窄栏浮层开合）；
-- 解析产物 manifest 改为逐文件持久化（构建中途失败不再整体丢失），builder 布局
-  迁移补三条用例（不搬 sources / 自愈搬回 / 不覆盖根目录）；
-- 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 19/19 通过（含命中测试与二次划词）。
+- `apps/web/tests/reader-highlight-layer.test.tsx`：固化阅读器两个交互缺陷的
+  回归（高亮覆盖层指针事件语义、窄栏浮层开合）；
+- `reading-load-stat.spec.ts`：把 `fs/promises` 的 `readFile` 包一层计数桩，
+  钉住「load 判定存在性时不得整读资料」；
+- `process-guards.spec.ts`：进程级兜底的四条契约（含未捕获异常仍退出、
+  重复安装不叠加监听器、循环引用原因不会让记录本身抛错）；
+- `markdown-view-hooks.test.tsx`：钉住 bubble 两侧渲染出等价内容；
+- 解析产物 manifest 逐文件持久化、builder 布局迁移补三条用例；
+- 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 18/18 通过（含命中测试与二次划词）。
 
 ## [0.1.1-beta] - 2026-09-28
 

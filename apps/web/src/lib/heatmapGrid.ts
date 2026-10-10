@@ -47,10 +47,6 @@ export function buildHeatmapGrid(days: ReadonlyArray<HeatmapDay>): HeatmapGrid {
   const columns: HeatmapGridColumn[] = [];
   const cursor = new Date(start);
 
-  // 列月份标签（GitHub 语义）：新月份的 1 号落在哪一列，就在哪一列标注
-  // 该月；首列若无月初边界，则标注首日所属月份。
-  let firstDataMonthLabeled = false;
-
   for (let column = 0; column < totalWeeks; column += 1) {
     const cells: Array<HeatmapCell | null> = [];
     for (let row = 0; row < 7; row += 1) {
@@ -72,7 +68,8 @@ export function buildHeatmapGrid(days: ReadonlyArray<HeatmapDay>): HeatmapGrid {
     const rangeEnd = new Date(rangeStart);
     rangeEnd.setDate(rangeStart.getDate() + (rangeEndIndex - rangeStartIndex));
 
-    // 找区间内第一个「1 号」：命中则该列标注新月份
+    // 列月份标签（GitHub 语义）：新月份的 1 号落在哪一列就在哪一列标注该月；
+    // 首列若整段区间内都没有 1 号，则标注首日所属月份（见下方 column === 0 分支）。
     let monthLabel: string | null = null;
     const probe = new Date(rangeStart);
     while (probe <= rangeEnd) {

@@ -58,7 +58,11 @@ export function useFocusTrap({
   // latest-ref：onEscape 通常是依赖组件 state（如 busy）的闭包，直接进 effect
   // 依赖会在每次 state 变化时重跑 effect——重新抢夺焦点并打乱 modal 栈顶次序。
   const escapeRef = useRef(onEscape);
-  escapeRef.current = onEscape;
+  useEffect(() => {
+    // 写 ref 必须在渲染之外：渲染期赋值在并发渲染下可能把一次被丢弃的
+    // 渲染结果留进 ref。effect 在 commit 后跑，键事件只可能发生在其后。
+    escapeRef.current = onEscape;
+  });
 
   useEffect(() => {
     const container = containerRef.current;

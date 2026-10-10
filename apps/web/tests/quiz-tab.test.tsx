@@ -7,6 +7,7 @@ const { quizLoad, quizReset, storeState, createSessionMock } = vi.hoisted(() => 
   const createSessionMock = vi.fn();
   // 测试 mock：宽松类型（any），允许各用例按场景改写 quiz 状态而不受
   // 字面量推断的窄类型约束。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 测试桩需按场景改写形状
   const storeState: any = {
     activeCourseId: "course-1",
     setQuiz: vi.fn(),
@@ -41,6 +42,7 @@ const { quizLoad, quizReset, storeState, createSessionMock } = vi.hoisted(() => 
 
 vi.mock("../src/store/useAppStore", () => ({
   // 测试 mock：宽松类型，允许各用例按场景改写 quiz 状态
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 与 storeState 同理
   useAppStore: (selector: (state: any) => unknown) => selector(storeState),
 }));
 vi.mock("../src/lib/quizFlow", () => ({

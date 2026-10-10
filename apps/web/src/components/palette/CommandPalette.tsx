@@ -134,6 +134,12 @@ export default function CommandPalette() {
         await createNewSession();
         return;
       }
+      case "open-reading": {
+        // 必须显式 case：落 default 会被当成 /open-reading 发给 LLM。
+        closePalette();
+        useAppStore.getState().setCenterView("reading");
+        return;
+      }
       default: {
         closePalette();
         // Route palette actions through the same chat command path as typed

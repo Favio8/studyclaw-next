@@ -71,6 +71,12 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     keywords: "对话 新开 session",
     shortcut: "Ctrl+N",
   },
+  {
+    id: "open-reading",
+    label: "打开阅读",
+    desc: "辅助阅读：资料精读 · 划线/翻译/解释",
+    keywords: "阅读 资料 reader 精读 划线 翻译",
+  },
 ];
 
 /**

@@ -13,8 +13,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, PanelRightOpen } from "lucide-react";
 import ChatArea from "@/src/components/chat/ChatArea";
+import CenterSwitcher from "@/src/components/center/CenterSwitcher";
 import LeftNav from "@/src/components/left/LeftNav";
 import RightPanel from "@/src/components/panel/RightPanel";
+import ReaderView from "@/src/components/reader/ReaderView";
 import CommandPalette from "@/src/components/palette/CommandPalette";
 import SettingsDialog from "@/src/components/settings/SettingsDialog";
 import { useKeyboardShortcuts } from "@/src/hooks/useKeyboardShortcuts";
@@ -40,6 +42,7 @@ export default function Console() {
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
   const setMode = useAppStore((s) => s.setMode);
   const setCourseSessions = useAppStore((s) => s.setCourseSessions);
+  const centerView = useAppStore((s) => s.centerView);
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   usePanelData(); // 右栏：progress/mastery/heatmap 随激活项目刷新（T3.2）
@@ -201,9 +204,11 @@ export default function Console() {
         <LeftNav collapsed={sidebarCollapsed} onExpand={() => setSidebarCollapsed(false)} onCollapse={() => setSidebarCollapsed(true)} />
       </aside>
 
-      {/* 中栏：白底，无右边线（右栏自带 border-l，DSH 同） */}
+      {/* 中栏：白底，无右边线（右栏自带 border-l，DSH 同）。顶部一级学习活动栏；
+          对话/测验/复习共用 ChatArea（测验/复习聚焦右栏面板），阅读为独立视图。 */}
       <main className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-bg-panel">
-        <ChatArea />
+        <CenterSwitcher />
+        {centerView === "reading" ? <ReaderView /> : <ChatArea />}
       </main>
 
       {/* 右栏：l2 hairline 左边线（DSH detailsCol）；折叠时整体隐藏（不卸载） */}

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { storeState, apiMocks } = vi.hoisted(() => {
@@ -132,34 +132,14 @@ describe("ChatInput session drafts", () => {
   });
 });
 
-describe("ChatInput 模式单控件", () => {
-  it("只显示当前模式，点开菜单可切换（aria-checked 跟随、选中即关）", () => {
+describe("ChatInput 模式控件已上移到活动栏", () => {
+  it("输入框不再承载模式切换（窄行 CJK 折字问题；控件在 CenterSwitcher 独占行）", () => {
     render(<ChatInput onSend={vi.fn()} />);
-    // 触发器只显示当前模式；四个模式不再平铺成行（旧分段控件在窄行会把
-    // CJK 按字折断成两行，故收成单控件）。
-    const trigger = screen.getByRole("button", { name: "苏格拉底" });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
-    expect(screen.queryByRole("button", { name: "极速冲刺" })).toBeNull();
-
-    fireEvent.click(trigger);
-    const menu = screen.getByRole("menu", { name: "切换学习模式" });
-    expect(within(menu).getByRole("menuitemradio", { name: "苏格拉底" })).toHaveAttribute("aria-checked", "true");
-    expect(within(menu).getByRole("menuitemradio", { name: "费曼输出" })).toHaveAttribute("aria-checked", "false");
-
-    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "费曼输出" }));
-    expect(storeState.setMode).toHaveBeenCalledWith("feynman");
-    // 选中后菜单关闭（chooseMode 既有行为）。
+    // 旧实现在 composer footer 用单控件下拉，四按钮分段会按字折断成两行；
+    // 现在对话风格是中栏活动栏右置的分段控件（center-switcher.test.tsx 覆盖），
+    // 这里只做回归守卫：输入框内不得再出现模式菜单。
+    expect(screen.queryByRole("button", { name: "苏格拉底" })).toBeNull();
     expect(screen.queryByRole("menu", { name: "切换学习模式" })).toBeNull();
-  });
-
-  it("控件不被行内空间压缩（shrink-0 + 内部 truncate，CJK 不折字）", () => {
-    render(<ChatInput onSend={vi.fn()} />);
-    const trigger = screen.getByRole("button", { name: "苏格拉底" });
-    const wrapper = trigger.closest("[data-mode-menu]");
-    expect(wrapper).not.toBeNull();
-    expect(wrapper).toHaveClass("shrink-0");
-    // 标签自身也有 truncate 兜底。
-    expect(trigger.querySelector("span")).toHaveClass("truncate");
+    expect(document.querySelector("[data-mode-menu]")).toBeNull();
   });
 });

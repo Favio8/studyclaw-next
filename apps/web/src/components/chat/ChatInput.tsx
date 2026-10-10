@@ -3,8 +3,7 @@
 /** DSH 风格输入栏：末尾输入 `/` 打开命令候选，输入 `@` 搜索课程文件。 */
 
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { ArrowUp, Check, ChevronDown, FileText, Paperclip, Plus, Square, X } from "lucide-react";
-import { MODES } from "@/src/lib/modes";
+import { ArrowUp, FileText, Paperclip, Plus, Square, X } from "lucide-react";
 import { api } from "@/src/lib/api";
 import { COMMANDS } from "@/src/lib/commands";
 import { useAppStore } from "@/src/store/useAppStore";
@@ -33,15 +32,11 @@ function activeToken(value: string): { trigger: Trigger; query: string; start: n
 }
 
 export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }: ChatInputProps) {
-  const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [files, setFiles] = useState<FileCandidate[]>([]);
   const [highlight, setHighlight] = useState(0);
   const [answering, setAnswering] = useState(false);
-  const mode = useAppStore((s) => s.mode);
   const pendingAsk = useAppStore((s) => s.pendingAsk);
-  const setMode = useAppStore((s) => s.setMode);
-  const flashModeBanner = useAppStore((s) => s.flashModeBanner);
   const setPaletteOpen = useAppStore((s) => s.setPaletteOpen);
   const activeCourseId = useAppStore((s) => s.activeCourseId);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -128,24 +123,6 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
   }
 
   const canSend = value.trim().length > 0 && !streaming && !answering;
-  const activeMode = MODES.find((item) => item.value === mode) ?? MODES[0];
-
-  useEffect(() => {
-    if (!modeMenuOpen) return;
-    const close = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target?.closest("[data-mode-menu]")) setModeMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setModeMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", close, true);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", close, true);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [modeMenuOpen]);
 
   useEffect(() => {
     if (!attachmentMenuOpen) return;
@@ -167,12 +144,6 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
   useEffect(() => {
     setHighlight(0);
   }, [token?.trigger, token?.query]);
-
-  function chooseMode(nextMode: (typeof MODES)[number]) {
-    setMode(nextMode.value);
-    flashModeBanner(`已切换 · ${nextMode.label}`);
-    setModeMenuOpen(false);
-  }
 
   function appendAttachment(file: FileCandidate): void {
     const marker = `@${file.relative}`;
@@ -300,40 +271,6 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
             </div>
             <span aria-hidden className="h-4 w-px shrink-0 bg-border-faint" />
             <ModelSeat />
-            <span aria-hidden className="h-4 w-px shrink-0 bg-border-faint" />
-            {/* 模式：只显示当前项，点开选择（与模型座位/思考强度同 pattern）。
-                宽窄屏共用这一个控件——旧实现宽屏用四按钮分段控件，行内空间不足时
-                CJK 无词边界、按字折断成两行（实测截图），故统一收成单控件。 */}
-            <div data-mode-menu className="relative flex shrink-0">
-              <button
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={modeMenuOpen}
-                title="切换学习模式"
-                onClick={() => setModeMenuOpen((open) => !open)}
-                className="flex h-7 max-w-[132px] items-center gap-1 rounded-lg border border-border-faint bg-bg-card/60 px-2 text-[13px] font-medium leading-5 text-text-primary transition-colors hover:bg-bg-card"
-              >
-                <span className="truncate">{activeMode.label}</span>
-                <ChevronDown size={12} strokeWidth={1.8} className="shrink-0 text-text-faint" aria-hidden />
-              </button>
-              {modeMenuOpen ? (
-                <div role="menu" aria-label="切换学习模式" className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-32 rounded-xl border border-border-line bg-bg-panel p-1 shadow-lv3">
-                  {MODES.map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={item.value === mode}
-                      onClick={() => chooseMode(item)}
-                      className={`flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${item.value === mode ? "bg-bg-card text-text-primary" : "text-text-muted hover:bg-bg-card hover:text-text-primary"}`}
-                    >
-                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                      {item.value === mode ? <Check size={14} className="shrink-0 text-accent-focus" aria-hidden /> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
           </div>
           <button type="button" title={streaming ? "停止生成" : "发送（Enter）"} disabled={streaming ? false : !canSend} onClick={() => (streaming ? onStop?.() : submit())} className="flex h-[34px] w-[34px] shrink-0 -translate-y-0.5 items-center justify-center rounded-full bg-accent-focus text-white transition-colors hover:bg-accent-focus-hover disabled:opacity-40">
             {streaming ? <Square size={12} fill="currentColor" strokeWidth={1.8} aria-hidden /> : <ArrowUp size={16} strokeWidth={1.8} aria-hidden />}

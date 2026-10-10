@@ -22,6 +22,11 @@ import type { LearningMode } from "@/src/types";
 
 export type PanelTab = "progress" | "syllabus" | "heatmap" | "quiz";
 
+/** 中栏一级学习活动。对话是中栏默认视图；测验/复习经右栏面板承载
+ * （quizFlow 的活跃流句柄是模块级单例，中栏不再挂第二实例互相中止）；
+ * 阅读为独立中栏视图。 */
+export type CenterView = "chat" | "quiz" | "review" | "reading";
+
 /** 大纲 Tab 内的视图（列表 / 思维导图 / 关系图），入 store 跨 Tab/重挂保持。 */
 export type SyllabusView = "tree" | "mindmap" | "graph";
 
@@ -71,6 +76,8 @@ export interface QuizState {
   lastEvalId: string | null;
   /** 简答题输入缓冲（组件直接读写，避免 effect 竞态）。 */
   answerText: string;
+  /** L1：连续评测未过时的换风格建议（概念 + 连续失败次数）；null = 不提示。 */
+  styleSuggestion: { conceptId: string; consecutiveFailures: number } | null;
 }
 
 export const initialQuiz: QuizState = {
@@ -86,6 +93,7 @@ export const initialQuiz: QuizState = {
   lastAnswer: null,
   lastEvalId: null,
   answerText: "",
+  styleSuggestion: null,
 };
 
 export interface ChatMessage {
@@ -120,6 +128,8 @@ interface AppState {
   activeSessionTitle: string;
 
   // -- 对话（中栏） --------------------------------------------------------------
+  /** 中栏当前学习活动（一级导航：对话/测验/复习/阅读）。 */
+  centerView: CenterView;
   messages: ChatMessage[];
   streaming: boolean;
   syncState: "synced" | "syncing";
@@ -215,6 +225,7 @@ interface AppState {
   setChatFocus: (focus: boolean) => void;
   setMascotPulse: (pulse: { at: number; kind: "celebrate" | "encourage" } | null) => void;
   setMode: (mode: LearningMode) => void;
+  setCenterView: (view: CenterView) => void;
   setFocusConcept: (conceptId: string | null) => void;
   flashModeBanner: (text: string) => void;
   flashStatusBanner: (text: string) => void;
@@ -279,6 +290,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatFocus: false,
   mascotPulse: null,
   mode: "socratic",
+  centerView: "chat",
   focusConceptId: null,
   modeBanner: null,
   activeTab: "progress",
@@ -326,6 +338,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       uploading: false,
       wakeupCard: null,
   pendingAsk: null,
+      // 阅读视图绑定当前课程资料，切课回落到对话
+      centerView: "chat",
       badges: state.badges,
     })),
   setCourseSessions: (courseId, sessions) =>
@@ -334,8 +348,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
   setSessions: (sessions) => set({ sessions }),
   setActiveSession: (sessionId, title = "") =>
-    // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）
-    set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null }),
+    // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）。
+    // 选中/新建对话即回到对话活动——从测验/复习/阅读点进会话时中栏跟随。
+    set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null, centerView: "chat" }),
   setActiveSessionTitle: (title) => set({ activeSessionTitle: title }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>
@@ -367,6 +382,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setChatFocus: (chatFocus) => set({ chatFocus }),
   setMascotPulse: (mascotPulse) => set({ mascotPulse }),
   setMode: (mode) => set({ mode }),
+  setCenterView: (centerView) => set({ centerView }),
   setFocusConcept: (focusConceptId) => set({ focusConceptId }),
   flashModeBanner: (text) => {
     set({ modeBanner: text });
@@ -455,5 +471,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       streamPhase: null,
       toolRunning: 0,
       uploading: false,
+      centerView: "chat",
     }),
 }));

@@ -18,6 +18,7 @@ import MarkdownView from "@/src/components/chat/MarkdownView";
 import MessageActions from "@/src/components/chat/MessageActions";
 import { Clawzy } from "@/src/components/mascot";
 import useInstantCard from "@/src/hooks/useInstantCard";
+import { modeLabel } from "@/src/lib/modes";
 import type { ChatMessage } from "@/src/store/useAppStore";
 
 interface MessageCardProps {
@@ -84,6 +85,12 @@ export default function MessageCard({ message, onRetry, onBranch, branchUnavaila
           历史消息 idle，流式中的最后一条跟随 thinking/writing */}
       <div className="flex items-center">
         <Clawzy size={20} tier="icon" ariaLabel="StudyClaw" />
+        {/* L4：非默认对话风格在消息署名行留痕（socratic 是默认，不贴标签降噪） */}
+        {message.mode && message.mode !== "socratic" ? (
+          <span className="ml-1.5 rounded-md bg-bg-card px-1.5 py-0.5 text-[11px] leading-4 text-text-faint">
+            {modeLabel(message.mode)}
+          </span>
+        ) : null}
       </div>
       {message.thinking ? (
         <ThinkingFold

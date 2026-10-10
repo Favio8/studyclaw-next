@@ -36,6 +36,7 @@ import { abortActiveChat } from "@/src/lib/chatStream";
 import { abortActiveEval } from "@/src/lib/quizFlow";
 import { abortActiveWakeupEval } from "@/src/lib/wakeup";
 import { api } from "@/src/lib/api";
+import { modeLabel } from "@/src/lib/modes";
 import { relativeTime } from "@/src/lib/format";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
 import { useAppStore } from "@/src/store/useAppStore";
@@ -692,7 +693,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         {shown.map((session) => {
           const active = session.sessionId === activeSessionId;
           const blank = session.turns === 0;
-          const meta = blank ? "新对话" : `${relativeTime(session.lastActiveAt)}，${session.turns} 轮`;
+          // L4：非默认风格的会话在行内留痕（socratic 是默认，不贴标签降噪）
+          const styleTag = !blank && session.mode && session.mode !== "socratic" ? modeLabel(session.mode) : null;
+          const meta = blank ? "新对话" : `${relativeTime(session.lastActiveAt)}，${session.turns} 轮${styleTag ? ` · ${styleTag}` : ""}`;
           return (
             <div
               key={session.sessionId}
@@ -750,8 +753,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
                 {blank ? "新对话" : session.title}
               </span>
               {!blank ? (
-                <span className="shrink-0 text-[12px] leading-5 text-text-faint group-hover:hidden">
-                  {relativeTime(session.lastActiveAt)}
+                <span className="flex shrink-0 items-center gap-1 text-[12px] leading-5 text-text-faint group-hover:hidden">
+                  <span>{relativeTime(session.lastActiveAt)}</span>
+                  {styleTag ? <span className="text-accent-focus">{styleTag}</span> : null}
                 </span>
               ) : null}
               {!blank ? renderSessionActions(session, course.id) : null}

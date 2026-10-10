@@ -326,6 +326,44 @@ export class ReadingService {
     return { text: raw.length > MAX ? raw.slice(0, MAX) : raw, truncated: raw.length > MAX }
   }
 
+  /**
+   * P3「我的痕迹」：全课程标注按 conceptId 聚合（只读信号，不改掌握度）。
+   * 无概念关联的标注不进聚合——避免把未归属的划线算成学习证据。
+   */
+  async traces(workspaceRoot: string): Promise<{ traces: Array<{ conceptId: string; count: number; lastAt: string }> }> {
+    const { file } = await readAnnotations(join(workspaceRoot, '.studyclaw'))
+    const aggregated = new Map<string, { count: number; lastAt: string }>()
+    for (const entry of Object.values(file.sources)) {
+      for (const record of entry.highlights) {
+        if (record.conceptId === null) continue
+        const current = aggregated.get(record.conceptId) ?? { count: 0, lastAt: '' }
+        current.count += 1
+        if (record.createdAt > current.lastAt) current.lastAt = record.createdAt
+        aggregated.set(record.conceptId, current)
+      }
+    }
+    const traces = [...aggregated.entries()]
+      .map(([conceptId, value]) => ({ conceptId, count: value.count, lastAt: value.lastAt }))
+      .sort((a, b) => b.count - a.count || a.conceptId.localeCompare(b.conceptId))
+    return { traces }
+  }
+
+  /**
+   * P3 导出追加到课程笔记（notes.md）。用户主动动作，直接写不走审批；
+   * 带 HTML 注释标记来源与时间，重复导出可追溯、可手工清理。
+   */
+  async appendNotes(workspaceRoot: string, source: string): Promise<{ appended: boolean; count: number }> {
+    const { markdown, count } = await this.exportMarkdown(workspaceRoot, source)
+    if (count === 0) return { appended: false, count: 0 }
+    const stateDir = join(workspaceRoot, '.studyclaw')
+    await mkdir(stateDir, { recursive: true })
+    const notesPath = join(stateDir, 'notes.md')
+    const existing = await readFile(notesPath, 'utf8').catch(() => '')
+    const separator = existing === '' || existing.endsWith('\n') ? '\n' : '\n\n'
+    await writeFile(notesPath, `${existing}${separator}<!-- reading-export ${new Date().toISOString()} source=${source} -->\n${markdown}\n`, 'utf8')
+    return { appended: true, count }
+  }
+
   async exportMarkdown(workspaceRoot: string, source: string): Promise<{ markdown: string; count: number }> {
     const { file } = await readAnnotations(join(workspaceRoot, '.studyclaw'))
     const entry = sourceEntry(file, source)

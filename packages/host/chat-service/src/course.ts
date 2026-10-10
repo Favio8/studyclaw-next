@@ -15,6 +15,7 @@ import {
   COURSE_STATE_FILES,
   DEFAULT_SOURCE_EXTENSIONS,
   LlmTaskGenerator,
+  harnessTask,
   loadSyllabus,
   loadTaskPool,
   writeTaskPool,
@@ -504,6 +505,9 @@ export interface CourseService {
   sync(workspaceRoot: string, courseId: string, sessionId?: string | null): Promise<Record<string, unknown>>
   ingestUrl(workspaceRoot: string, courseId: string, url: string, title: string | null): Promise<Record<string, unknown>>
   createCards(workspaceRoot: string, courseId: string, payload: { content: string; title?: string | null; conceptId?: string | null; count?: number; sessionId?: string | null }): Promise<Record<string, unknown>>
+  /** P3：阅读划词建卡——草稿生成（不落盘）与确认落盘。 */
+  cardDraft(workspaceRoot: string, courseId: string, payload: { content: string; title?: string | null; conceptId?: string | null; sessionId?: string | null }): Promise<Record<string, unknown>>
+  cardCommit(workspaceRoot: string, courseId: string, payload: { task: Record<string, unknown> }): Promise<Record<string, unknown>>
   dynamicCards(workspaceRoot: string, courseId: string, payload: { taskId: string; misconception: string; content?: string | null; targetId?: string | null; count?: number; sessionId?: string | null }): Promise<Record<string, unknown>>
   evalSubmit(workspaceRoot: string, courseId: string, taskId: string, answer: string, sessionId?: string | null, evalId?: string | null): AsyncGenerator<Record<string, unknown>>
   job(jobId: string): JobView | undefined
@@ -718,8 +722,54 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       })
       return { courseId, tasks }
     },
-    async dynamicCards(workspaceRoot, courseId, payload) {
-      const dir = await requireCourse(workspaceRoot, courseId)
+  /**
+   * P3 单卡草稿（阅读划词建卡）：与 createCards 同一 chunk 合成与生成路径，
+   * 但**不落盘**——草稿交前端确认（可编辑）后由 cardCommit 写入。
+   */
+  async cardDraft(workspaceRoot: string, courseId: string, payload: { content: string; title?: string | null; conceptId?: string | null; sessionId?: string | null }): Promise<Record<string, unknown>> {
+    await requireCourse(workspaceRoot, courseId)
+    const config = await configForSession(workspaceRoot, courseId, payload.sessionId, await getConfig())
+    const generator = requireGenerator({ workspaceRoot, config })
+    const title = payload.title ?? payload.content.slice(0, 30)
+    const conceptId = payload.conceptId ?? slugId(title)
+    const chunkStamp = `read_${Date.now().toString(36)}${(++manualCardSeq).toString(36)}`
+    const chunk = {
+      chunk_id: chunkStamp,
+      chapter_id: 'chap_manual',
+      concept_id: conceptId,
+      title,
+      content: payload.content,
+      source_ref: { file: 'reading', chunk_id: chunkStamp },
+    }
+    const generated = await generator.generateTasks(chunk, 1)
+    const draft = generated[0]
+    if (draft === undefined) throw new Error('未能生成题卡草稿（模型未返回有效结构）')
+    return { courseId, draft }
+  },
+
+  /** P3 草稿确认落盘：harnessTask 校验 + 池内 id 去重（同 createCards 语义）。 */
+  async cardCommit(workspaceRoot: string, courseId: string, payload: { task: Record<string, unknown> }): Promise<Record<string, unknown>> {
+    const dir = await requireCourse(workspaceRoot, courseId)
+    const parsed = harnessTask.safeParse(payload.task)
+    if (!parsed.success) throw new Error(`题卡草稿格式不合法: ${parsed.error.issues.map(issue => issue.message).join('; ')}`)
+    const draft = parsed.data
+    return withCourseLock(dir, async () => {
+      const pool = await loadTaskPool(dir)
+      const takenIds = new Set(pool.map(card => card.task_id))
+      let taskId = draft.task_id
+      if (takenIds.has(taskId)) {
+        let sequence = 2
+        while (takenIds.has(`${taskId}_${sequence}`)) sequence += 1
+        taskId = `${taskId}_${sequence}`
+      }
+      const card = { ...draft, task_id: taskId }
+      await writeTaskPool(dir, [...pool, card])
+      return { courseId, tasks: [card] }
+    })
+  },
+
+  async dynamicCards(workspaceRoot, courseId, payload) {
+    const dir = await requireCourse(workspaceRoot, courseId)
       const config = requireConfig(await configForSession(workspaceRoot, courseId, payload.sessionId, await getConfig()))
       const pool = await loadTaskPool(dir)
       const source = pool.find(task => task.task_id === payload.taskId)

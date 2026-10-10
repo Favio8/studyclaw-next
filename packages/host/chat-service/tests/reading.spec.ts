@@ -201,3 +201,37 @@ describe('ReadingService 解析视图（P2.5）', () => {
     expect(payload.available).toBe(false)
   })
 })
+
+describe('ReadingService 痕迹与追加笔记（P3）', () => {
+  it('traces 按 conceptId 聚合，无概念关联的标注不计入', async () => {
+    const root = await workspace()
+    const service = new ReadingService()
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, conceptId: 'c_ef', createdAt: undefined } as Record<string, unknown>)
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, conceptId: 'c_ef' })
+    await service.addHighlight(root, 'sources/b.md', { ...HIGHLIGHT_INPUT, conceptId: 'c_x' })
+    await service.addHighlight(root, 'sources/b.md', { ...HIGHLIGHT_INPUT, conceptId: null })
+    const { traces } = await service.traces(root)
+    expect(traces).toHaveLength(2)
+    expect(traces[0]).toMatchObject({ conceptId: 'c_ef', count: 2 })
+    expect(traces[1]).toMatchObject({ conceptId: 'c_x', count: 1 })
+  })
+
+  it('appendNotes：把标注按页分组追加进 notes.md，带来源注释；无标注不写', async () => {
+    const root = await workspace()
+    const service = new ReadingService()
+    expect(await service.appendNotes(root, 'sources/a.pdf')).toEqual({ appended: false, count: 0 })
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, comment: '常考' })
+    const result = await service.appendNotes(root, 'sources/a.pdf')
+    expect(result).toEqual({ appended: true, count: 1 })
+    const notes = await readFile(join(root, '.studyclaw', 'notes.md'), 'utf8')
+    expect(notes).toContain('reading-export')
+    expect(notes).toContain('source=sources/a.pdf')
+    expect(notes).toContain('批注：常考')
+    // 二次追加不覆盖首次内容
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, quote: '第二条' })
+    await service.appendNotes(root, 'sources/a.pdf')
+    const notes2 = await readFile(join(root, '.studyclaw', 'notes.md'), 'utf8')
+    expect(notes2).toContain('批注：常考')
+    expect(notes2).toContain('第二条')
+  })
+})

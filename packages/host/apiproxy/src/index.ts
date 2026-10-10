@@ -177,6 +177,9 @@ export interface HostServices {
     heatmapDay(date: string): Promise<Record<string, unknown>>
     evalTrend(courseId: string, conceptId: string, limit: number): Promise<Record<string, unknown>>
     createCourse(courseName: string, importPaths: string[]): Promise<Record<string, unknown>>
+    /** P3：阅读划词建卡——草稿（不落盘）与确认落盘。 */
+    cardDraft(courseId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>
+    cardCommit(courseId: string, payload: { task: Record<string, unknown> }): Promise<Record<string, unknown>>
   }
   /** Optional deployment capability snapshot used by `tools.list`. */
   readonly toolProviders?: () => Record<string, { available: boolean; reason: string | null; installAction: string | null }>
@@ -191,6 +194,9 @@ export interface HostServices {
     updateHighlight(source: string, id: string, patch: Record<string, unknown>): Promise<Record<string, unknown> | null>
     removeHighlight(source: string, id: string): Promise<boolean>
     exportMarkdown(source: string): Promise<Record<string, unknown>>
+    /** P3：我的痕迹聚合 + 导出追加到 notes.md。 */
+    traces(): Promise<Record<string, unknown>>
+    appendNotes(source: string): Promise<Record<string, unknown>>
   }
 }
 
@@ -736,6 +742,46 @@ const handlers = {
     payload: z.object({ source: z.string().min(1).max(500) }),
     async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.readingService.exportMarkdown(payload.source))
+    },
+  },
+  'reading.traces': {
+    // P3「我的痕迹」：全课程标注按概念聚合（只读信号）。
+    payload: null,
+    async run(_payload: void, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.traces())
+    },
+  },
+  'reading.appendNotes': {
+    // P3：导出标注追加到课程 notes.md（用户主动动作，直接写）。
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.appendNotes(payload.source))
+    },
+  },
+  'courses.cardDraft': {
+    // P3：阅读划词建卡——生成草稿不落盘，待前端确认。
+    payload: z.object({
+      courseId: z.string().min(1),
+      content: z.string().min(1).max(8000),
+      title: z.string().max(200).nullish(),
+      conceptId: z.string().max(200).nullish(),
+      sessionId: z.string().nullish(),
+    }),
+    async run(payload: Record<string, unknown>, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      const courseId = String(payload['courseId'])
+      return ok(await services.courseService.cardDraft(courseId, {
+        content: String(payload['content']),
+        title: payload['title'] as string | null,
+        conceptId: payload['conceptId'] as string | null,
+        sessionId: payload['sessionId'] as string | null,
+      }))
+    },
+  },
+  'courses.cardCommit': {
+    // P3：草稿确认落盘（用户可能编辑过题干）。
+    payload: z.object({ courseId: z.string().min(1), task: z.record(z.string(), z.unknown()) }),
+    async run(payload: { courseId: string; task: Record<string, unknown> }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.cardCommit(payload.courseId, { task: payload.task }))
     },
   },
   'workspace.files': {

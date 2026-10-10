@@ -555,6 +555,8 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       heatmap: async weeks => courseService.heatmap(activeRoot(), weeks),
       heatmapDay: async date => courseService.heatmapDay(activeRoot(), date),
       evalTrend: async (courseId, conceptId, limit) => courseService.evalTrend(activeRoot(), courseId, conceptId, limit),
+      cardDraft: async (courseId, payload) => courseService.cardDraft(activeRoot(), courseId, payload as { content: string; title?: string | null; conceptId?: string | null; sessionId?: string | null }),
+      cardCommit: async (courseId, payload) => courseService.cardCommit(activeRoot(), courseId, payload),
       createCourse: async (courseName, importPaths) => courseService.createCourse(activeRoot(), courseName, importPaths),
     }
   }
@@ -600,6 +602,14 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       exportMarkdown: async source => {
         requireWorkspaceRootForSettings(activeRoot(), '导出标注')
         return readingService.exportMarkdown(activeRoot(), source) as unknown as Record<string, unknown>
+      },
+      traces: async () => {
+        requireWorkspaceRootForSettings(activeRoot(), '阅读痕迹')
+        return readingService.traces(activeRoot()) as unknown as Record<string, unknown>
+      },
+      appendNotes: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '追加笔记')
+        return readingService.appendNotes(activeRoot(), source) as unknown as Record<string, unknown>
       },
     }
   }

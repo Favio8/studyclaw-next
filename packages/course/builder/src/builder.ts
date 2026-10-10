@@ -348,6 +348,11 @@ export class CourseBuilder {
         // 下次构建重试 MinerU（自愈），不把 builtin 结果冒充 mineru 钉住。
         this.parsedManifest[relPath] = { sha256, engine: 'builtin', tier: parse.tier, out: null }
       }
+      // 增量持久化：manifest 若等 build 收尾才落盘，LLM 生成阶段失败会把
+      // 已经花钱跑完的解析结果一起埋掉（真机验证发现：reading.parsed 因
+      // manifest 缺失报"未构建"，尽管产物文件就在 parsed/ 里）。此处每
+      // 个 PDF 解析完即写，幂等且文件极小。
+      await this.saveParsedManifest()
       return outcome.text
     }
     return extractSourceText(absPath, ext, parse)

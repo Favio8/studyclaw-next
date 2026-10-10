@@ -173,4 +173,22 @@ describe('CourseBuilder × MinerU 缓存', () => {
     const parsedDir = join(courseDir, '.studyclaw', 'parsed')
     await expect(readFile(join(parsedDir, 'manifest.json'), 'utf8')).rejects.toThrow()
   })
+
+  it('LLM 生成阶段抛错：已成功的解析 manifest 仍然落盘（真机验证发现）', async () => {
+    const courseDir = await courseWithPdf()
+    parseWithMineruMock.mockResolvedValue('# MinerU 产物\n\n正文。\n')
+    // generator 在生成阶段炸掉（模拟 LLM 端点不可达）——抽取已成功，
+    // manifest 必须已经写盘，不能等 build 收尾才保存。
+    const exploding = {
+      async generateTasks() {
+        throw new Error('ECONNREFUSED：LLM 端点不可达')
+      },
+    }
+    const builder = new CourseBuilder(courseDir, exploding, null, null, 'fine', ['.pdf'], courseDir, join(courseDir, '.studyclaw'), null, false, undefined, options('auto'))
+    await expect(builder.build(1)).rejects.toThrow('LLM 端点不可达')
+    const manifest = await loadParsedManifest(join(courseDir, '.studyclaw'))
+    const entry = Object.values(manifest)[0]
+    expect(entry).toMatchObject({ engine: 'mineru', tier: 'basic' })
+    expect(await readParsedText(join(courseDir, '.studyclaw'), entry!.out!)).toContain('MinerU 产物')
+  })
 })

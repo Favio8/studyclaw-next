@@ -326,6 +326,18 @@ function ParseSettings({
           <div className="text-text-faint"># 或：pipx install &quot;mineru&gt;=4.0,&lt;5&quot;</div>
           <div className="text-text-faint"># 关闭 MinerU 匿名遥测：mineru telemetry disable</div>
         </div>
+        <details className="mt-2 rounded-xl border border-border-line">
+          <summary className="cursor-pointer px-3 py-2 text-[12px] text-text-muted">uv/pipx 安装失败？用 pip + 虚拟环境（替代路线）</summary>
+          <div className="space-y-2 border-t border-border-line p-3 font-mono text-[12px] leading-5 text-text-muted">
+            <div>python -m venv .mineru-venv</div>
+            <div>.mineru-venv\Scripts\python -m pip install &quot;mineru&gt;=4.0,&lt;5&quot; <span className="text-text-faint"># Windows</span></div>
+            <div>.mineru-venv/bin/python -m pip install &quot;mineru&gt;=4.0,&lt;5&quot; <span className="text-text-faint"># macOS / Linux</span></div>
+          </div>
+          <p className="border-t border-border-line px-3 py-2 text-[11px] leading-5 text-text-faint">
+            部分安全软件会拦截 uv/pipx 写入命令行 shim（报「拒绝访问」），此时用 venv + pip 即可。
+            装完后把 venv 的 Scripts（Windows）或 bin（macOS/Linux）目录加入 PATH，重启 StudyClaw 后即可探测到。
+          </p>
+        </details>
         <p className="mt-2 text-[12px] leading-5 text-text-faint">
           Windows 上 uv/pipx 的可执行文件位于 <code className="font-mono">~/.local/bin</code>（默认不在 PATH），Host 已覆盖该目录的探测。
           保存设置后会重新探测一次。

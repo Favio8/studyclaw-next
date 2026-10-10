@@ -19,7 +19,7 @@ export interface CourseState {
   readonly title: string
   readonly version: string
   readonly chapters: Array<{ id: string; title: string; concepts: Array<{ id: string; name: string }> }>
-  readonly concepts: Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; passRate: number }>
+  readonly concepts: Array<{ conceptId: string; name: string; chapter: string; mastery: number; evals: number; passRate: number; nextReviewAt: string | null }>
 }
 
 /**
@@ -68,6 +68,7 @@ export async function loadCourseState(courseDir: string): Promise<CourseState> {
       mastery: record.mastery,
       evals: record.evals,
       passRate: record.passRate,
+      nextReviewAt: record.nextReviewAt,
     })
   }
   return { title, version, chapters, concepts }
@@ -90,6 +91,8 @@ export class ContextAssembler {
     mode: LearningMode,
     userInput: string,
     conceptId: string | null = null,
+    /** 本轮是否为该会话首轮（无历史消息）。极速冲刺首轮注入薄弱点速览。 */
+    firstTurn = false,
   ): Promise<{ system: string; user: string }> {
     const state = await loadCourseState(this.courseDir)
     const system = renderTemplate(TUTOR_SYSTEM, {
@@ -101,6 +104,7 @@ export class ContextAssembler {
     })
     const user = renderTemplate(TUTOR_USER, {
       recent_progress: this.recentProgress(state, conceptId),
+      weak_spots: firstTurn && mode === 'quick' ? this.weakSpots(state) : '',
       user_input: userInput,
     })
     return { system, user }
@@ -146,6 +150,43 @@ export class ContextAssembler {
     return [
       '## 该概念近期进度',
       `- 掌握度 ${Math.round(record.mastery * 100)}% · 评测 ${record.evals} 次 · 通过率 ${Math.round(record.passRate * 100)}%`,
+    ].join('\n')
+  }
+
+  /**
+   * L3：薄弱点速览（极速冲刺首轮注入）。到期（nextReviewAt ≤ 今天）优先、
+   * 低掌握度（<40%）其次，各自按紧急度排序后合并去重，取前 5 条。
+   * 纯读 progress.md 解析结果，不写任何状态。
+   */
+  private weakSpots(state: CourseState): string {
+    const today = new Date().toISOString().slice(0, 10)
+    const due = state.concepts
+      .filter(c => c.nextReviewAt !== null && c.nextReviewAt.slice(0, 10) <= today)
+      .sort((a, b) => (a.nextReviewAt ?? '').localeCompare(b.nextReviewAt ?? ''))
+    const weak = state.concepts
+      .filter(c => c.mastery < 0.4)
+      .sort((a, b) => a.mastery - b.mastery)
+    const seen = new Set<string>()
+    const picked: Array<{ concept: CourseState['concepts'][number]; reason: string }> = []
+    for (const concept of due) {
+      if (seen.has(concept.conceptId)) continue
+      seen.add(concept.conceptId)
+      picked.push({ concept, reason: `到期 ${concept.nextReviewAt?.slice(0, 10)}` })
+      if (picked.length >= 5) break
+    }
+    for (const concept of weak) {
+      if (picked.length >= 5) break
+      if (seen.has(concept.conceptId)) continue
+      seen.add(concept.conceptId)
+      picked.push({ concept, reason: '低掌握度' })
+    }
+    if (picked.length === 0) return ''
+    const lines = picked.map(({ concept, reason }) =>
+      `- ${concept.conceptId} ${concept.name}：掌握度 ${Math.round(concept.mastery * 100)}% · ${reason}${concept.chapter ? ` · ${concept.chapter}` : ''}`)
+    return [
+      '## 薄弱点速览（到期 + 低掌握度，本地进度文件生成）',
+      ...lines,
+      '使用策略：从中选最相关的 1~2 个开讲，不要罗列全部；讲完一个再推进下一个。',
     ].join('\n')
   }
 

@@ -51,6 +51,7 @@ memory_hints 为跨课程复现的认知标签（如「再次混淆 Soft/Hard �
 
 export const TUTOR_USER = `{recent_progress}
 
+{weak_spots}
 ## 学生消息
 {user_input}
 
@@ -62,7 +63,8 @@ export const TUTOR_MODES: Record<string, string> = {
   quick: `【极速冲刺】极度精简：核心本质一句话 + 3 点关键特性 + 避坑指南 + 最小代码样例；
 拒绝长篇铺垫，直接给干货。`,
   feynman: `【费曼输出】反客为主：请学生用自己的话把概念讲给小学生听；
-你负责挑刺找漏洞，用追问暴露含糊之处，学生讲清后才给予确认。`,
+你负责挑刺找漏洞，用追问暴露含糊之处，学生讲清后才给予确认。
+学生完整讲清一个概念后，调用 write_note 把它的表述沉淀进课程笔记（附 conceptId），让输出有留存。`,
   debug: `【实战 Debug】假设学生正在写代码：抛出真实报错信息或边缘场景让其分析排查；
 逐步给线索而非直接给修复方案，引导学生自己定位根因。`,
 }

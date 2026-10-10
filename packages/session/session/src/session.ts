@@ -291,7 +291,19 @@ export class TutorSession {
     const now = this.nowFactory()
     if (this.persistLegacy) await this.store.fillDefaultTitle(this.sessionId, text)
 
-    const rendered = await this.assembler.renderTurn(this.mode, text, this.conceptId)
+    // 历史消息在渲染前加载：首轮判定（无历史）驱动极速冲刺的薄弱点速览注入。
+    // 零输出的失败回合会把用户输入剔除（input/voided），重试的首轮仍算首轮。
+    const priorMessages = !this.persistLegacy && this.eventStore !== null && await this.eventStore.exists(this.sessionId)
+      ? (await this.eventStore.project(this.sessionId)).messages.map(line => ({ role: line.role, content: line.content }))
+      : await this.store.loadChat(this.sessionId)
+    const messages = priorMessages.map(line => ({
+      role: line.role === 'agent' ? 'assistant' : line.role,
+      // 历史回放省略交互演示块体：原始 HTML/JS 会触发网关断连（见
+      // elideInteractiveBlocks），落盘与 UI 渲染不受影响。
+      content: elideInteractiveBlocks(line.content),
+    }))
+
+    const rendered = await this.assembler.renderTurn(this.mode, text, this.conceptId, messages.length === 0)
     const systemPrompt = this.systemPrompt === '' ? rendered.system : `${this.systemPrompt}\n\n${rendered.system}`
     let userPrompt = rendered.user
     if (fileContext !== null) {
@@ -307,15 +319,6 @@ export class TutorSession {
         payload: { system: systemPrompt, user: userPrompt, mode: this.mode },
       })
     }
-    const priorMessages = !this.persistLegacy && this.eventStore !== null && await this.eventStore.exists(this.sessionId)
-      ? (await this.eventStore.project(this.sessionId)).messages.map(line => ({ role: line.role, content: line.content }))
-      : await this.store.loadChat(this.sessionId)
-    const messages = priorMessages.map(line => ({
-      role: line.role === 'agent' ? 'assistant' : line.role,
-      // 历史回放省略交互演示块体：原始 HTML/JS 会触发网关断连（见
-      // elideInteractiveBlocks），落盘与 UI 渲染不受影响。
-      content: elideInteractiveBlocks(line.content),
-    }))
     const answeredAsk = await this.pendingAsk()
     if (answeredAsk !== null) {
       messages.push({ role: 'assistant', content: `[你上一轮向学生提出的提问] ${answeredAsk}` })

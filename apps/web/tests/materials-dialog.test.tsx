@@ -142,6 +142,33 @@ describe("MaterialsDialog 上传补充", () => {
     expect(storeState.flashStatusBanner).toHaveBeenCalled();
   });
 
+  it("关闭弹窗不会中断进行中的上传", async () => {
+    let resolveUpload: (value: { added: string[]; buildJobId: null }) => void = () => {};
+    apiMocks.uploadSources.mockImplementation(() => new Promise((resolve) => {
+      resolveUpload = resolve;
+    }));
+    const onClose = vi.fn();
+    const view = render(<MaterialsDialog onClose={onClose} />);
+
+    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    fireEvent.change(input, { target: { files: [file("note.md")] } });
+    fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
+    await waitFor(() => expect(apiMocks.uploadSources).toHaveBeenCalledTimes(1));
+    // 不传 AbortSignal：卸载（关弹窗 / 折叠侧栏重挂）不能把这次上传掐掉。
+    expect(apiMocks.uploadSources.mock.calls[0]?.[2]).toBeUndefined();
+
+    fireEvent.click(screen.getByTitle("关闭窗口，上传会继续"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    view.unmount();
+
+    resolveUpload({ added: ["note.md"], buildJobId: null });
+    await waitFor(() => {
+      expect(storeState.setLastImport).toHaveBeenCalled();
+      expect(storeState.flashStatusBanner).toHaveBeenCalledWith(expect.stringContaining("已归档 1 份资料"));
+      expect(storeState.setUploading).toHaveBeenLastCalledWith(false);
+    });
+  });
+
   it("未选文件时上传按钮禁用，选中后启用", async () => {
     render(<MaterialsDialog onClose={vi.fn()} />);
     const submit = screen.getByRole("button", { name: /上传并构建/ });

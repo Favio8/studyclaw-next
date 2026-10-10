@@ -304,6 +304,48 @@ describe("serve HTTP 边界（集成）", () => {
     });
     expect(res.status).toBe(409);
   }, 15_000);
+
+  it("上传正文正常结束不会被当成客户端断连", async () => {
+    // Node 在请求体读完后也会发 request 'close'（complete=true）。旧实现把这次
+    // close 当成断连：临时文件被删、响应永不写出，前端只能靠关掉弹窗中断。
+    const project = mkdtempSync(join(tmpdir(), "studyclaw-upload-"));
+    try {
+      const opened = await fetch(`${base()}/api/workspaces.open`, {
+        method: "POST",
+        headers: auth(),
+        body: JSON.stringify({ payload: { path: project } }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      expect(opened.status).toBe(200);
+
+      const boundary = "----studyclaw";
+      const fileBody = "# 笔记\n\n上传不应被中断。\n";
+      const payload = [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="files"; filename="note.md"',
+        "Content-Type: text/markdown",
+        "",
+        fileBody,
+        `--${boundary}--`,
+        "",
+      ].join("\r\n");
+      const res = await fetch(`${base()}/api/courses/it-course/sources`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${host!.token}`,
+          "content-type": `multipart/form-data; boundary=${boundary}`,
+        },
+        body: payload,
+        signal: AbortSignal.timeout(15_000),
+      });
+      expect(res.status).toBe(200);
+      const json = await res.json() as { added?: string[] };
+      expect(json.added).toContain("note.md");
+      expect(readFileSync(join(project, "sources", "note.md"), "utf8")).toContain("上传不应被中断");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 40_000);
 });
 
 describe("serve 关停与实例锁", () => {

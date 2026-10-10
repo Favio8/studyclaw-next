@@ -1105,8 +1105,10 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     // C-2：客户端断连（RST/导航离开）必须结算——busboy@1.6.0 的 Multipart 是
     // Writable(emitClose)，只在 finish/destroy 时发 'close'；pipe 在源 'close'
     // （无 'end'）时只 unpipe 不 end 目标 → 'close' 永不触发，handler 闭包、
-    // WriteStream fd 与 .upload-*.tmp 全部静默泄漏（该路径是唯一没有 aborted
-    // 监听/超时保护的入口；代理实测复现）。双路结算 + 掐断在途写流。
+    // WriteStream fd 与 .upload-*.tmp 全部静默泄漏。正文没读完才算断连。
+    // Node 在请求体正常读完后也会发 request 'close'（complete=true，aborted=false），
+    // 且发生在 await 恢复之前。若把这次 close 当成断连，每个成功上传都会被标成
+    // 「客户端断连」、临时文件被删、响应永不写出，前端只能靠关掉弹窗中断。
     let clientGone = false
     const abortPending = (reason: string): void => {
       for (const entry of pending) {
@@ -1161,19 +1163,22 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         abortPending(`上传中断: ${error.message}`)
       })
       busboy.on('close', () => settleBusboy())
-      request.once('close', () => {
-        // 客户端已消失：掐断 busboy 与在途写流后结算——响应无人接收，跳过后续
-        // 构建/响应（临时文件由下方收尾循环清理）。
+      const abandonUpload = (reason: string): void => {
+        if (clientGone) return
         clientGone = true
-        abortPending('上传中断: 客户端断连')
+        abortPending(reason)
         busboy.destroy()
         settleBusboy()
+      }
+      // 'aborted' 只在真正中止时出现。'close' 在正文正常结束后也会触发，必须用
+      // complete 把它和断连分开（与 readRequestBody 的 settled 守卫同一语义）。
+      request.once('aborted', () => abandonUpload('上传中断: 客户端断连'))
+      request.once('close', () => {
+        if (request.complete) return
+        abandonUpload('上传中断: 客户端断连')
       })
       const stallTimer = setTimeout(() => {
-        clientGone = true
-        abortPending('上传中断: 超过 stall 上限')
-        busboy.destroy()
-        settleBusboy()
+        abandonUpload('上传中断: 超过 stall 上限')
       }, UPLOAD_STALL_TIMEOUT_MS)
       request.pipe(busboy)
       await busboyDone
@@ -1207,7 +1212,12 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         rejected.push({ file: entry.safe, reason: error instanceof Error ? error.message : String(error) })
       }
     }
-    if (clientGone) return
+    if (clientGone) {
+      // 断连/stall 时必须拆掉响应，否则浏览器侧 fetch 会一直挂起，用户只能
+      // 关掉资料弹窗来中断。正文已完整收下的请求不会走到这里。
+      if (!response.writableEnded && !response.destroyed) response.destroy()
+      return
+    }
     if (busboyError !== null) {
       response.writeHead(400)
       response.end(JSON.stringify({ error: { code: 'invalid-request', message: `上传失败: ${busboyError.message}`, details: null } }))

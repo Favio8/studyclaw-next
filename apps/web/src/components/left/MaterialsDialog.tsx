@@ -37,7 +37,8 @@ function errorMessage(error: unknown): string {
 }
 
 /** 轮询 build job 至 done/failed（与 NewProjectWizard 同款策略）。
- *  返回构建结果摘要，供调用方写入 store.lastImport（对话框关掉后仍可见）。 */
+ *  返回构建结果摘要，供调用方写入 store.lastImport（对话框关掉后仍可见）。
+ *  关掉资料弹窗不会中止轮询；signal 只留给调用方显式取消。 */
 async function awaitBuild(
   jobId: string,
   courseId: string,
@@ -48,7 +49,6 @@ async function awaitBuild(
     // F-7/PERF-8：消费 job.progress 展示"N/M 当前文件"，30 分钟不再黑盒。
     let lastProgress = "";
     for (let attempt = 0; attempt < 3600; attempt += 1) {
-      // FE-4：弹窗已关闭/组件卸载时立即停止轮询并停止 setState。
       if (signal?.aborted) return null;
       const job = await api.job(jobId);
       if (signal?.aborted) return null;
@@ -112,13 +112,15 @@ export default function MaterialsDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // FE-4：轮询生命周期绑定——关闭/卸载后不再 setState 空转最长 30 分钟。
-  const buildPollSignalRef = useRef({ aborted: false });
-  useEffect(() => () => { buildPollSignalRef.current.aborted = true; }, []);
-  // W-12：上传取消句柄——弹窗关闭/卸载时 abort 在途 multipart fetch。旧实现
-  // 无 signal/超时：大文件上传网络挂起时 busy 永久 true，只能刷新页面。
-  const uploadAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => { uploadAbortRef.current?.abort(); uploadAbortRef.current = null; }, []);
+  // 弹窗关掉或侧栏折叠会卸载本组件。上传与构建轮询必须继续：结果写入 store
+  // （lastImport / buildStatus / 状态横幅），只有还挂着的实例才 setState。
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+  const reportIfMounted = useCallback((setter: (msg: string) => void) => {
+    return (msg: string) => {
+      if (mountedRef.current) setter(msg);
+    };
+  }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   const [pickedFiles, setPickedFiles] = useState<File[]>([]);
   const [urlInput, setUrlInput] = useState("");
@@ -182,16 +184,18 @@ export default function MaterialsDialog({
       setError("请先选择要上传的资料文件");
       return;
     }
+    if (useAppStore.getState().uploading) {
+      setError("已有资料正在上传，请等这次完成后再传");
+      return;
+    }
     setBusy(true);
     setUploading(true); // 爪爪 uploading 姿态
-    // W-12：本次上传的取消句柄（弹窗关闭/卸载时 abort）。
-    const uploadAbort = new AbortController();
-    uploadAbortRef.current = uploadAbort;
     try {
       // FL-12：旧实现只解构 {added, buildJobId}——超限被拒的文件（rejected）
       // 与构建失败原因（buildError）静默消失，用户看到"已归档 N 份"却不知道
-      // 有文件没进来。
-      const { added, buildJobId, buildError, rejected } = await api.uploadSources(activeCourseId, pickedFiles, uploadAbort.signal);
+      // 有文件没进来。不传 AbortSignal：关掉弹窗、点遮罩、折叠侧栏都不得中断
+      // 已经开始的归档（服务端会把中途断开的正文当成失败并删掉临时文件）。
+      const { added, buildJobId, buildError, rejected } = await api.uploadSources(activeCourseId, pickedFiles);
       // 重名序号反馈：后端归档 `foo.pdf` + 再次同名会落盘为 `foo_2.pdf` 等
       // （绝不覆盖既有资料），这里把落盘名原样反馈给用户。
       const dupNames = added.filter((name) => /_\d+\.[^./\\]+$/.test(name));
@@ -226,29 +230,30 @@ export default function MaterialsDialog({
         at: new Date().toISOString(),
         build: null,
       });
+      if (!mountedRef.current) {
+        flashStatusBanner(`✓ 已归档 ${added.length} 份资料${buildJobId !== null && buildError === undefined ? "，正在构建课程索引" : ""}`);
+      }
       if (buildJobId !== null && buildError === undefined) {
-        const outcome = await awaitBuild(buildJobId, activeCourseId, (msg) => {
+        const outcome = await awaitBuild(buildJobId, activeCourseId, reportIfMounted((msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
-        }, buildPollSignalRef.current);
+        }));
         if (outcome !== null) {
           setLastImport((prev) => (prev === null || prev.courseId !== activeCourseId ? prev : { ...prev, build: outcome }));
+          if (!mountedRef.current) flashStatusBanner(`✓ 知识索引构建完成（共 ${outcome.tasksGenerated} 张题卡）`);
         }
       }
       setBuildStatus("done");
       await Promise.all([refreshPanelData(), refreshCourseList()]);
     } catch (cause) {
-      // W-12：用户关闭弹窗导致的取消不是失败——静默（不闪错误横幅）。
-      if (uploadAbort.signal.aborted) return;
       // list 顺序与 added 一一对应，我们据此判断“重名”仅用于提示；
       // 后端已保证绝不覆盖。inplace 拒绝也走统一错误协议。
-      setError(errorMessage(cause));
+      if (mountedRef.current) setError(errorMessage(cause));
       flashStatusBanner(`✗ ${errorMessage(cause)}`);
     } finally {
-      if (uploadAbortRef.current === uploadAbort) uploadAbortRef.current = null;
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
       setUploading(false); // 爪爪退出 uploading 姿态
     }
-  }, [activeCourseId, flashStatusBanner, pickedFiles, setBuildStatus, setUploading]);
+  }, [activeCourseId, flashStatusBanner, pickedFiles, reportIfMounted, setBuildStatus, setLastImport, setUploading]);
 
   const submitUrl = useCallback(async () => {
     setUrlNotice(null);
@@ -275,11 +280,11 @@ export default function MaterialsDialog({
         at: new Date().toISOString(),
         build: null,
       });
+      if (!mountedRef.current) flashStatusBanner(`✓ 已收录 ${result.added}`);
       if (result.buildJobId) {
-        const outcome = await awaitBuild(result.buildJobId, activeCourseId, (msg) => {
-          setUrlNotice((prev) => `${prev ?? ""}
-${msg}`);
-        }, buildPollSignalRef.current);
+        const outcome = await awaitBuild(result.buildJobId, activeCourseId, reportIfMounted((msg) => {
+          setUrlNotice((prev) => `${prev ?? ""}\n${msg}`);
+        }));
         if (outcome !== null) {
           setLastImport((prev) => (prev === null || prev.courseId !== activeCourseId ? prev : { ...prev, build: outcome }));
         }
@@ -293,7 +298,7 @@ ${msg}`);
       setUrlBusy(false);
       setNotice(null);
     }
-  }, [activeCourseId, flashStatusBanner, setBuildStatus, setLastImport, setNotice, urlInput]);
+  }, [activeCourseId, flashStatusBanner, reportIfMounted, setBuildStatus, setLastImport, urlInput]);
 
   // -- 勾选导入 -------------------------------------------------------------------
 
@@ -349,10 +354,9 @@ ${msg}`);
         build: null,
       });
       if (created.buildJobId) {
-        // FL-19：轮询绑定弹窗生命周期——关闭弹窗立即停止（旧实现僵尸轮询）。
-        const outcome = await awaitBuild(created.buildJobId, created.course, (msg) => {
+        const outcome = await awaitBuild(created.buildJobId, created.course, reportIfMounted((msg) => {
           setNotice((prev) => `${prev ?? ""}\n${msg}`);
-        }, buildPollSignalRef.current);
+        }));
         if (outcome !== null) {
           setLastImport((prev) => (prev === null || prev.courseId !== created.course ? prev : { ...prev, build: outcome }));
         }
@@ -370,23 +374,31 @@ ${msg}`);
     checked,
     courseName,
     onClose,
+    reportIfMounted,
     setActiveCourse,
     setBuildStatus,
+    setLastImport,
   ]);
 
   const supportedCount = (candidates ?? []).filter((c) => c.supported).length;
 
+  // 关闭只卸下弹窗。进行中的上传/收录/构建留在原请求里跑完，结果进 store。
+  const requestClose = useCallback(() => {
+    if (busy || urlBusy) flashStatusBanner("资料仍在处理，关闭窗口不会中断");
+    onClose();
+  }, [busy, flashStatusBanner, onClose, urlBusy]);
+
   // W-10：焦点圈闭——打开聚焦首个控件、Tab 层内循环、Escape 关闭（与遮罩点击
   // 同语义）、关闭后焦点还原。
   const dialogRef = useRef<HTMLElement>(null);
-  useFocusTrap({ containerRef: dialogRef, onEscape: onClose });
+  useFocusTrap({ containerRef: dialogRef, onEscape: requestClose });
 
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) requestClose();
       }}
     >
       <section
@@ -402,7 +414,7 @@ ${msg}`);
             type="button"
             aria-label="关闭"
             className="flex h-7 w-7 items-center justify-center rounded-full text-text-faint transition-colors hover:bg-bg-card hover:text-text-primary"
-            onClick={onClose}
+            onClick={requestClose}
           >
             <X size={16} strokeWidth={1.8} aria-hidden />
           </button>
@@ -498,10 +510,11 @@ ${msg}`);
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
+                  title={busy ? "关闭窗口，上传会继续" : undefined}
                   className="h-8 rounded-lg px-3 text-[13px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"
-                  onClick={onClose}
+                  onClick={requestClose}
                 >
-                  取消
+                  {busy ? "关闭" : "取消"}
                 </button>
                 <button
                   type="button"
@@ -591,10 +604,11 @@ ${msg}`);
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
+                  title={busy ? "关闭窗口，创建会继续" : undefined}
                   className="h-8 rounded-lg px-3 text-[13px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"
-                  onClick={onClose}
+                  onClick={requestClose}
                 >
-                  取消
+                  {busy ? "关闭" : "取消"}
                 </button>
                 <button
                   type="button"

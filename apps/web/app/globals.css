@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* pdf.js TextLayer：划词选中的 span 定位/字号按 --total-scale-factor 换算（PdfCanvas 设置）。 */
+@import "pdfjs-dist/web/pdf_viewer.css";
 
 /*
  * StudyClaw Design Tokens（ui_design_spec §1 v1.4，DSH design-platform.css 亮色实值）

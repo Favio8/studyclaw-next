@@ -25,7 +25,6 @@ interface PdfCanvasProps {
   highlights: AnnotationView[];
   onPageCount: (count: number) => void;
   onPageChange: (page: number) => void;
-  onHighlightClick: (id: string) => void;
   /** 文本层为空（扫描件）时回调，ReaderView 据此切解析视图。 */
   onScanned?: (scanned: boolean) => void;
 }
@@ -46,7 +45,7 @@ function toNormalized(clientRects: DOMRect[], pageEl: HTMLElement): Array<{ x: n
   return rects;
 }
 
-export default function PdfCanvas({ source, page, highlights, onPageCount, onPageChange, onHighlightClick, onScanned }: PdfCanvasProps) {
+export default function PdfCanvas({ source, page, highlights, onPageCount, onPageChange, onScanned }: PdfCanvasProps) {
   const pageElRef = useRef<HTMLDivElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -57,6 +56,19 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
   const docRef = useRef<{ numPages: number; getPage: (n: number) => Promise<import("pdfjs-dist").PDFPageProxy> } | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
+  // 容器可用宽度（ResizeObserver 跟踪，≥16px 变化才触发重渲染）：侧栏折叠、
+  // 窗口缩放后已渲染的页面按新宽度重排，而不是留一张裁切/过小的旧画布。
+  const [containerWidth, setContainerWidth] = useState(0);
+  useEffect(() => {
+    const scroller = pageElRef.current?.parentElement ?? null;
+    if (scroller === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const width = Math.round(entries[0]?.contentRect.width ?? 0);
+      setContainerWidth((current) => (Math.abs(current - width) >= 16 ? width : current));
+    });
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, []);
 
   // 文档装载（源文件变化时重载）。
   useEffect(() => {
@@ -118,10 +130,20 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
         pdfPage.cleanup();
         return;
       }
-      const viewport = pdfPage.getViewport({ scale: PAGE_SCALE });
+      // 宽页自适应：以 1 为基准测容器可用宽，缩到放得下为止；上限仍是
+      // PAGE_SCALE（小页不放大）。旧实现固定 1.3 倍，A4 横排/宽讲义首屏
+      // 被裁掉近半（真机验证截图确认），只剩横向滚动一条路。
       const canvas = canvasRef.current;
       const pageEl = pageElRef.current;
+      const scroller = pageElRef.current?.parentElement ?? null;
       if (canvas === null || pageEl === null) return;
+      const availableWidth = Math.max(
+        240,
+        (containerWidth > 0 ? containerWidth : (scroller?.clientWidth ?? window.innerWidth)) - 32,
+      );
+      const baseViewport = pdfPage.getViewport({ scale: 1 });
+      const scale = Math.min(PAGE_SCALE, availableWidth / baseViewport.width);
+      const viewport = pdfPage.getViewport({ scale });
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       canvas.width = Math.floor(viewport.width * dpr);
       canvas.height = Math.floor(viewport.height * dpr);
@@ -129,6 +151,10 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
       canvas.style.height = `${viewport.height}px`;
       pageEl.style.width = `${viewport.width}px`;
       pageEl.style.height = `${viewport.height}px`;
+      // pdf.js TextLayer 契约：span 的字号/定位按 --scale-factor 换算，缺了
+      // 它文本层会以原始尺寸叠在缩放后的 canvas 上（视觉出现大小字重叠、
+      // 选区与视线错位）。
+      pageEl.style.setProperty("--total-scale-factor", String(viewport.scale));
       const context = canvas.getContext("2d");
       if (context !== null) {
         await pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
@@ -156,7 +182,7 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
     return () => {
       cancelled = true;
     };
-  }, [page, status, onScanned]);
+  }, [page, status, onScanned, containerWidth]);
 
   // 选区 → 双锚 + 归一化 rects + 浮层锚点。
   const captureSelection = useCallback(() => {
@@ -235,28 +261,32 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
         data-testid="pdf-page"
       >
         <canvas ref={canvasRef} className="block" />
-        {/* 文本层：absolute 覆盖在 canvas 上，提供原生选区能力 */}
-        <div ref={textLayerRef} className="absolute inset-0" data-testid="pdf-text-layer" />
-        {/* 高亮覆盖层：归一化 rects × 当前渲染尺寸 */}
-        {highlights
-          .filter((item) => item.page === page)
-          .flatMap((item) =>
-            item.rects.map((rect, index) => (
-              <button
-                key={`${item.id}-${index}`}
-                type="button"
-                title={item.comment !== "" ? item.comment : item.quote.text}
-                onClick={() => onHighlightClick(item.id)}
-                className={`absolute rounded-sm ${item.color === "yellow" ? "bg-yellow-300/45" : item.color === "green" ? "bg-green-300/45" : item.color === "blue" ? "bg-blue-300/45" : "bg-red-300/45"}`}
-                style={{
-                  left: `${rect.x * 100}%`,
-                  top: `${rect.y * 100}%`,
-                  width: `${rect.w * 100}%`,
-                  height: `${rect.h * 100}%`,
-                }}
-              />
-            )),
-          )}
+        {/* 文本层：pdf.js 6 不自动加类，.textLayer 样式（absolute/定位/字号换算，
+            见 globals.css 引入的 pdf_viewer.css）依赖这个类名命中。 */}
+        <div ref={textLayerRef} className="textLayer" data-testid="pdf-text-layer" />
+        {/* 高亮覆盖层：归一化 rects × 当前渲染尺寸。
+            纯装饰——必须 pointer-events-none。这些块曾是可点 button，且在 DOM 里
+            位于 textLayer 之后（层级更高），于是「已经划过的原文」再也选不中：
+            拖拽落在高亮块上时 mouseup 仍冒泡，但选区被按钮吃掉，浮层不出现，
+            用户无法二次标注同一段。跳转定位由标注栏承担，不需要这里可点。 */}
+        <div className="pointer-events-none absolute inset-0" aria-hidden data-testid="pdf-highlight-layer">
+          {highlights
+            .filter((item) => item.page === page)
+            .flatMap((item) =>
+              item.rects.map((rect, index) => (
+                <div
+                  key={`${item.id}-${index}`}
+                  className={`absolute rounded-sm ${item.color === "yellow" ? "bg-yellow-300/45" : item.color === "green" ? "bg-green-300/45" : item.color === "blue" ? "bg-blue-300/45" : "bg-red-300/45"}`}
+                  style={{
+                    left: `${rect.x * 100}%`,
+                    top: `${rect.y * 100}%`,
+                    width: `${rect.w * 100}%`,
+                    height: `${rect.h * 100}%`,
+                  }}
+                />
+              )),
+            )}
+        </div>
       </div>
       {status === "loading" ? <p className="py-2 text-[12px] text-text-faint">正在渲染第 {page} 页…</p> : null}
     </div>

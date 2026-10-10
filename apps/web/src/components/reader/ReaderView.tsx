@@ -7,8 +7,8 @@
  * 扫描件 OCR 文本层与 docx/xlsx/html 解析视图在 P2.5（依赖 MinerU）。
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, StickyNote, X } from "lucide-react";
 import MaterialTree from "@/src/components/reader/MaterialTree";
 import PdfCanvas from "@/src/components/reader/PdfCanvas";
 import ParsedView from "@/src/components/reader/ParsedView";
@@ -131,6 +131,24 @@ export default function ReaderView() {
   const reader = useAppStore((s) => s.reader);
   const courseId = useAppStore((s) => s.activeCourseId);
   const [pageCount, setPageCount] = useState(0);
+  // 三区容器宽度：<760px 时标注侧栏从常驻列改为切换浮层——三栏全开会把
+  // 阅读器挤到 ~180px，自适应缩放也无济于事（真机实测 1280 视口即触发）。
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [narrow, setNarrow] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      const next = width > 0 && width < 760;
+      setNarrow((current) => (current === next ? current : next));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  // 窄→宽切换时收起浮层态标注栏（常驻列已回归）。渲染期调态，不用 effect。
+  if (!narrow && railOpen) setRailOpen(false);
   // 扫描件（PDF 零文本层）→ 切解析视图（MinerU OCR 产物）。
   // 换资料时在渲染期重置判定（React 官方 prop 变化调态模式，不用 effect）。
   const [scanned, setScanned] = useState(false);
@@ -168,12 +186,6 @@ export default function ReaderView() {
     useAppStore.getState().setReader({ progress: { ...useAppStore.getState().reader.progress, page } });
   }, []);
 
-  // 点击页内高亮块 → 跳到该标注所在页（id → page）。
-  const locateHighlight = useCallback((id: string) => {
-    const hit = useAppStore.getState().reader.highlights.find((item) => item.id === id);
-    if (hit !== undefined) locate(hit.page);
-  }, [locate]);
-
   if (courseId === null) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
@@ -188,7 +200,7 @@ export default function ReaderView() {
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1 overflow-hidden">
+    <div ref={wrapRef} className="relative flex min-h-0 flex-1 overflow-hidden">
       <MaterialTree />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* 阅读器工具条：页码 + 进度 */}
@@ -223,6 +235,19 @@ export default function ReaderView() {
               </button>
             </div>
           ) : null}
+          {narrow ? (
+            <button
+              type="button"
+              aria-label="标注列表"
+              aria-expanded={railOpen}
+              title="标注列表"
+              onClick={() => setRailOpen((open) => !open)}
+              className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] transition-colors ${railOpen ? "bg-bg-card text-text-primary" : "text-text-muted hover:bg-bg-card hover:text-text-primary"}`}
+            >
+              <StickyNote size={13} strokeWidth={1.8} aria-hidden />
+              标注 {reader.highlights.length}
+            </button>
+          ) : null}
         </div>
 
         {reader.recovered ? (
@@ -248,7 +273,6 @@ export default function ReaderView() {
             highlights={reader.highlights}
             onPageCount={setPageCount}
             onPageChange={gotoPage}
-            onHighlightClick={locateHighlight}
             onScanned={onScanned}
           />
         ) : reader.view === "markdown" ? (
@@ -258,7 +282,17 @@ export default function ReaderView() {
           <ParsedView source={reader.source} />
         )}
       </div>
-      <AnnotationRail onLocate={locate} />
+      {/* 宽容器：标注栏常驻；窄容器：退场为切换浮层（工具条「标注」钮），
+          给阅读器让出宽度——自适应缩放需要 ≥300px 才有可读性。
+          浮层必须从工具条下方起（top-9，对齐工具条高度），不能 inset-y-0：
+          否则它盖住工具条上那个「标注」切换钮，按钮被自己的浮层拦截，
+          打开后无法关闭（真机实测：Playwright 点击被 overlay subtree 挡下）。 */}
+      {!narrow ? <AnnotationRail onLocate={locate} /> : null}
+      {narrow && railOpen ? (
+        <div className="absolute right-0 bottom-0 top-9 z-20 shadow-lv3">
+          <AnnotationRail onLocate={locate} />
+        </div>
+      ) : null}
       <SelectionPopover />
       <ActionCard />
       <CardDraftPanel />

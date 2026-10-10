@@ -11,18 +11,21 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { CircleAlert, PanelRightOpen } from "lucide-react";
 import ChatArea from "@/src/components/chat/ChatArea";
 import CenterSwitcher from "@/src/components/center/CenterSwitcher";
 import LeftNav from "@/src/components/left/LeftNav";
 import RightPanel from "@/src/components/panel/RightPanel";
-import ReaderView from "@/src/components/reader/ReaderView";
 import CommandPalette from "@/src/components/palette/CommandPalette";
 import SettingsDialog from "@/src/components/settings/SettingsDialog";
 import { useKeyboardShortcuts } from "@/src/hooks/useKeyboardShortcuts";
 import { usePanelData } from "@/src/hooks/usePanelData";
 import { api } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
+
+// 阅读器按路由级动态加载：pdfjs-dist 体积大，首屏不承担（PRD 需求三）。
+const ReaderView = dynamic(() => import("@/src/components/reader/ReaderView"), { ssr: false });
 
 /** DSH columns.ts：SIDEBAR_MIN/MAX/DEFAULT 与 DETAILS_MIN/MAX/DEFAULT。 */
 const SIDEBAR_MIN = 264;

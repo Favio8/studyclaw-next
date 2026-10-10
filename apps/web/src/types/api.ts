@@ -296,6 +296,57 @@ export interface ConceptEvalTrend {
   consecutiveFailures: number;
 }
 
+// -- 辅助阅读（PRD 需求三）------------------------------------------------------
+
+/** 归一化 0-1 矩形（相对页面宽高；渲染时乘当前页面尺寸）。 */
+export interface AnnotationRectView {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface AnnotationView {
+  id: string;
+  page: number;
+  rects: AnnotationRectView[];
+  /** 双锚的文本侧：quote 本体 + 前后文（版面变化时重定位）。 */
+  quote: { text: string; prefix: string; suffix: string };
+  color: "yellow" | "green" | "blue" | "red";
+  comment: string;
+  tags: string[];
+  conceptId: string | null;
+  createdAt: string;
+}
+
+export interface ReadingProgressView {
+  page: number;
+  percent: number;
+  updatedAt: string;
+}
+
+export interface ReadingLoadPayload {
+  source: string;
+  view: "pdf" | "markdown" | "unsupported";
+  exists: boolean;
+  progress: ReadingProgressView;
+  highlights: AnnotationView[];
+  /** 标注文件损坏并已重建（旧文件备份为 .bak-*）。 */
+  recovered: boolean;
+}
+
+export interface ReadingActionEvent {
+  event: "token" | "done" | "error";
+  data: {
+    delta?: string;
+    kind?: string;
+    model?: string;
+    chars?: number;
+    code?: string;
+    message?: string;
+  };
+}
+
 export interface HeatmapDay {
   date: string;
   score: number;

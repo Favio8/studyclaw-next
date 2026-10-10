@@ -8,8 +8,13 @@
 
 import type {
   ApiErrorPayload,
+  AnnotationRectView,
+  AnnotationView,
   ConceptEvalTrend,
   CourseSummary,
+  ReadingActionEvent,
+  ReadingLoadPayload,
+  ReadingProgressView,
   WakeupCard,
   EvalEvent,
   HeatmapDayDetail,
@@ -350,6 +355,44 @@ export const api = {
   /** L1：某概念最近评测趋势（连续未过 → 前端提示换学习风格）。 */
   evalTrend: (courseId: string, conceptId: string, limit = 3) =>
     rpc<ConceptEvalTrend>("courses.evalTrend", { courseId, conceptId, limit }),
+
+  // -- 辅助阅读（PRD 需求三）----------------------------------------------------
+  readingLoad: (source: string) =>
+    rpc<ReadingLoadPayload>("reading.load", { source }),
+  readingText: (source: string) =>
+    rpc<{ text: string; truncated: boolean }>("reading.text", { source }),
+  readingSaveProgress: (source: string, page: number, percent: number) =>
+    rpc<ReadingProgressView>("reading.progress.save", { source, page, percent }),
+  readingHighlights: (source: string) =>
+    rpc<{ highlights: AnnotationView[] }>("reading.highlights.list", { source }),
+  readingAddHighlight: (source: string, input: {
+    page: number; rects: AnnotationRectView[]; quote: string; prefix: string; suffix: string;
+    color: AnnotationView["color"]; comment: string; tags: string[]; conceptId?: string | null;
+  }) =>
+    rpc<AnnotationView>("reading.highlights.add", { source, ...input }),
+  readingUpdateHighlight: (source: string, id: string, patch: { color?: AnnotationView["color"]; comment?: string; tags?: string[]; conceptId?: string | null }) =>
+    rpc<AnnotationView>("reading.highlights.update", { source, id, ...patch }),
+  readingRemoveHighlight: (source: string, id: string) =>
+    rpc<{ removed: boolean }>("reading.highlights.remove", { source, id }),
+  readingExport: (source: string) =>
+    rpc<{ markdown: string; count: number }>("reading.export", { source }),
+  /** 划词解释（SSE：token…/done/error）。 */
+  readingExplain: (source: string, selection: string, signal?: AbortSignal) =>
+    streamSse<ReadingActionEvent>("/api/reading/explain", { source, selection }, undefined, signal),
+  /** 划词翻译（SSE：token…/done/error）。 */
+  readingTranslate: (source: string, selection: string, signal?: AbortSignal) =>
+    streamSse<ReadingActionEvent>("/api/reading/translate", { source, selection }, undefined, signal),
+  /** 资料字节（带鉴权；pdf.js 自己发请求不带 Bearer token）。 */
+  readingFileBytes: async (source: string): Promise<ArrayBuffer> => {
+    const response = await fetch(`/api/reading.file?source=${encodeURIComponent(source)}`, {
+      headers: { Accept: "application/pdf", ...authHeaders() },
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new ApiError("READING_FILE_FAILED", `资料读取失败（HTTP ${response.status}）${text.slice(0, 200)}`, response.status);
+    }
+    return response.arrayBuffer();
+  },
 
   heatmap: (weeks = 12) =>
     rpc<HeatmapPayload>("metrics.heatmap", { weeks }),

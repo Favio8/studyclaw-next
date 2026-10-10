@@ -8,6 +8,7 @@
 
 import { create } from "zustand";
 import type {
+  AnnotationView,
   CourseSummary,
   HeatmapPayload,
   MasteryPayload,
@@ -94,6 +95,57 @@ export const initialQuiz: QuizState = {
   lastEvalId: null,
   answerText: "",
   styleSuggestion: null,
+};
+
+// ---------------------------------------------------------------------------
+// Reader（📖 阅读 Tab）状态：资料精读的标注与划词动作（PRD 需求三）。
+// 异步编排在 lib/readingFlow.ts（store 保持纯同步，同 quiz 的模式）。
+// ---------------------------------------------------------------------------
+
+/** 划词浮层的选区（双锚 + 归一化 rects + 视口锚点）。 */
+export interface ReaderSelection {
+  text: string;
+  prefix: string;
+  suffix: string;
+  page: number;
+  rects: Array<{ x: number; y: number; w: number; h: number }>;
+  /** 浮层锚点（视口坐标）。 */
+  x: number;
+  y: number;
+}
+
+export interface ReaderActionState {
+  kind: "explain" | "translate";
+  streaming: boolean;
+  text: string;
+  error: string | null;
+}
+
+export interface ReaderState {
+  source: string | null;
+  view: "pdf" | "markdown" | "unsupported";
+  exists: boolean;
+  progress: { page: number; percent: number };
+  highlights: AnnotationView[];
+  loading: boolean;
+  error: string | null;
+  /** 标注文件损坏并已重建。 */
+  recovered: boolean;
+  selection: ReaderSelection | null;
+  action: ReaderActionState | null;
+}
+
+export const initialReader: ReaderState = {
+  source: null,
+  view: "unsupported",
+  exists: false,
+  progress: { page: 1, percent: 0 },
+  highlights: [],
+  loading: false,
+  error: null,
+  recovered: false,
+  selection: null,
+  action: null,
 };
 
 export interface ChatMessage {
@@ -187,6 +239,8 @@ interface AppState {
   mastery: MasteryPayload | null;
   heatmap: HeatmapPayload | null;
   quiz: QuizState;
+  /** 辅助阅读（PRD 需求三）。 */
+  reader: ReaderState;
   /** 大纲树折叠状态（key=章节 id）；入 store 跨视图/重挂保持。 */
   syllabusCollapsed: Record<string, boolean>;
   /** 大纲树搜索词（入 store，切视图不丢）。 */
@@ -252,6 +306,8 @@ interface AppState {
   setSyllabusStatusFilter: (filter: SyllabusStatusFilter) => void;
   setQuiz: (patch: Partial<QuizState>) => void;
   quizReset: () => void;
+  setReader: (patch: Partial<ReaderState>) => void;
+  readerReset: () => void;
   setPaletteOpen: (open: boolean) => void;
   setWizardOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -310,6 +366,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   paletteOpen: false,
   wizardOpen: false,
   settingsOpen: false,
+  reader: { ...initialReader },
 
   setCourses: (courses) => set({ courses }),
   setActiveCourse: (courseId) =>
@@ -326,6 +383,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       mastery: null,
       heatmap: null,
       quiz: { ...initialQuiz },
+      reader: { ...initialReader },
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",
@@ -443,6 +501,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setQuiz: (patch) =>
     set((state) => ({ quiz: { ...state.quiz, ...patch } })),
   quizReset: () => set({ quiz: { ...initialQuiz } }),
+  setReader: (patch) => set((state) => ({ reader: { ...state.reader, ...patch } })),
+  readerReset: () => set({ reader: { ...initialReader } }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   setWizardOpen: (wizardOpen) => set({ wizardOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -462,6 +522,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       mastery: null,
       heatmap: null,
       quiz: { ...initialQuiz },
+      reader: { ...initialReader },
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",

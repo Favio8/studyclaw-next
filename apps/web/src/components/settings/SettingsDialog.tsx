@@ -322,8 +322,8 @@ function ParseSettings({
           需要 Python ≥3.10；模型下载体积见上方档位说明，全部本地处理、不上传文档。
         </p>
         <div className="mt-3 space-y-2 rounded-xl bg-bg-root p-3 font-mono text-[12px] leading-5 text-text-muted">
-          <div>uv tool install "mineru&gt;=4.0,&lt;5"</div>
-          <div className="text-text-faint"># 或：pipx install "mineru&gt;=4.0,&lt;5"</div>
+          <div>uv tool install &quot;mineru&gt;=4.0,&lt;5&quot;</div>
+          <div className="text-text-faint"># 或：pipx install &quot;mineru&gt;=4.0,&lt;5&quot;</div>
           <div className="text-text-faint"># 关闭 MinerU 匿名遥测：mineru telemetry disable</div>
         </div>
         <p className="mt-2 text-[12px] leading-5 text-text-faint">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { BarChart3, CalendarClock, CircleHelp, FileDown, FileText, ListChecks, RefreshCw } from "lucide-react";
+import { BarChart3, CalendarClock, CircleHelp, FileDown, FileText, Highlighter, ListChecks, RefreshCw } from "lucide-react";
 import { masteryTone, pct, relativeTime } from "@/src/lib/format";
 import { useAppStore } from "@/src/store/useAppStore";
 import { refreshPanelData } from "@/src/lib/panelData";
@@ -35,7 +35,14 @@ export default function ProgressTab() {
   const progressError = useAppStore((s) => s.progressError);
   const activeCourseId = useAppStore((s) => s.activeCourseId);
   const lastImport = useAppStore((s) => s.lastImport);
+  const readingTraces = useAppStore((s) => s.readingTraces);
   const [refreshing, setRefreshing] = useState(false);
+
+  // 痕迹按 conceptId 展示时尽量回显概念名（进度数据已在 store）。
+  const conceptNameOf = useCallback(
+    (conceptId: string): string => progress?.concepts.find((item) => item.id === conceptId)?.name ?? conceptId,
+    [progress],
+  );
 
   // 与大纲 Tab 的错误态对齐：加载失败给出可重试的错误卡，而不是无限骨架屏。
   if (!progress && progressError) {
@@ -174,6 +181,31 @@ export default function ProgressTab() {
                 </div>
               );
             })}
+          </div>
+        )}
+      </PanelSection>
+
+      {/* P3「我的痕迹」：阅读标注按概念聚合（只读信号，不影响掌握度）。 */}
+      <PanelSection title="我的痕迹" icon={Highlighter}>
+        {readingTraces.length === 0 ? (
+          <p className="px-1 py-2 text-[12px] leading-5 text-text-faint">
+            在「阅读」活动里给资料划线并关联概念后，这里会按概念汇总你的精读痕迹。
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {readingTraces.slice(0, 8).map((trace) => (
+              <div key={trace.conceptId} className="flex items-center gap-2 rounded-lg bg-bg-root px-2.5 py-1.5">
+                <Highlighter size={12} strokeWidth={1.8} className="shrink-0 text-accent-focus" aria-hidden />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-text-primary" title={trace.conceptId}>
+                  {conceptNameOf(trace.conceptId)} · {trace.conceptId}
+                </span>
+                <span className="shrink-0 text-[11px] text-text-muted">{trace.count} 处标注</span>
+                <span className="shrink-0 text-[10px] text-text-faint">{relativeTime(trace.lastAt)}</span>
+              </div>
+            ))}
+            <p className="px-1 pt-0.5 text-[10px] leading-4 text-text-faint">
+              精读痕迹只作参考信号，不直接改变掌握度；把它变成题卡才会进入 SM-2 排期。
+            </p>
           </div>
         )}
       </PanelSection>

@@ -5,9 +5,9 @@
  * MVP 只做本资料的标注（概念关联与「我的痕迹」在 P3）。
  */
 
-import { ClipboardCopy, Trash2 } from "lucide-react";
+import { ClipboardCopy, FileDown, Trash2 } from "lucide-react";
 import { useAppStore } from "@/src/store/useAppStore";
-import { readingExportAnnotations, readingRemoveHighlight } from "@/src/lib/readingFlow";
+import { readingAppendNotes, readingExportAnnotations, readingRemoveHighlight } from "@/src/lib/readingFlow";
 
 const COLOR_LABEL: Record<string, string> = {
   yellow: "黄",
@@ -28,10 +28,19 @@ export default function AnnotationRail({ onLocate }: { onLocate: (page: number) 
           type="button"
           title="导出为 Markdown 并复制"
           onClick={() => void readingExportAnnotations()}
-          className="ml-auto inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"
+          className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"
         >
           <ClipboardCopy size={12} strokeWidth={1.8} aria-hidden />
           导出
+        </button>
+        <button
+          type="button"
+          title="把标注追加到课程笔记 notes.md"
+          onClick={() => void readingAppendNotes()}
+          className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary"
+        >
+          <FileDown size={12} strokeWidth={1.8} aria-hidden />
+          追加笔记
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -50,6 +59,7 @@ export default function AnnotationRail({ onLocate }: { onLocate: (page: number) 
             >
               <span className="text-[10px] text-text-faint">第 {item.page} 页 · {COLOR_LABEL[item.color] ?? item.color}</span>
               <span className="mt-0.5 block text-[12px] leading-5 text-text-primary">{item.quote.text || "（区域标注）"}</span>
+              {item.conceptId !== null ? <span className="mt-0.5 block text-[11px] leading-4 text-accent-focus">概念 {item.conceptId}</span> : null}
               {item.comment !== "" ? <span className="mt-0.5 block text-[11px] leading-5 text-text-muted">{item.comment}</span> : null}
             </button>
             <button

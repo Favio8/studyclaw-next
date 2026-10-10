@@ -121,6 +121,14 @@ export interface ReaderActionState {
   error: string | null;
 }
 
+/** P3：划词建卡的草稿（生成后待用户确认，可编辑题干）。 */
+export interface ReaderCardDraft {
+  task: Record<string, unknown>;
+  quote: string;
+  busy: boolean;
+  error: string | null;
+}
+
 export interface ReaderState {
   source: string | null;
   view: "pdf" | "markdown" | "unsupported";
@@ -133,6 +141,8 @@ export interface ReaderState {
   recovered: boolean;
   selection: ReaderSelection | null;
   action: ReaderActionState | null;
+  /** P3：划词建卡草稿（待确认）。 */
+  cardDraft: ReaderCardDraft | null;
 }
 
 export const initialReader: ReaderState = {
@@ -146,6 +156,7 @@ export const initialReader: ReaderState = {
   recovered: false,
   selection: null,
   action: null,
+  cardDraft: null,
 };
 
 export interface ChatMessage {
@@ -238,6 +249,8 @@ interface AppState {
   progressError: string | null;
   mastery: MasteryPayload | null;
   heatmap: HeatmapPayload | null;
+  /** P3「我的痕迹」：阅读标注按概念聚合（只读信号，不改掌握度）。 */
+  readingTraces: Array<{ conceptId: string; count: number; lastAt: string }>;
   quiz: QuizState;
   /** 辅助阅读（PRD 需求三）。 */
   reader: ReaderState;
@@ -298,7 +311,7 @@ interface AppState {
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setLastImport: (value: AppState["lastImport"] | ((prev: AppState["lastImport"]) => AppState["lastImport"])) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
-  setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap">>) => void;
+  setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap" | "readingTraces">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
   setSyllabusSearch: (search: string) => void;
   setSyllabusView: (view: SyllabusView) => void;
@@ -357,6 +370,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   progressError: null,
   mastery: null,
   heatmap: null,
+  readingTraces: [],
   quiz: { ...initialQuiz },
   syllabusCollapsed: {},
   syllabusSearch: "",
@@ -382,14 +396,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       progressError: null,
       mastery: null,
       heatmap: null,
+      readingTraces: [],
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",
       syllabusMindmapCollapsed: {},
-      syllabusStatusFilter: null,
-      focusConceptId: null,
+      syllabusStatusFilter: null,      focusConceptId: null,
       buildStatus: "idle",
       streamPhase: null,
       toolRunning: 0,
@@ -521,14 +535,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       progressError: null,
       mastery: null,
       heatmap: null,
+      readingTraces: [],
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",
       syllabusMindmapCollapsed: {},
-      syllabusStatusFilter: null,
-      buildStatus: "idle",
+      syllabusStatusFilter: null,      buildStatus: "idle",
       streamPhase: null,
       toolRunning: 0,
       uploading: false,

@@ -21,6 +21,8 @@ const { apiMocks } = vi.hoisted(() => ({
     readingFileBytes: vi.fn(),
     readingText: vi.fn(),
     readingParsed: vi.fn(),
+    cardDraft: vi.fn(),
+    cardCommit: vi.fn(),
   },
 }));
 
@@ -75,6 +77,8 @@ beforeEach(() => {
   apiMocks.readingExplain.mockReset();
   apiMocks.readingTranslate.mockReset();
   apiMocks.readingParsed.mockReset();
+  apiMocks.cardDraft.mockReset();
+  apiMocks.cardCommit.mockReset();
 });
 
 afterEach(() => {
@@ -248,5 +252,96 @@ describe("ReaderView 解析视图（P2.5）", () => {
     await waitFor(() => expect(screen.getByText(/在设置里启用 MinerU/)).toBeDefined());
     expect(apiMocks.readingParsed).toHaveBeenCalledWith("sources/scan.pdf");
     expect(screen.queryByTestId("pdf-canvas")).toBeNull();
+  });
+});
+
+describe("ReaderView 划词建卡（P3）", () => {
+  it("选词 → 建卡 → 草稿面板 → 确认落库", async () => {
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/a.pdf",
+      view: "pdf",
+      exists: true,
+      progress: { page: 3, percent: 30, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    apiMocks.cardDraft.mockResolvedValue({
+      courseId: "course-1",
+      draft: {
+        task_id: "ef_001",
+        concept_id: "c_ef",
+        type: "concept",
+        difficulty: 2,
+        question: "SM-2 的 EF 钳制区间是什么？",
+        options: null,
+        evaluation_criteria: { rubric: ["答对 [1.3, 2.9]", "说明处理"], keywords: ["EF"] },
+      },
+    });
+    apiMocks.cardCommit.mockResolvedValue({ courseId: "course-1", tasks: [] });
+    render(<ReaderView />);
+    await readingOpen("sources/a.pdf");
+    await waitFor(() => expect(screen.getByTestId("pdf-canvas")).toBeDefined());
+
+    readingSelectionChanged(SELECTION);
+    await waitFor(() => expect(screen.getByTestId("selection-popover")).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "建卡" }));
+
+    // 草稿面板：题干可编辑
+    await waitFor(() => expect(screen.getByTestId("card-draft-panel")).toBeDefined());
+    const editor = screen.getByLabelText("题干（可编辑）") as HTMLTextAreaElement;
+    expect(editor.value).toContain("EF 钳制区间");
+    fireEvent.change(editor, { target: { value: "SM-2 的 EF 为什么钳制在 [1.3, 2.9]？" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "确认建卡" }));
+    await waitFor(() => expect(apiMocks.cardCommit).toHaveBeenCalledTimes(1));
+    expect(apiMocks.cardCommit.mock.calls[0]?.[1]).toMatchObject({
+      question: "SM-2 的 EF 为什么钳制在 [1.3, 2.9]？",
+      task_id: "ef_001",
+    });
+    // 落库后面板关闭
+    await waitFor(() => expect(screen.queryByTestId("card-draft-panel")).toBeNull());
+  });
+
+  it("概念建议：选区命中进度概念名时随标注落库", async () => {
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/a.pdf",
+      view: "pdf",
+      exists: true,
+      progress: { page: 3, percent: 30, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    // 让 addHighlight 回显调用参数里的 conceptId（真实服务端会落库并返回）
+    apiMocks.readingAddHighlight.mockImplementation(async (_source: string, input: Record<string, unknown>) => ({
+      id: "hl_concept",
+      page: Number(input["page"] ?? 1),
+      rects: (input["rects"] as unknown[]) ?? [],
+      quote: { text: String(input["quote"] ?? ""), prefix: "", suffix: "" },
+      color: String(input["color"] ?? "yellow"),
+      comment: "",
+      tags: [],
+      conceptId: (input["conceptId"] as string | null) ?? null,
+      createdAt: "2026-10-10T00:00:00Z",
+    }));
+    // store 里放进度概念（suggestConceptId 的数据源）
+    useAppStore.getState().setPanelData({
+      progress: {
+        overallMastery: 0.4,
+        dueCount: 1,
+        lastUpdatedAt: null,
+        concepts: [{ id: "c_ef", name: "难度因子", chapter: "SM-2", mastery: 0.4, evals: 3, passRate: 0.3, ef: 2.5, nextReviewAt: null, misattribution: "无" }],
+      },
+    });
+    render(<ReaderView />);
+    await readingOpen("sources/a.pdf");
+    await waitFor(() => expect(screen.getByTestId("pdf-canvas")).toBeDefined());
+
+    readingSelectionChanged({ ...SELECTION, text: "难度因子 EF 的钳制机制" });
+    await waitFor(() => expect(screen.getByTestId("selection-popover")).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "高亮（黄）" }));
+    await waitFor(() => expect(apiMocks.readingAddHighlight).toHaveBeenCalledTimes(1));
+    expect(apiMocks.readingAddHighlight.mock.calls[0]?.[1]).toMatchObject({ conceptId: "c_ef" });
+    // 标注栏展示概念标签
+    await waitFor(() => expect(screen.getByText(/概念 c_ef/)).toBeDefined());
   });
 });

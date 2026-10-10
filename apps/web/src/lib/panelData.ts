@@ -36,10 +36,12 @@ export async function refreshPanelData(): Promise<void> {
 }
 
 async function runPanelRefresh(courseId: string): Promise<void> {
-  const [progress, mastery, heatmap] = await Promise.allSettled([
+  const [progress, mastery, heatmap, traces] = await Promise.allSettled([
     api.progress(courseId),
     api.mastery(courseId),
     api.heatmap(12),
+    // P3「我的痕迹」：阅读标注按概念聚合（失败不阻塞其余面板）。
+    api.readingTraces(),
   ]);
   // 进度一路失败必须显式落错（否则 ProgressTab 只有骨架屏可渲染，
   // 出现「大纲正常、进度永远转圈」的割裂画面）。
@@ -57,6 +59,7 @@ async function runPanelRefresh(courseId: string): Promise<void> {
     progressError,
     mastery: mastery.status === "fulfilled" ? mastery.value : null,
     heatmap: heatmap.status === "fulfilled" ? heatmap.value : null,
+    readingTraces: traces.status === "fulfilled" ? traces.value.traces : [],
   });
 }
 

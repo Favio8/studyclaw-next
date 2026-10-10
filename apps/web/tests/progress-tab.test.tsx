@@ -14,6 +14,7 @@ const { storeState, refreshPanelData } = vi.hoisted(() => {
       },
       lastImport: null as unknown,
       activeCourseId: "course-1" as string | null,
+      readingTraces: [] as Array<{ conceptId: string; count: number; lastAt: string }>,
     },
   };
 });

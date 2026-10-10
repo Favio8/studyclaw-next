@@ -17,11 +17,75 @@ import AnnotationRail from "@/src/components/reader/AnnotationRail";
 import SelectionPopover from "@/src/components/reader/SelectionPopover";
 import { useAppStore } from "@/src/store/useAppStore";
 import {
+  readingCommitCard,
   readingContinueInChat,
   readingDismissAction,
+  readingDismissCardDraft,
   readingOpen,
   readingSaveProgress,
 } from "@/src/lib/readingFlow";
+
+/** P3：划词建卡草稿确认面板（题干可编辑，确认后入池）。 */
+function CardDraftPanel() {
+  const draft = useAppStore((s) => s.reader.cardDraft);
+  const task = draft?.task;
+  // 新草稿到达时在渲染期同步题干（React 调锆模式，不用 effect）。
+  const [question, setQuestion] = useState(() => (typeof task?.["question"] === "string" ? String(task["question"]) : ""));
+  const [questionFor, setQuestionFor] = useState(task);
+  if (questionFor !== task) {
+    setQuestionFor(task);
+    setQuestion(typeof task?.["question"] === "string" ? String(task["question"]) : "");
+  }
+  if (draft === null) return null;
+  const ready = Object.keys(draft.task).length > 0 && !draft.busy;
+
+  return (
+    <div className="absolute bottom-4 left-1/2 z-20 w-[min(560px,calc(100%-48px))] -translate-x-1/2 rounded-2xl border border-border-line bg-bg-panel p-3 shadow-lv3" data-testid="card-draft-panel">
+      <div className="flex items-center gap-2">
+        <span className="text-[12px] font-medium text-text-primary">题卡草稿</span>
+        <span className="truncate text-[11px] text-text-faint" title={draft.quote}>“{draft.quote.slice(0, 24)}”</span>
+        <button
+          type="button"
+          aria-label="关闭"
+          title="关闭"
+          onClick={readingDismissCardDraft}
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded-full text-text-faint transition-colors hover:bg-bg-card hover:text-text-primary"
+        >
+          <X size={13} strokeWidth={1.8} aria-hidden />
+        </button>
+      </div>
+      {draft.busy ? (
+        <p className="mt-2 text-[12px] text-text-muted">正在生成题卡草稿…</p>
+      ) : draft.error !== null ? (
+        <p role="alert" className="mt-2 text-[12px] leading-5 text-accent-fail">{draft.error}</p>
+      ) : (
+        <>
+          <label className="mt-2 block text-[11px] text-text-faint" htmlFor="card-draft-question">题干（可编辑）</label>
+          <textarea
+            id="card-draft-question"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            rows={3}
+            className="mt-1 w-full resize-none rounded-lg border border-border-line bg-bg-root px-2 py-1.5 text-[13px] leading-5 text-text-primary focus:border-accent-focus focus:outline-none"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-[11px] text-text-faint">
+              {String(draft.task["type"] ?? "concept")} · 难度 {String(draft.task["difficulty"] ?? 2)} · {String(draft.task["concept_id"] ?? "")}
+            </span>
+            <button
+              type="button"
+              disabled={!ready || question.trim() === ""}
+              onClick={() => void readingCommitCard({ ...task, question: question.trim() })}
+              className="ml-auto inline-flex h-7 items-center rounded-md bg-accent-focus px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-accent-focus-hover disabled:opacity-40"
+            >
+              确认建卡
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /** 阅读动作结果卡（解释/翻译的流式输出）。 */
 function ActionCard() {
@@ -197,6 +261,7 @@ export default function ReaderView() {
       <AnnotationRail onLocate={locate} />
       <SelectionPopover />
       <ActionCard />
+      <CardDraftPanel />
     </div>
   );
 }

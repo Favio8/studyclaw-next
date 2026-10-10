@@ -55,7 +55,27 @@ export async function readingSaveProgress(page: number, percent: number): Promis
   }
 }
 
-/** 划词高亮：用当前选区落一条标注。 */
+/**
+ * 概念建议（P3）：用右栏已装载的进度数据（concept id + name）对选区做
+ * 名称包含匹配——命中则随高亮落库，未命中为 null。纯启发式，不写掌握度。
+ */
+function suggestConceptId(text: string): string | null {
+  const concepts = useAppStore.getState().progress?.concepts ?? [];
+  if (concepts.length === 0 || text.trim() === "") return null;
+  const needle = text.trim();
+  let best: { id: string; score: number } | null = null;
+  for (const concept of concepts) {
+    const name = concept.name?.trim() ?? "";
+    if (name === "" || name.length < 2) continue;
+    let score = 0;
+    if (needle.includes(name)) score = name.length;
+    else if (name.includes(needle) && needle.length >= 4) score = needle.length;
+    if (score > 0 && (best === null || score > best.score)) best = { id: concept.id, score };
+  }
+  return best?.id ?? null;
+}
+
+/** 划词高亮：用当前选区落一条标注（带概念建议）。 */
 export async function readingAddHighlight(color: AnnotationView["color"]): Promise<void> {
   const { reader } = useAppStore.getState();
   const selection = reader.selection;
@@ -70,6 +90,7 @@ export async function readingAddHighlight(color: AnnotationView["color"]): Promi
       color,
       comment: "",
       tags: [],
+      conceptId: suggestConceptId(selection.text),
     });
     useAppStore.getState().setReader({
       highlights: [...useAppStore.getState().reader.highlights, record],
@@ -112,6 +133,67 @@ export async function readingExportAnnotations(): Promise<void> {
   } catch (exc) {
     useAppStore.getState().flashStatusBanner(`✗ 导出失败: ${errorMessage(exc)}`);
   }
+}
+
+/** P3：导出标注追加到课程 notes.md（用户主动动作，直接写不审批）。 */
+export async function readingAppendNotes(): Promise<void> {
+  const { reader } = useAppStore.getState();
+  if (reader.source === null) return;
+  try {
+    const { appended, count } = await api.readingAppendNotes(reader.source);
+    if (!appended) {
+      useAppStore.getState().flashStatusBanner("这份资料还没有标注");
+      return;
+    }
+    useAppStore.getState().flashStatusBanner(`✓ 已将 ${count} 条标注追加到课程笔记 notes.md`);
+  } catch (exc) {
+    useAppStore.getState().flashStatusBanner(`✗ 追加笔记失败: ${errorMessage(exc)}`);
+  }
+}
+
+/** P3：划词建卡——生成草稿（不落盘），弹出确认面板。 */
+export async function readingDraftCard(): Promise<void> {
+  const { reader } = useAppStore.getState();
+  const selection = reader.selection;
+  const courseId = useAppStore.getState().activeCourseId;
+  if (reader.source === null || selection === null || courseId === null) return;
+  useAppStore.getState().setReader({
+    selection: null,
+    cardDraft: { task: {}, quote: selection.text, busy: true, error: null },
+  });
+  try {
+    const payload = await api.cardDraft(courseId, {
+      content: `资料 ${reader.source} 中的这段内容：\n${selection.text}`,
+      title: selection.text.slice(0, 30),
+      conceptId: suggestConceptId(selection.text),
+    });
+    useAppStore.getState().setReader({
+      cardDraft: { task: payload.draft, quote: selection.text, busy: false, error: null },
+    });
+  } catch (exc) {
+    useAppStore.getState().setReader({
+      cardDraft: { task: {}, quote: selection.text, busy: false, error: errorMessage(exc) },
+    });
+  }
+}
+
+/** P3：草稿确认落盘（题干可被用户编辑）。 */
+export async function readingCommitCard(task: Record<string, unknown>): Promise<void> {
+  const courseId = useAppStore.getState().activeCourseId;
+  if (courseId === null) return;
+  const current = useAppStore.getState().reader.cardDraft ?? { task, quote: "", busy: false, error: null };
+  useAppStore.getState().setReader({ cardDraft: { ...current, busy: true, error: null } });
+  try {
+    await api.cardCommit(courseId, task);
+    useAppStore.getState().setReader({ cardDraft: null });
+    useAppStore.getState().flashStatusBanner("✓ 已加入题卡池，将按 SM-2 排期");
+  } catch (exc) {
+    useAppStore.getState().setReader({ cardDraft: { ...current, busy: false, error: errorMessage(exc) } });
+  }
+}
+
+export function readingDismissCardDraft(): void {
+  useAppStore.getState().setReader({ cardDraft: null });
 }
 
 /** 选区变化（阅读器文本层 mouseup 后调用）。 */

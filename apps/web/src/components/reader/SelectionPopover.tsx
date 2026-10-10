@@ -1,14 +1,13 @@
 "use client";
 
 /**
- * 划词浮层（PRD 需求三）：选中文本后弹出的六个动作——四种颜色高亮、翻译、
- * 解释。非模态（z-20~30，低于一切对话框），不进 modalStack。建卡/笔记动作
- * 在 P3 接入（依赖概念关联与题卡草稿）。
+ * 划词浮层（PRD 需求三）：选中文本后弹出的动作——四种颜色高亮、翻译、
+ * 解释、建卡。非模态（z-20~30，低于一切对话框），不进 modalStack。
  */
 
-import { Languages, Sparkles } from "lucide-react";
+import { Languages, PlusSquare, Sparkles } from "lucide-react";
 import { useAppStore } from "@/src/store/useAppStore";
-import { readingAddHighlight, readingRunAction } from "@/src/lib/readingFlow";
+import { readingAddHighlight, readingDraftCard, readingRunAction } from "@/src/lib/readingFlow";
 import type { AnnotationView } from "@/src/types/api";
 
 const COLORS: Array<{ value: AnnotationView["color"]; label: string; className: string }> = [
@@ -20,9 +19,10 @@ const COLORS: Array<{ value: AnnotationView["color"]; label: string; className: 
 
 export default function SelectionPopover() {
   const selection = useAppStore((s) => s.reader.selection);
+  const courseId = useAppStore((s) => s.activeCourseId);
   if (selection === null) return null;
 
-  const left = Math.max(8, Math.min(window.innerWidth - 260, selection.x - 120));
+  const left = Math.max(8, Math.min(window.innerWidth - 300, selection.x - 140));
   const top = Math.max(8, selection.y - 44);
 
   return (
@@ -61,6 +61,16 @@ export default function SelectionPopover() {
       >
         <Sparkles size={13} strokeWidth={1.8} aria-hidden />
         解释
+      </button>
+      <button
+        type="button"
+        disabled={courseId === null}
+        title="把选中内容生成题卡草稿（确认后入池）"
+        onClick={() => void readingDraftCard()}
+        className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-text-primary transition-colors hover:bg-bg-card disabled:opacity-40"
+      >
+        <PlusSquare size={13} strokeWidth={1.8} aria-hidden />
+        建卡
       </button>
     </div>
   );

@@ -380,6 +380,18 @@ export const api = {
     rpc<{ removed: boolean }>("reading.highlights.remove", { source, id }),
   readingExport: (source: string) =>
     rpc<{ markdown: string; count: number }>("reading.export", { source }),
+  /** P3「我的痕迹」：全课程标注按概念聚合。 */
+  readingTraces: () =>
+    rpc<{ traces: Array<{ conceptId: string; count: number; lastAt: string }> }>("reading.traces"),
+  /** P3：导出标注追加到课程 notes.md（用户主动动作）。 */
+  readingAppendNotes: (source: string) =>
+    rpc<{ appended: boolean; count: number }>("reading.appendNotes", { source }),
+  /** P3：阅读划词建卡——草稿生成（不落盘）。 */
+  cardDraft: (courseId: string, input: { content: string; title?: string | null; conceptId?: string | null }) =>
+    rpc<{ courseId: string; draft: Record<string, unknown> }>("courses.cardDraft", { courseId, ...input }),
+  /** P3：草稿确认落盘。 */
+  cardCommit: (courseId: string, task: Record<string, unknown>) =>
+    rpc<{ courseId: string; tasks: Array<Record<string, unknown>> }>("courses.cardCommit", { courseId, task }),
   /** 划词解释（SSE：token…/done/error）。 */
   readingExplain: (source: string, selection: string, signal?: AbortSignal) =>
     streamSse<ReadingActionEvent>("/api/reading/explain", { source, selection }, undefined, signal),

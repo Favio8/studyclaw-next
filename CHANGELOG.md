@@ -3,6 +3,52 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+辅助阅读（PRD 需求三）整条线落地，含两处真机验收抓到的交互缺陷修复。
+
+### 新增
+
+- **辅助阅读**（中栏「阅读」独立学习活动，路由级动态加载，pdfjs 不进首屏）：
+  三区阅读台（资料树 / 阅读区 / 标注栏）、`reading.*` 标注与进度 RPC、
+  `courses.cardDraft` + `courses.cardCommit` 划词建卡；
+- 划词浮层四类动作：四色高亮、结合课程状态的解释（`/api/reading/explain` SSE）、
+  中英互译（`/api/reading/translate` SSE）、建卡；阅读动作可用 `readModel` /
+  `readEffort` 单独配置，不与判题路径共用；
+- 标注存储 `<课程>/.studyclaw/annotations.json`（人类可读，归一化坐标 + quote
+  双锚），导出 Markdown、追加进课程笔记、按概念聚合的「我的痕迹」；
+- 可选 MinerU 解析引擎（`parseEngine` × `parseTier`），内容寻址缓存 + 逐文件
+  `parsed/manifest.json` 归因；扫描件 PDF 与 docx/xlsx/html 走解析视图；
+- 阅读相关设置项（解析引擎/档位/超时/并发）与 MinerU 探测、安装引导；
+- `apps/web/scripts/e2e-reader.mjs`：真实 Edge 驱动的阅读器端到端验收脚本。
+
+### 修复
+
+- **已高亮的原文无法再次划词**：高亮块是可点 `<button>` 且在 DOM 序上位于
+  文本层之后，层级更高——拖拽落在高亮块上时选区被按钮吃掉，划词浮层不出现，
+  同一段永远无法二次标注。覆盖层改为纯装饰（`pointer-events-none` + `aria-hidden`），
+  定位跳转由标注栏承担；
+- **窄容器标注浮层打开后关不掉**：浮层用 `inset-y-0` 从顶部铺开，盖住工具条上
+  的「标注」切换钮，按钮被自己的浮层拦截。改为 `top-9` 起，让开工具条；
+- **布局迁移误搬资料**：`.layout-v2` 迁移曾把根 `sources/` 搬进
+  `.studyclaw/sources/`，资料从此对构建与阅读不可见。迁移不再搬 `sources/`，
+  并对已被误搬的存量做启动自愈搬回（根 `sources/` 已存在时跳过，不覆盖用户资料）；
+- **宽页被裁切**：PDF 渲染固定 1.3 倍缩放，A4 横排/宽讲义首屏放不下。改为按
+  容器可用宽自适应（上限 1.3，小页不放大），并用 `ResizeObserver` 在窗口/侧栏
+  变化后重排已渲染页面；
+- **文本层与画布错位**：文本层缺 `.textLayer` 类与 `--total-scale-factor`，
+  span 以原始尺寸叠在缩放后的画布上（大小字重叠、选区与视线错位）；
+- 阅读进度不再被 md/其它视图的页码串写；解析视图按 sha 归因，源文件变化时给出
+  可读原因而不是空白页。
+
+### 测试
+
+- `apps/web/tests/reader-highlight-layer.test.tsx`：固化上述两个交互缺陷的回归
+  （高亮覆盖层指针事件语义、窄栏浮层开合）；
+- 解析产物 manifest 改为逐文件持久化（构建中途失败不再整体丢失），builder 布局
+  迁移补三条用例（不搬 sources / 自愈搬回 / 不覆盖根目录）；
+- 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 19/19 通过（含命中测试与二次划词）。
+
 ## [0.1.1-beta] - 2026-09-28
 
 开源前的完整代码审查修复轮（高/中/低优先级 22 项全部闭环，

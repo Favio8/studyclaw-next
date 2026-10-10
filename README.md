@@ -61,6 +61,14 @@ StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装
 - **可视化进度**：9 列 `progress.md`、掌握度指数平滑、日期驱动的学习热力图、大纲关系图（React Flow）与思维导图（Mind Elixir）双视图。
 - **交互演示块**：AI 可在讲解中插入自包含的可交互 HTML 演示（沙箱 iframe + CSP 断网，无外部资源、无持久化）。
 
+### 辅助阅读
+
+- **三区阅读台**：资料树 | 阅读区 | 标注栏；中栏「阅读」是独立学习活动，pdfjs 体积不进首屏。
+- **PDF 精读**：pdf.js 单页渲染 + 内置文本层（原生划词），按容器宽度自适应缩放；跨资料记住阅读位置（页码 + 百分比）。
+- **划词动作**：四色高亮、**结合课程状态的解释**、中英互译、**一键生成题卡**（草稿可编辑，确认后入池接 SM-2）；解释/翻译走阅读专用模型与档位，不与判题路径抢配置。
+- **标注即数据**：落 `<课程>/.studyclaw/annotations.json`（人类可读），归一化坐标 + quote 双锚，版面变化可重定位；可导出 Markdown、追加进课程笔记，并按概念聚合进右栏「我的痕迹」。
+- **多格式兜底**：md/txt 直接渲染；扫描件 PDF 与 docx/xlsx/html 走**解析视图**（可选 MinerU 引擎，内容寻址缓存 + 逐文件 manifest 归因）；没有解析产物时给出可读原因而不是空白页。
+
 ### Agent 能力
 
 - **23 个工具**：13 个学习工具（读资料、查课程状态、题池、记忆、建卡、复习、测验、评测、写笔记等）+ 10 个通用工具（文件读写、命令执行、网页抓取、网络搜索、plan/todo、子 Agent、LSP）。
@@ -221,7 +229,7 @@ Host 与命令行共用一个二进制 `studyclaw`：
 | 路径 | 内容 |
 | --- | --- |
 | `~/.studyclaw/`（Windows：`%USERPROFILE%\.studyclaw`，可用 `STUDYCLAW_HOME` 覆盖） | Host 全局：`workspace.json` 注册表、`master.key`、`host.json`、`host.lock`、`logs/`；模型配置与凭据在课程目录 |
-| `<项目>/.studyclaw/` | 每门课程：`config.yaml`、加密的 `credentials.json`、`syllabus.json` 大纲、`progress.md` 进度、`tasks/task_NNNN.json` 题卡、`notes.md`、`history/` 会话流、`.checksums` 资料指纹 |
+| `<项目>/.studyclaw/` | 每门课程：`config.yaml`、加密的 `credentials.json`、`syllabus.json` 大纲、`progress.md` 进度、`tasks/task_NNNN.json` 题卡、`annotations.json` 阅读标注与阅读进度、`parsed/` 可选解析产物、`notes.md`、`history/` 会话流、`.checksums` 资料指纹 |
 
 > 桌面版的全局数据改放在系统应用数据目录的 `host-home/` 子目录下（Windows：`%APPDATA%\@studyclaw\desktop\host-home`），课程数据仍在用户项目文件夹。
 
@@ -285,8 +293,9 @@ studyclaw-next/
 - [x] npm 打包与发布链路：CLI 单 Bundle、静态托管、发布三道门禁、供应链 CVE 处理（`@studyclaw/cli@0.1.1-beta` 已实发至 registry.npmjs.org）
 - [x] 吉祥物 Clawzy、交互演示块、选择题本地快判、评测快路由
 - [x] **桌面壳（Electron + sidecar，免装 Node）**：Windows 安装包验证通过，macOS 有 CI 整机冒烟（Linux 仅出包、未跑应用）
+- [x] **辅助阅读**：三区阅读台、pdf.js 划词/标注/进度、划词解释翻译与建卡、解析视图与可选 MinerU 引擎
 - [x] 社区 Issue 模板：bug / feature / 安全上报分流（`.github/ISSUE_TEMPLATE/`）
-- [ ] **v0.1.x 收尾**：跨平台真机验证（macOS/Linux 人工各跑一次安装与 `studyclaw status`）、浏览器级 E2E（当前为 jsdom 组件测试 + HTTP/SSE 集成测试，无真浏览器路径）
+- [ ] **v0.1.x 收尾**：跨平台真机验证（macOS/Linux 人工各跑一次安装与 `studyclaw status`）、浏览器级 E2E 全覆盖（阅读器已有真浏览器路径 `apps/web/scripts/e2e-reader.mjs`，其余面板仍是 jsdom 组件测试 + HTTP/SSE 集成测试）
 - [ ] `studyclaw course` 顶层命令接线
 - [ ] 国际化（i18n）与英文界面
 - [ ] 可选的在线 / 多端同步形态（坚持端到端加密、本地优先不动摇）

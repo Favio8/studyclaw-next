@@ -12,6 +12,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/p
 import { basename, join, relative } from 'node:path'
 import {
   CourseBuilder,
+  COURSE_STATE_FILES,
   DEFAULT_SOURCE_EXTENSIONS,
   LlmTaskGenerator,
   loadSyllabus,
@@ -79,10 +80,11 @@ async function requireCourse(workspaceRoot: string, courseId: string): Promise<s
   return dir
 }
 
-/** 项目即课程的项目构建器：资料/校验文件都在项目根（就地扫描，排除状态目录）。 */
-function projectBuilder(dir: string, generator: TaskGenerator, depInferrer: DependencyInferrer | null): CourseBuilder {
+/** 项目即课程的项目构建器：资料/校验文件都在项目根（就地扫描，排除状态目录）。
+ *  `config.parse` 驱动 MinerU 解析引擎（PRD 需求一）；null=内置解析。 */
+function projectBuilder(dir: string, generator: TaskGenerator, depInferrer: DependencyInferrer | null, config: ResolvedChatConfig | null = null): CourseBuilder {
   // 状态目录收拢：校验和写 .studyclaw（sourceRoot 仍为项目根，就地只读扫描）。
-  return new CourseBuilder(dir, generator, depInferrer, null, 'fine', DEFAULT_SOURCE_EXTENSIONS, dir, stateDirOf(dir), INPLACE_SOURCE_EXCLUDED_DIRS, true)
+  return new CourseBuilder(dir, generator, depInferrer, null, 'fine', DEFAULT_SOURCE_EXTENSIONS, dir, stateDirOf(dir), INPLACE_SOURCE_EXCLUDED_DIRS, true, COURSE_STATE_FILES, config?.parse ?? null)
 }
 
 interface BuildContext {
@@ -277,7 +279,7 @@ export class JobManager {
     job.status = 'running'
     try {
       const generator = requireGenerator(ctx)
-      const builder = projectBuilder(courseDir, generator, inferrerOf(ctx))
+      const builder = projectBuilder(courseDir, generator, inferrerOf(ctx), ctx.config)
       // PERF-1：config.yaml 的 max_concurrency 终于被真正消费——旧链路解析
       // 后无任何并行消费点，builder 双层串行。
       const concurrency = Math.max(1, Math.min(8, ctx.config?.maxConcurrency ?? 4))
@@ -531,7 +533,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       // `new CourseBuilder(dir, …)`（缺省 sourceRoot → 只扫 `<dir>/sources`），
       // 项目根的就地资料不随粒度重切，且重切末尾的 checksum 覆写会把根资料
       // 误判为"新增"，下次构建重复跑 LLM 出题。
-      const builder = projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config }))
+      const builder = projectBuilder(dir, generator, inferrerOf({ workspaceRoot, config }), config)
       await builder.regenerateSyllabus(granularity)
       return loadSyllabus(dir)
     },

@@ -52,9 +52,21 @@ export interface SettingsPayload {
     temperature: number;
     maxConcurrency: number;
     apiKeyConfigured: boolean;
+    /** 阅读解释/翻译专用模型；null=跟随主模型。 */
+    readModel: string | null;
+    /** 阅读思考档位；null=缺省 off。 */
+    readEffort: "off" | "low" | "high" | "max" | null;
   };
   providers: ProviderPayload[];
   ui: { defaultMode: "socratic" | "quick" | "feynman" | "debug" };
+  /** 资料解析（PRD 需求一）：引擎选项 + MinerU 探测状态。 */
+  parse: {
+    engine: "auto" | "mineru" | "builtin";
+    tier: "basic" | "standard" | "advanced";
+    timeoutSec: number;
+    concurrency: number;
+    mineru: { available: boolean; command: string | null; reason: string | null };
+  };
   agent: { preset: string; presets: Array<{ id: string; name: string; description: string }> };
   permissions: { preset: string; presets: Array<{ id: string; name: string; sandboxMode: "read-only" | "workspace-write" | "danger-full-access"; approvalPolicy: "deny" | "ask" | "never"; description: string }> };
   plugins: { inventory: Array<{ id: string; name: string; enabled: boolean; source: "builtin" | "workspace"; reason?: string }> };

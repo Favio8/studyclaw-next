@@ -371,6 +371,12 @@ export const api = {
     temperature?: number;
     maxConcurrency?: number;
     defaultMode?: SettingsPayload["ui"]["defaultMode"];
+    readModel?: string | null;
+    readEffort?: "off" | "low" | "high" | "max" | null;
+    parseEngine?: "auto" | "mineru" | "builtin";
+    parseTier?: "basic" | "standard" | "advanced";
+    parseTimeoutSec?: number;
+    parseConcurrency?: number;
     agentPreset?: string;
     permissionPreset?: string;
     plugins?: Record<string, boolean>;

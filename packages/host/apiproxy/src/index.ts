@@ -537,6 +537,14 @@ const handlers = {
       temperature: z.number().min(0).max(2).optional(),
       maxConcurrency: z.number().int().min(1).max(32).optional(),
       defaultMode: z.string().optional(),
+      // 阅读动作路由（PRD 需求三）：readModel null=跟随主模型；readEffort 白名单。
+      readModel: z.string().nullish(),
+      readEffort: z.enum(['off', 'low', 'high', 'max']).nullish(),
+      // 资料解析（PRD 需求一）：白名单在域层校验后拒绝未知值。
+      parseEngine: z.enum(['auto', 'mineru', 'builtin']).optional(),
+      parseTier: z.enum(['basic', 'standard', 'advanced']).optional(),
+      parseTimeoutSec: z.number().int().min(30).max(3600).optional(),
+      parseConcurrency: z.number().int().min(1).max(2).optional(),
       agentPreset: z.string().optional(),
       permissionPreset: z.string().optional(),
       plugins: z.record(z.string(), z.boolean()).optional(),

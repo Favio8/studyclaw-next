@@ -10,7 +10,9 @@ import { createHash } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
+import { probeMineru, resetMineruProbeCache } from '@studyclaw/course-builder'
 import { sealCredentials, unsealCredentials, writeFileAtomicRestricted } from './secret-box.ts'
+import { resolveParseOptions } from './config.ts'
 
 export interface ProviderModelPayload {
   readonly id: string
@@ -64,9 +66,21 @@ export interface SettingsPayload {
     readonly temperature: number
     readonly maxConcurrency: number
     readonly apiKeyConfigured: boolean
+    /** 阅读解释/翻译专用模型（`llm.read_model`）；null=跟随主模型。 */
+    readonly readModel: string | null
+    /** 阅读动作思考档位（`llm.read_reasoning_effort`）；null=缺省 off。 */
+    readonly readEffort: string | null
   }
   readonly providers: ProviderPayload[]
   readonly ui: { readonly defaultMode: string }
+  /** 资料解析（PRD 需求一）：引擎选项 + MinerU 探测状态。 */
+  readonly parse: {
+    readonly engine: string
+    readonly tier: string
+    readonly timeoutSec: number
+    readonly concurrency: number
+    readonly mineru: { readonly available: boolean; readonly command: string | null; readonly reason: string | null }
+  }
   readonly agent: { readonly preset: string; readonly presets: AgentPresetPayload[] }
   readonly permissions: { readonly preset: string; readonly presets: PermissionPresetPayload[] }
   readonly plugins: { readonly inventory: PluginInventoryPayload[] }
@@ -92,10 +106,16 @@ interface ConfigYaml {
     api_base?: string | null
     temperature?: number
     max_concurrency?: number
+    judge_model?: string | null
+    judge_reasoning_effort?: string | null
+    read_model?: string | null
+    read_reasoning_effort?: string | null
   }
   providers?: Record<string, ProviderConfigYaml>
   active_provider?: string
   ui?: { default_mode?: string }
+  /** 资料解析（PRD 需求一）。 */
+  parse?: { engine?: string; tier?: string; concurrency?: number; timeout_sec?: number }
   agent?: { preset?: string }
   permissions?: { preset?: string }
   plugins?: Record<string, unknown>
@@ -273,6 +293,10 @@ export async function settingsPayload(workspaceRoot: string): Promise<SettingsPa
   for (const [id, provider] of Object.entries(config.providers ?? {})) {
     providers.push(await providerPayload(workspaceRoot, id, provider))
   }
+  // PRD 需求一：解析配置 + MinerU 探测状态（探测自带 30s 缓存，不每次 spawn）。
+  const parse = resolveParseOptions(config)
+  const probe = await probeMineru()
+  const readEffortRaw = config.llm?.read_reasoning_effort
   return {
     version: config.version ?? 1,
     activeProviderId: active,
@@ -284,9 +308,18 @@ export async function settingsPayload(workspaceRoot: string): Promise<SettingsPa
       temperature: activeProvider?.temperature ?? config.llm?.temperature ?? 0.3,
       maxConcurrency: activeProvider?.max_concurrency ?? config.llm?.max_concurrency ?? 4,
       apiKeyConfigured: await credentialConfigured(workspaceRoot, llmRef),
+      readModel: config.llm?.read_model ?? null,
+      readEffort: readEffortRaw === 'off' || readEffortRaw === 'low' || readEffortRaw === 'high' || readEffortRaw === 'max' ? readEffortRaw : null,
     },
     providers,
     ui: { defaultMode: config.ui?.default_mode === 'quick' || config.ui?.default_mode === 'feynman' || config.ui?.default_mode === 'debug' ? config.ui.default_mode : 'socratic' },
+    parse: {
+      engine: parse.engine,
+      tier: parse.tier,
+      timeoutSec: parse.timeoutSec,
+      concurrency: parse.concurrency,
+      mineru: { available: probe.available, command: probe.command, reason: probe.reason },
+    },
     agent: { preset: AGENT_PRESETS.some(item => item.id === config.agent?.preset) ? config.agent!.preset! : 'studyclaw-learning', presets: AGENT_PRESETS },
     permissions: { preset: PERMISSION_PRESETS.some(item => item.id === config.permissions?.preset) ? config.permissions!.preset! : 'workspace-write', presets: PERMISSION_PRESETS },
     plugins: { inventory: pluginInventory(config) },
@@ -593,6 +626,15 @@ export async function updateSettings(workspaceRoot: string, partial: {
   temperature?: number
   maxConcurrency?: number
   defaultMode?: string
+  /** 阅读解释/翻译专用模型；null=清除（跟随主模型）。 */
+  readModel?: string | null
+  /** 阅读思考档位；null=缺省 off。 */
+  readEffort?: 'off' | 'low' | 'high' | 'max' | null
+  /** 资料解析引擎（PRD 需求一）。 */
+  parseEngine?: string
+  parseTier?: string
+  parseTimeoutSec?: number
+  parseConcurrency?: number
   agentPreset?: string
   permissionPreset?: string
   plugins?: Record<string, boolean>
@@ -617,6 +659,36 @@ export async function updateSettings(workspaceRoot: string, partial: {
     if (partial.apiBase !== undefined) nextLlm.api_base = partial.apiBase === null ? null : partial.apiBase.trim() || null
     if (partial.temperature !== undefined) nextLlm.temperature = partial.temperature
     if (partial.maxConcurrency !== undefined) nextLlm.max_concurrency = partial.maxConcurrency
+    if (partial.readModel !== undefined) {
+      const value = partial.readModel === null ? null : partial.readModel.trim()
+      nextLlm.read_model = value === '' ? null : value
+    }
+    if (partial.readEffort !== undefined) {
+      if (partial.readEffort !== null && !['off', 'low', 'high', 'max'].includes(partial.readEffort)) {
+        throw new Error('阅读思考档位无效')
+      }
+      nextLlm.read_reasoning_effort = partial.readEffort
+    }
+    // 资料解析段（PRD 需求一）：白名单校验后整体写入，未知值拒绝而不是静默回落
+    // （设置页是显式操作，静默改写会让用户以为保存成功了）。
+    const parseBefore = config.parse ?? {}
+    let nextParse: NonNullable<ConfigYaml['parse']> = { ...parseBefore }
+    if (partial.parseEngine !== undefined) {
+      if (!['auto', 'mineru', 'builtin'].includes(partial.parseEngine)) throw new Error('解析引擎无效')
+      nextParse.engine = partial.parseEngine
+    }
+    if (partial.parseTier !== undefined) {
+      if (!['basic', 'standard', 'advanced'].includes(partial.parseTier)) throw new Error('解析质量档位无效')
+      nextParse.tier = partial.parseTier
+    }
+    if (partial.parseTimeoutSec !== undefined) {
+      if (!Number.isFinite(partial.parseTimeoutSec)) throw new Error('解析超时无效')
+      nextParse.timeout_sec = Math.max(30, Math.min(3600, Math.round(partial.parseTimeoutSec)))
+    }
+    if (partial.parseConcurrency !== undefined) {
+      if (!Number.isFinite(partial.parseConcurrency)) throw new Error('解析并发无效')
+      nextParse.concurrency = Math.max(1, Math.min(2, Math.round(partial.parseConcurrency)))
+    }
     const nextUi: NonNullable<ConfigYaml['ui']> = { ...(config.ui ?? {}) }
     if (partial.defaultMode !== undefined) {
       if (!['socratic', 'quick', 'feynman', 'debug'].includes(partial.defaultMode)) {
@@ -643,13 +715,15 @@ export async function updateSettings(workspaceRoot: string, partial: {
     }
     const changed = JSON.stringify(nextLlm) !== JSON.stringify(llm) || JSON.stringify(nextUi) !== JSON.stringify(config.ui ?? {})
       || JSON.stringify(nextAgent) !== JSON.stringify(config.agent ?? {}) || JSON.stringify(nextPermissions) !== JSON.stringify(config.permissions ?? {})
-      || JSON.stringify(nextPlugins) !== JSON.stringify(config.plugins ?? {})
+      || JSON.stringify(nextPlugins) !== JSON.stringify(config.plugins ?? {}) || JSON.stringify(nextParse) !== JSON.stringify(config.parse ?? {})
     if (!changed) {
       // FL-16：无改动是正常操作（幂等保存），旧实现抛「没有需要更新的设置字段」
       // 让前端把"什么都没改就点保存"报成红色失败弹窗。直接返回当前 payload。
       return settingsPayload(workspaceRoot)
     }
-    await writeConfig(workspaceRoot, { ...config, llm: nextLlm, ui: nextUi, agent: nextAgent, permissions: nextPermissions, plugins: nextPlugins })
+    await writeConfig(workspaceRoot, { ...config, llm: nextLlm, ui: nextUi, agent: nextAgent, permissions: nextPermissions, plugins: nextPlugins, parse: nextParse })
+    // 引擎/档位可能变了：清掉 MinerU 探测缓存，设置页下次读取反映新环境。
+    resetMineruProbeCache()
     return settingsPayload(workspaceRoot)
   })
 }

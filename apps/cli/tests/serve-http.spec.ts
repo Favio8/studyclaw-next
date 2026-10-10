@@ -19,10 +19,10 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -46,7 +46,7 @@ interface HostHandle {
 
 const homes: string[] = [];
 
-async function startHost(reuseHome?: string): Promise<HostHandle> {
+async function startHost(reuseHome?: string, extraPathDir?: string): Promise<HostHandle> {
   const home = reuseHome ?? mkdtempSync(join(tmpdir(), "studyclaw-serve-it-"));
   if (reuseHome === undefined) homes.push(home);
   const dist = join(home, "dist");
@@ -60,8 +60,10 @@ async function startHost(reuseHome?: string): Promise<HostHandle> {
   // 复用同一 home（实例锁自愈用例）时，上一实例强杀残留的 host.json 会让就绪
   // 轮询立刻读到陈旧端口/token——先删掉，只认新实例写的那份。
   rmSync(join(home, "host.json"), { force: true });
+  // extraPathDir：把假 mineru-kit 前置到 PATH（MinerU 集成用例用）。
+  const pathPrefix = extraPathDir === undefined ? "" : `${extraPathDir}${isWin ? ";" : ":"}`;
   const child = spawn(process.execPath, [tsxCli, "--tsconfig", baseTsconfig, binTs, "serve", "--port", "0"], {
-    env: { ...process.env, STUDYCLAW_HOME: home, STUDYCLAW_WEB_DIST: dist },
+    env: { ...process.env, STUDYCLAW_HOME: home, STUDYCLAW_WEB_DIST: dist, PATH: `${pathPrefix}${process.env.PATH ?? ""}` },
     stdio: ["ignore", "pipe", "pipe"],
     // POSIX：serve 自成进程组，后续才能整组收信号（见文件头说明）。
     ...(isWin ? {} : { detached: true }),
@@ -391,4 +393,96 @@ describe("serve 关停与实例锁", () => {
       stop(stale);
     }
   }, 60_000);
+});
+
+describe("MinerU 解析接入（集成）", () => {
+  // 两个断言合并到一次 Host 启动：全量套件并行跑时少起一个 serve 进程
+  // （该套件的 workspace/apiproxy 用例对并行负载敏感）。
+  it("PATH 上的 mineru-kit：探测可见 + 真实 spawn 解析产物落 parsed/", async () => {
+    const fakeBin = mkdtempSync(join(tmpdir(), "studyclaw-fakebin-"));
+    if (isWin) {
+      // Windows 只认 .exe（uv/pipx shim）；空文件即可——探测只 stat 不执行。
+      writeFileSync(join(fakeBin, "mineru-kit.exe"), "", "utf8");
+    } else {
+      // POSIX：可执行假 CLI，忽略输入内容，把 -o 产物写成带标记的 Markdown。
+      const script = join(fakeBin, "mineru-kit");
+      writeFileSync(script, [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs')",
+        "const args = process.argv.slice(2)",
+        "const at = args.indexOf('-o')",
+        "fs.writeFileSync(args[at + 1], '# 第一章 假 MinerU 产物\n\n## 概念甲\n\nSM-2 的 EF 钳制在 [1.3, 2.9]。\n')",
+        "",
+      ].join("\n"), "utf8");
+      chmodSync(script, 0o755);
+    }
+
+    const target = await startHost(undefined, fakeBin);
+    const project = mkdtempSync(join(tmpdir(), "studyclaw-mineru-"));
+    try {
+      // settings.get 需要已打开的工作区（FL-03：未打开时读设置直接报错）。
+      const opened = await fetch(`http://127.0.0.1:${target.port}/api/workspaces.open`, {
+        method: "POST",
+        headers: auth(target.token),
+        body: JSON.stringify({ payload: { path: project } }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      expect(opened.status).toBe(200);
+
+      // 1) 探测：Host 进程内按 PATH → ~/.local/bin → uv tool list 找到假 CLI。
+      const res = await fetch(`http://127.0.0.1:${target.port}/api/settings.get`, {
+        method: "POST",
+        headers: auth(target.token),
+        body: "{}",
+        signal: AbortSignal.timeout(8_000),
+      });
+      expect(res.status).toBe(200);
+      const payload = await res.json() as { ok: boolean; result: { parse: { engine: string; mineru: { available: boolean; command: string | null } } } };
+      expect(payload.ok).toBe(true);
+      expect(payload.result.parse.mineru.available).toBe(true);
+      expect(payload.result.parse.mineru.command).toContain(fakeBin);
+      expect(payload.result.parse.engine).toBe("auto");
+
+      if (isWin) return; // Windows 无法假造 .exe，spawn 端到端只在 POSIX 断言
+
+      // 2) 端到端：假 LLM 配置让构建越过 configProblem 到达抽取阶段；生成阶段
+      // 必然失败（端点不可达），但解析产物在生成之前就已落盘——断言点即此。
+      mkdirSync(join(project, ".studyclaw"), { recursive: true });
+      mkdirSync(join(project, "sources"), { recursive: true });
+      writeFileSync(join(project, ".studyclaw", "config.yaml"), [
+        "llm:",
+        "  provider: fake",
+        "  model: fake-model",
+        "  api_base: http://127.0.0.1:9",
+        "",
+      ].join("\n"), "utf8");
+      writeFileSync(join(project, "sources", "lecture.pdf"), "fake-pdf-bytes", "utf8");
+
+      const synced = await fetch(`http://127.0.0.1:${target.port}/api/courses.sync`, {
+        method: "POST",
+        headers: auth(target.token),
+        body: JSON.stringify({ payload: { courseId: basename(project) } }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      expect(synced.status).toBe(200);
+
+      // 抽取先于 LLM 生成：轮询 parsed/ 内容寻址产物（默认档位 basic）。
+      const parsedDir = join(project, ".studyclaw", "parsed");
+      const deadline = Date.now() + 40_000;
+      let marker = "";
+      while (Date.now() < deadline && marker === "") {
+        for (const name of existsSync(parsedDir) ? readdirSync(parsedDir) : []) {
+          if (!name.endsWith("-basic.md")) continue;
+          const text = readFileSync(join(parsedDir, name), "utf8");
+          if (text.includes("假 MinerU 产物")) { marker = text; break; }
+        }
+        if (marker === "") await sleep(300);
+      }
+      expect(marker).toContain("概念甲");
+    } finally {
+      killHard(target);
+      await waitForExit(target.child);
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 90_000);
 });

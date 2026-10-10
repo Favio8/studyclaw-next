@@ -9,6 +9,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
+import { DEFAULT_PARSE_OPTIONS, type MineruTier, type ParseEngine, type ParseEngineOptions } from '@studyclaw/course-builder'
 
 export interface ResolvedChatConfig {
   readonly providerId: string
@@ -19,6 +20,10 @@ export interface ResolvedChatConfig {
   readonly judgeModel?: string | null
   /** 判题思考档位：`llm.judge_reasoning_effort`；null=判题路径缺省 off（关思考）。 */
   readonly judgeEffort?: 'off' | 'low' | 'high' | 'max' | null
+  /** 阅读解释/翻译专用模型：`llm.read_model`；null=跟随主模型。 */
+  readonly readModel?: string | null
+  /** 阅读动作思考档位：`llm.read_reasoning_effort`；null=阅读路径缺省 off。 */
+  readonly readEffort?: 'off' | 'low' | 'high' | 'max' | null
   readonly baseUrl: string
   readonly apiKeyEnv: string | null
   readonly apiKey: string | null
@@ -27,13 +32,15 @@ export interface ResolvedChatConfig {
   /** Per-request output cap（config.yaml `max_tokens`）；null=适配器默认。 */
   readonly maxTokens?: number | null
   readonly defaultMode: 'socratic' | 'quick' | 'feynman' | 'debug'
+  /** 资料解析引擎选项（PRD 需求一；config.yaml `parse` 段，缺省 auto/basic/300s）。 */
+  readonly parse: ParseEngineOptions
   readonly agentPreset?: string
   readonly permissionPreset?: 'read-only' | 'workspace-write' | 'danger-full-access'
   readonly plugins?: Record<string, boolean>
 }
 
 interface ConfigYaml {
-  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number; max_tokens?: number | null; judge_model?: string | null; judge_reasoning_effort?: string | null }
+  readonly llm?: { provider?: string; model?: string; api_key_env?: string | null; api_base?: string | null; temperature?: number; max_concurrency?: number; max_tokens?: number | null; judge_model?: string | null; judge_reasoning_effort?: string | null; read_model?: string | null; read_reasoning_effort?: string | null }
   readonly active_provider?: string
   readonly providers?: Record<string, {
     readonly base_url?: string | null
@@ -44,6 +51,8 @@ interface ConfigYaml {
     readonly max_tokens?: number | null
   }>
   readonly ui?: { default_mode?: string }
+  /** 资料解析（PRD 需求一）：engine=auto|mineru|builtin，tier=basic|standard|advanced。 */
+  readonly parse?: { engine?: string; tier?: string; concurrency?: number; timeout_sec?: number }
   readonly agent?: { preset?: string }
   readonly permissions?: { preset?: string }
   readonly plugins?: Record<string, unknown>
@@ -88,6 +97,34 @@ function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '')
 }
 
+/** parse.engine 白名单归一：未知值（含历史拼写）回落 auto。 */
+function normalizeParseEngine(value: unknown): ParseEngine {
+  return value === 'mineru' || value === 'builtin' ? value : 'auto'
+}
+
+/** parse.tier 白名单归一：flash 不开放给课程构建，未知值回落 basic。 */
+function normalizeParseTier(value: unknown): MineruTier {
+  return value === 'standard' || value === 'advanced' ? value : 'basic'
+}
+
+/** 解析 parse 段为引擎选项（缺省 auto/basic/300s/并发1；并发钳 1~2——每个
+ *  mineru-kit 进程各自加载模型，内存敏感，不做按硬件探测的自动调并发）。 */
+export function resolveParseOptions(config: ConfigYaml): ParseEngineOptions {
+  const parse = config.parse ?? {}
+  const concurrency = typeof parse.concurrency === 'number' && Number.isFinite(parse.concurrency)
+    ? Math.round(parse.concurrency)
+    : DEFAULT_PARSE_OPTIONS.concurrency
+  const timeoutSec = typeof parse.timeout_sec === 'number' && Number.isFinite(parse.timeout_sec)
+    ? Math.round(parse.timeout_sec)
+    : DEFAULT_PARSE_OPTIONS.timeoutSec
+  return {
+    engine: normalizeParseEngine(parse.engine),
+    tier: normalizeParseTier(parse.tier),
+    timeoutSec: Math.max(30, Math.min(3600, timeoutSec)),
+    concurrency: Math.max(1, Math.min(2, concurrency)),
+  }
+}
+
 /**
  * Load and resolve the active chat config for one workspace.
  * @param workspaceRoot - The workspace root holding `.studyclaw/config.yaml`.
@@ -104,6 +141,8 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
       reasoningEffort: null,
       judgeModel: null,
       judgeEffort: null,
+      readModel: null,
+      readEffort: null,
       baseUrl: '',
       apiKeyEnv: null,
       apiKey: null,
@@ -111,6 +150,7 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
       maxConcurrency: 4,
       maxTokens: null,
       defaultMode: 'socratic',
+      parse: DEFAULT_PARSE_OPTIONS,
       agentPreset: 'studyclaw-learning',
       permissionPreset: 'workspace-write',
       plugins: {},
@@ -138,12 +178,18 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
   const judgeEffort = judgeEffortRaw === 'off' || judgeEffortRaw === 'low' || judgeEffortRaw === 'high' || judgeEffortRaw === 'max'
     ? judgeEffortRaw
     : null
+  const readEffortRaw = config.llm?.read_reasoning_effort
+  const readEffort = readEffortRaw === 'off' || readEffortRaw === 'low' || readEffortRaw === 'high' || readEffortRaw === 'max'
+    ? readEffortRaw
+    : null
   return {
     providerId,
     model,
     reasoningEffort: null,
     judgeModel: config.llm?.judge_model ?? null,
     judgeEffort,
+    readModel: config.llm?.read_model ?? null,
+    readEffort,
     baseUrl,
     apiKeyEnv,
     apiKey,
@@ -151,6 +197,7 @@ export async function loadChatConfig(workspaceRoot: string, selection?: { provid
     maxConcurrency,
     maxTokens,
     defaultMode,
+    parse: resolveParseOptions(config),
     agentPreset: config.agent?.preset === 'general' ? 'general' : 'studyclaw-learning',
     permissionPreset,
     plugins,

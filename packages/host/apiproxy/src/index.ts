@@ -184,6 +184,7 @@ export interface HostServices {
   readonly readingService: {
     load(source: string): Promise<Record<string, unknown>>
     readText(source: string): Promise<Record<string, unknown>>
+    parsed(source: string): Promise<Record<string, unknown>>
     saveProgress(source: string, page: number, percent: number): Promise<Record<string, unknown>>
     listHighlights(source: string): Promise<Array<Record<string, unknown>>>
     addHighlight(source: string, input: Record<string, unknown>): Promise<Record<string, unknown>>
@@ -669,6 +670,13 @@ const handlers = {
     payload: z.object({ source: z.string().min(1).max(500) }),
     async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.readingService.readText(payload.source))
+    },
+  },
+  'reading.parsed': {
+    // P2.5：docx/xlsx/html 与扫描件 PDF 的解析视图产物（MinerU 缓存）。
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.parsed(payload.source))
     },
   },
   'reading.progress.save': {

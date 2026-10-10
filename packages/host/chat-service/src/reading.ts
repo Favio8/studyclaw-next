@@ -15,7 +15,9 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { resolveSourceRef, withCourseLock } from '@studyclaw/tools'
+import { loadParsedManifest, parsedDirOf, type ParsedEngine } from '@studyclaw/course-builder'
 import { loadCourseState } from '@studyclaw/session'
 import type { ResolvedChatConfig } from './config.ts'
 import { createDeepSeekToolClient } from './adapter.ts'
@@ -98,6 +100,19 @@ async function resolveSource(workspaceRoot: string, source: string): Promise<str
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : String(error))
   }
+}
+
+/** 流式 sha256（大文件不整读进内存）；返回 `sha256:<hex>` 与 checksums 同格式。 */
+async function sha256Of(path: string): Promise<string> {
+  const { createReadStream } = await import('node:fs')
+  const hash = createHash('sha256')
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const stream = createReadStream(path)
+    stream.on('data', (chunk: string | Buffer) => hash.update(chunk))
+    stream.on('error', rejectPromise)
+    stream.on('end', () => resolvePromise())
+  })
+  return `sha256:${hash.digest('hex')}`
 }
 
 /** 读取标注文件；损坏时备份重建并报告 recovered。 */
@@ -261,6 +276,45 @@ export class ReadingService {
 
   /** 导出某资料的标注为 Markdown（按页分组）。用户主动动作，直接返回文本。 */
   /** md/txt 资料正文（MarkdownReader 用）。路径守卫与 read_source 同款。 */
+  /**
+   * 解析视图（PRD P2.5）：docx/xlsx/html 与扫描件 PDF 的 Markdown 产物。
+   * 读 parsed/ 缓存（manifest 归因）；源文件变化或未构建时不可用并给出原因。
+   */
+  async parsed(workspaceRoot: string, source: string): Promise<{
+    source: string
+    available: boolean
+    engine: ParsedEngine | null
+    tier: string | null
+    markdown: string
+    reason: string | null
+  }> {
+    const target = await resolveSource(workspaceRoot, source)
+    const stateDir = join(workspaceRoot, '.studyclaw')
+    const manifest = await loadParsedManifest(stateDir)
+    const entry = manifest[source]
+    if (entry === undefined || entry.engine !== 'mineru' || entry.out === null) {
+      return {
+        source, available: false, engine: null, tier: null, markdown: '',
+        reason: '这份资料还没有解析产物：在设置里启用 MinerU 并重新构建课程即可阅读',
+      }
+    }
+    const sha = await sha256Of(target).catch(() => null)
+    if (sha === null) {
+      return { source, available: false, engine: null, tier: null, markdown: '', reason: '资料文件不存在或不可读' }
+    }
+    if (sha !== entry.sha256) {
+      return {
+        source, available: false, engine: entry.engine, tier: entry.tier, markdown: '',
+        reason: '源文件已变化：重新构建课程后刷新即可阅读最新内容',
+      }
+    }
+    const markdown = await readFile(join(parsedDirOf(stateDir), entry.out), 'utf8').catch(() => '')
+    if (markdown.trim() === '') {
+      return { source, available: false, engine: entry.engine, tier: entry.tier, markdown: '', reason: '解析产物缺失或为空：重新构建课程' }
+    }
+    return { source, available: true, engine: entry.engine, tier: entry.tier, markdown, reason: null }
+  }
+
   async readText(workspaceRoot: string, source: string): Promise<{ text: string; truncated: boolean }> {
     const target = await resolveSource(workspaceRoot, source)
     if (!/\.(md|txt)$/i.test(target)) {

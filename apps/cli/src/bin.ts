@@ -572,6 +572,10 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         requireWorkspaceRootForSettings(activeRoot(), '阅读资料')
         return readingService.readText(activeRoot(), source) as unknown as Record<string, unknown>
       },
+      parsed: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '阅读解析视图')
+        return readingService.parsed(activeRoot(), source) as unknown as Record<string, unknown>
+      },
       saveProgress: async (source, page, percent) => {
         requireWorkspaceRootForSettings(activeRoot(), '保存阅读进度')
         return readingService.saveProgress(activeRoot(), source, page, percent) as unknown as Record<string, unknown>

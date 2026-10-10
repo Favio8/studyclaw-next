@@ -21,6 +21,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -608,4 +609,51 @@ describe("reading RPC 与资料路由（集成）", () => {
     const backups = readdirSync(join(project, ".studyclaw")).filter((name) => name.startsWith("annotations.json.bak-"));
     expect(backups.length).toBe(1);
   });
+});
+
+describe("reading.parsed 解析视图（集成）", () => {
+  it("manifest 命中且源未变：返回解析产物；源变化后提示重建", async () => {
+    const project = mkdtempSync(join(tmpdir(), "studyclaw-parsed-it-"));
+    try {
+      const opened = await fetch(`${base()}/api/workspaces.open`, {
+        method: "POST",
+        headers: auth(),
+        body: JSON.stringify({ payload: { path: project } }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      expect(opened.status).toBe(200);
+      mkdirSync(join(project, "sources"), { recursive: true });
+      const bytes = "fake-docx-bytes";
+      writeFileSync(join(project, "sources", "handout.docx"), bytes, "utf8");
+      const sha = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      const fileName = `${sha.slice("sha256:".length, "sha256:".length + 12)}-standard.md`;
+      mkdirSync(join(project, ".studyclaw", "parsed"), { recursive: true });
+      writeFileSync(join(project, ".studyclaw", "parsed", fileName), "# 解析产物\n\n表格保真。\n", "utf8");
+      writeFileSync(join(project, ".studyclaw", "parsed", "manifest.json"), JSON.stringify({
+        "sources/handout.docx": { sha256: sha, engine: "mineru", tier: "standard", out: fileName },
+      }), "utf8");
+
+      const call = async () => {
+        const res = await fetch(`${base()}/api/reading.parsed`, {
+          method: "POST",
+          headers: auth(),
+          body: JSON.stringify({ payload: { source: "sources/handout.docx" } }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        return res.json() as Promise<{ result: { available: boolean; engine: string | null; markdown: string; reason: string | null } }>;
+      };
+      const ok = await call();
+      expect(ok.result.available).toBe(true);
+      expect(ok.result.engine).toBe("mineru");
+      expect(ok.result.markdown).toContain("表格保真");
+
+      // 源文件变化 → 不可用并提示重新构建
+      writeFileSync(join(project, "sources", "handout.docx"), "fake-docx-bytes-v2", "utf8");
+      const stale = await call();
+      expect(stale.result.available).toBe(false);
+      expect(stale.result.reason).toContain("重新构建");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -4,9 +4,11 @@
  */
 
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { parsedFileName, saveParsedManifest, writeParsedText } from '@studyclaw/course-builder'
 import { ReadingService } from '../src/reading.ts'
 
 const tmpRoots: string[] = []
@@ -140,5 +142,62 @@ describe('ReadingService readText 守卫', () => {
     await expect(service.readText(root, 'sources/a.pdf')).rejects.toThrow(/\.md\/\.txt/)
     await expect(service.readText(root, '../secret.md')).rejects.toThrow()
     await expect(service.readText(root, 'sources/gone.md')).rejects.toThrow('资料不存在')
+  })
+})
+
+describe('ReadingService 解析视图（P2.5）', () => {
+  async function sha256(text: string): Promise<string> {
+    return `sha256:${createHash('sha256').update(text).digest('hex')}`
+  }
+
+  async function seedParsed(content: string, markdown = '# 解析产物\n\n表格与公式保真。\n'): Promise<{ root: string; source: string; sha: string }> {
+    const root = await workspace()
+    const source = 'sources/handout.docx'
+    await writeFile(join(root, source), content, 'utf8')
+    const sha = await sha256(content)
+    const fileName = parsedFileName(sha, 'standard')
+    await writeParsedText(join(root, '.studyclaw'), fileName, markdown)
+    await saveParsedManifest(join(root, '.studyclaw'), {
+      [source]: { sha256: sha, engine: 'mineru', tier: 'standard', out: fileName },
+    })
+    return { root, source, sha }
+  }
+
+  it('manifest 命中且源文件未变：返回产物与引擎档位', async () => {
+    const { root, source } = await seedParsed('docx-bytes')
+    const service = new ReadingService()
+    const payload = await service.parsed(root, source)
+    expect(payload.available).toBe(true)
+    expect(payload.engine).toBe('mineru')
+    expect(payload.tier).toBe('standard')
+    expect(payload.markdown).toContain('表格与公式保真')
+    expect(payload.reason).toBeNull()
+  })
+
+  it('源文件变化：不可用并提示重新构建', async () => {
+    const { root, source } = await seedParsed('docx-bytes')
+    await writeFile(join(root, source), 'docx-bytes-v2', 'utf8')
+    const payload = await new ReadingService().parsed(root, source)
+    expect(payload.available).toBe(false)
+    expect(payload.reason).toContain('重新构建')
+  })
+
+  it('无 manifest 记录（未构建）：不可用并提示启用 MinerU', async () => {
+    const root = await workspace()
+    await writeFile(join(root, 'sources/a.xlsx'), 'xlsx', 'utf8')
+    const payload = await new ReadingService().parsed(root, 'sources/a.xlsx')
+    expect(payload.available).toBe(false)
+    expect(payload.reason).toContain('MinerU')
+  })
+
+  it('builtin 归因（auto 回落）不供解析视图：避免用低质产物冒充', async () => {
+    const root = await workspace()
+    const source = 'sources/a.docx'
+    await writeFile(join(root, source), 'docx', 'utf8')
+    await saveParsedManifest(join(root, '.studyclaw'), {
+      [source]: { sha256: await sha256('docx'), engine: 'builtin', tier: 'basic', out: null },
+    })
+    const payload = await new ReadingService().parsed(root, source)
+    expect(payload.available).toBe(false)
   })
 })

@@ -1,8 +1,10 @@
 # @studyclaw/desktop — StudyClaw 桌面壳
 
 Electron 桌面壳：把现有「本地 HTTP Host + 静态 Web UI」原样装进桌面应用，
-用户**免装 Node.js**。实施方案见仓库上层文档
-`DESKTOP_SHELL_PLAN_studyclaw-next.md`（架构 / 进程模型 / 风险登记册）。
+用户**免装 Node.js**。本目录属于当前维护的 `studyclaw-next`，开发约定见
+[仓库 AGENTS.md](../../AGENTS.md)，发布流程见 [RELEASE_RUNBOOK.md](../../docs/RELEASE_RUNBOOK.md)。
+完整工作区的上层目录用于构建方案与过程文档；此前引用的
+`DESKTOP_SHELL_PLAN_studyclaw-next.md` 不在当前工作区中，现以本说明、打包配置与脚本为操作依据。
 
 ## 运行结构
 
@@ -19,8 +21,11 @@ Electron 主进程 (src/main.cjs)
 
 ## 常用命令
 
+从 `studyclaw-next/` 根目录安装依赖，再进入桌面目录运行以下脚本：
+
 ```powershell
 pnpm install                                   # 安装 electron / electron-builder
+cd apps/desktop
 pnpm --filter @studyclaw/desktop check:runtime # 校验 Electron 内嵌 Node ≥ 22.19（硬门槛）
 node scripts/assemble-host.mjs --build         # 组装 sidecar 资源（可先重建 CLI bundle + web 导出）
 node scripts/assemble-host.mjs                 # 只组装（要求 apps/cli/lib/bin.js 与 apps/web/out 已存在）
@@ -45,6 +50,6 @@ node node_modules/electron-builder/cli.js --win --publish never       # Windows 
 
 ## 产物
 
-- `dist2/StudyClaw-<version>-setup.exe`：NSIS 安装包（per-user，免装 Node）。
-- 未签名包：首次运行需在 SmartScreen 选「仍要运行」；签名/公证配置见 plan 4.4。
+- `dist/StudyClaw-<version>-setup.exe`：默认 NSIS 安装包（per-user，免装 Node）；若指定输出覆盖参数，以该参数为准。
+- 未签名包：首次运行需在 SmartScreen 选「仍要运行」；签名/公证按 `electron-builder.yml` 及发布工作流配置核对。
 - `latest.yml` + `.blockmap`：electron-updater 增量更新元数据（发布时与安装包同传 Release）。

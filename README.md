@@ -12,6 +12,14 @@
 
 ---
 
+## 维护范围与文档入口
+
+本仓库 `studyclaw-next` 是当前唯一维护中的 StudyClaw 实现。同级 `studyclaw/` 是已废弃的 Python/FastAPI 旧项目，仅供历史追溯。
+
+术语固定为：**工作区 = studyclaw-ai**，**当前仓库 = studyclaw-next**。工作区的构建方案、产品规划、决策、交接与评审文档集中存放于上层 `studyclaw-ai/docs/`；本仓库的使用、开发和发布说明随代码版本维护。旧 PRD、Sprint、REST 与文件契约已在工作区 `docs/archive/studyclaw/` 归档，不能直接作为当前 TypeScript 实现契约。
+
+开发先读 [AGENTS.md](./AGENTS.md) 与 [CONTRIBUTING.md](./CONTRIBUTING.md)，学习数据流见 [docs/LEARNING_FLOW.md](./docs/LEARNING_FLOW.md)，发布见 [docs/RELEASE_RUNBOOK.md](./docs/RELEASE_RUNBOOK.md)。独立克隆本仓库即可开发，不依赖上层文档目录。
+
 ## 这是什么
 
 StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装满课件、PDF、笔记、代码的文件夹，它会：
@@ -142,20 +150,20 @@ flowchart TD
 Electron 桌面壳把「本地 Host + 控制台」打包成双击即用的安装包，内置运行时，**不需要安装 Node.js 和 pnpm**：
 
 ```bash
-git clone https://github.com/Favio8/studyclaw-next.git studyclaw && cd studyclaw
+git clone https://github.com/Favio8/studyclaw-next.git studyclaw-next && cd studyclaw-next
 pnpm install
 cd apps/desktop
 node scripts/assemble-host.mjs --build   # 组装 sidecar 资源（自动构建 CLI 与前端）
-node node_modules/electron-builder/cli.js --win   # 产出 dist3/StudyClaw-<版本>-setup.exe
+node node_modules/electron-builder/cli.js --win --publish never   # 产出 dist/StudyClaw-<版本>-setup.exe
 ```
 
-安装后双击图标即得与 `pnpm serve` 完全一致的控制台；开发细节见 [apps/desktop/README.md](./apps/desktop/README.md)。预编译安装包将随 v0.1.0-beta 发布到 [Releases](https://github.com/Favio8/studyclaw-next/releases)。
+安装后双击图标即得与 `pnpm serve` 完全一致的控制台；开发细节见 [apps/desktop/README.md](./apps/desktop/README.md)。预编译安装包见 [Releases](https://github.com/Favio8/studyclaw-next/releases)，以页面实际提供的版本和平台为准。
 
 ### 方式二：从源码运行（推荐给开发者）
 
 ```bash
 # 1. 拉取并安装依赖
-git clone https://github.com/Favio8/studyclaw-next.git studyclaw && cd studyclaw
+git clone https://github.com/Favio8/studyclaw-next.git studyclaw-next && cd studyclaw-next
 pnpm install
 
 # 2. 构建前端静态产物
@@ -174,7 +182,7 @@ pnpm serve --open
 
 ### 方式三：npm 全局安装
 
-> 将随 `v0.1.0-beta` 发布到 npm（`@studyclaw/cli`，单文件 Bundle、仅 koffi/pdf-parse 两个外部原生依赖）。发布后：
+> npm 包为 `@studyclaw/cli`（单文件 Bundle，外部原生依赖为 koffi/pdf-parse）；发布与版本说明见 [CHANGELOG.md](./CHANGELOG.md) 和 [发布手册](./docs/RELEASE_RUNBOOK.md)。
 
 ```bash
 npm install -g @studyclaw/cli
@@ -212,8 +220,8 @@ Host 与命令行共用一个二进制 `studyclaw`：
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/.studyclaw/`（Windows：`%USERPROFILE%\.studyclaw`） | 全局：`workspace.json` 注册表、`config.yaml`、加密的 `credentials.json`、`master.key`、`host.json`、`logs/` |
-| `<项目>/.studyclaw/` | 每门课程：`syllabus.json` 大纲、`progress.md` 进度、`tasks/task_NNNN.json` 题卡、`notes.md`、`history/` 会话流、`sources/.checksums` |
+| `~/.studyclaw/`（Windows：`%USERPROFILE%\.studyclaw`，可用 `STUDYCLAW_HOME` 覆盖） | Host 全局：`workspace.json` 注册表、`master.key`、`host.json`、`host.lock`、`logs/`；模型配置与凭据在课程目录 |
+| `<项目>/.studyclaw/` | 每门课程：`config.yaml`、加密的 `credentials.json`、`syllabus.json` 大纲、`progress.md` 进度、`tasks/task_NNNN.json` 题卡、`notes.md`、`history/` 会话流、`.checksums` 资料指纹 |
 
 > 桌面版的全局数据改放在系统应用数据目录的 `host-home/` 子目录下（Windows：`%APPDATA%\@studyclaw\desktop\host-home`），课程数据仍在用户项目文件夹。
 
@@ -233,7 +241,7 @@ cd apps/web && pnpm dev
 
 | 脚本 | 作用 |
 | --- | --- |
-| `pnpm typecheck` | 全 project references 图类型检查 |
+| `pnpm typecheck` | 全 project references 图与 Web 类型检查（含 Next 类型生成） |
 | `pnpm test` | 一条命令跑后端 + Web 全部测试 |
 | `pnpm build:web` | 前端静态导出到 `apps/web/out` |
 | `pnpm build` | 全量构建 |
@@ -266,7 +274,7 @@ studyclaw-next/
 
 ### 工程约定
 
-- 提交遵循 `emoji type(scope): description` 风格（`✨ feat` / `🐛 fix` / `📝 docs` / `✅ test` / `🏗️ chore`）。
+- 提交信息使用英文，格式 `emoji type: description`（`✨ feat` / `🐛 fix` / `📝 docs` / `✅ test` / `🏗️ chore`）。
 - 改动领域契约（RPC 方法、文件格式、事件类型）时必须同步补测试；合入前 `pnpm typecheck` 零错误、`pnpm test` 全绿。
 - 包之间通过明确的导出边界依赖，领域包不直接碰 HTTP 传输层；新增 RPC 方法需在 `apiproxy` 补 zod 校验与错误码。
 - 学习状态一律走「文件即状态」契约（`syllabus.json` / `progress.md` / `tasks/` / `history/`），不引入数据库服务。

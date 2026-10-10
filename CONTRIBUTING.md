@@ -3,6 +3,8 @@
 感谢关注 StudyClaw！无论是报 Issue、提建议还是交代码，都欢迎。
 开始之前，请花五分钟读完本指南，能省下彼此大量来回。
 
+本指南适用于唯一维护中的 `studyclaw-next`。旧 Python/FastAPI 项目 `studyclaw/` 已废弃；完整工作区的上层目录用于构建、规划与过程文档。协作与目录约定见 [AGENTS.md](./AGENTS.md)。
+
 ## 行为与安全
 
 - 参与社区请遵守 [行为准则](./CODE_OF_CONDUCT.md)。
@@ -17,7 +19,7 @@
 | 平台 | Windows / macOS / Linux（当前主力验证平台为 Windows，其余平台欢迎反馈） |
 
 ```bash
-git clone <your-fork-url> studyclaw && cd studyclaw
+git clone <your-fork-url> studyclaw-next && cd studyclaw-next
 pnpm install          # koffi（原生 FFI）需要可用的构建/预编译环境
 pnpm build:web        # 前端静态导出到 apps/web/out
 pnpm serve --open     # 启动本地 Host（默认 127.0.0.1:8080）
@@ -37,7 +39,7 @@ cd apps/web && pnpm dev          # 终端 B：前端 dev server（:3000，/api/*
 ## 测试与质量门禁
 
 ```bash
-pnpm typecheck   # 全 project references 图类型检查，必须零错误
+pnpm typecheck   # 全 project references 图 + Web 类型生成与检查，必须零错误
 pnpm test        # 后端 + Web 全部测试（默认超时已内置为 60s，与 CI 同口径）
 ```
 
@@ -48,6 +50,7 @@ pnpm test        # 后端 + Web 全部测试（默认超时已内置为 60s，�
 ## 仓库导览
 
 - [README](./README.md)：功能全景、架构图、CLI 命令参考、数据存放位置
+- [AGENTS.md](./AGENTS.md)：仓库维护范围、目录边界与协作约定
 - [docs/LEARNING_FLOW.md](./docs/LEARNING_FLOW.md)：学习闭环数据流与各面板数据来源
 - [apps/web/AGENTS.md](./apps/web/AGENTS.md)：前端目录的组件/状态层约定
 
@@ -65,7 +68,7 @@ apps/web（Next.js 静态导出）
 
 ## 提交规范
 
-遵循 Conventional Commits，格式 `emoji type(scope): description`（英文描述，与仓库历史一致）。
+提交信息使用英文，格式 `emoji type: description`；本次约定统一省略 scope，历史含 scope 的提交保留不改写。
 仓库**只用以下五个 emoji**（提交门禁按此校验，多用一个都会被要求重整）：
 
 | emoji | 类型 | emoji | 类型 |
@@ -75,10 +78,10 @@ apps/web（Next.js 静态导出）
 | 🏗️ | chore 工程与构建 | | |
 
 - 性能优化归 `🐛 fix`，安全加固归 `🐛 fix`（若只改文档则 `📝 docs`）——不要另用 ⚡ / 🔒 等表外 emoji。
-- scope 写领域（`learning` / `host` / `builder` / `web` / `cli` / `desktop` / `ci` / `release` …）。
+- 描述中说明涉及的领域（learning / host / builder / web / cli / desktop / ci / release 等）。
 - 提交前 `git status` 确认暂存文件，别把无关改动捎带进去。
 
-示例：`✨ feat(learning): variant cards for misconception retry`、`🐛 fix(host): guard course mismatch in chat stream`。
+示例：`✨ feat: add variant learning cards for misconception retry`、`🐛 fix: guard course mismatch in host chat stream`。
 
 ## 开发流程
 
@@ -102,7 +105,7 @@ git switch -c feat/browser-e2e
 # 2. 小步提交，每个提交都能独立通过 typecheck（提交规矩见上一节）
 git status                    # 提交前必看，确认暂存了该有的文件
 git add <具体文件>            # 不要 git add .
-git commit -F msg.txt         # emoji + 英文标题 + 中文正文
+git commit -F msg.txt         # emoji type: description，提交信息使用英文
 
 # 3. 推到远端并开 PR
 git push -u origin feat/browser-e2e

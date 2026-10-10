@@ -1,36 +1,43 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# StudyClaw Web 控制台
 
-## Getting Started
+> 当前维护项目 `studyclaw-next` 的前端，使用 Next.js 16 / React 19。开发约定见 [AGENTS.md](AGENTS.md) 和 [仓库协作规范](../../AGENTS.md)。
 
-First, run the development server:
+## 开发
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+在 `studyclaw-next/` 根目录安装依赖并启动本地 Host：
+
+```powershell
+pnpm install
+pnpm serve
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+在另一终端从同一仓库根运行：
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```powershell
+pnpm --filter web dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+访问 `http://localhost:3000`。开发时 `next.config.ts` 将 `/api/*` 代理到 `http://127.0.0.1:8080`；如 Host 使用其他地址，可在启动 Web 前设置 `STUDYCLAW_API_URL`。认证 token 由开发布局读取 Host 元数据并注入。
 
-## Learn More
+## 构建与检查
 
-To learn more about Next.js, take a look at the following resources:
+以下命令在仓库根运行：
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```powershell
+pnpm typecheck
+pnpm --filter web lint
+pnpm --filter web test
+pnpm build:web
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+生产构建使用 `output: "export"`，产物在 `apps/web/out/`。运行 `pnpm serve --open` 由本地 Host 同源托管静态页面与 API；部署使用该流程。
 
-## Deploy on Vercel
+## 代码入口
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `app/`：页面、布局与主题样式。
+- `src/components/`：会话、导航、面板与设置组件。
+- `src/lib/api.ts`：Host RPC、SSE 与鉴权调用。
+- `src/hooks/`、`src/store/`：交互与状态管理。
+- `tests/`：Web 组件和交互测试；仓库根 `pnpm test` 同样包含 Web 测试项目。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+功能与领域数据流见 [仓库 README](../../README.md) 和 [学习流程](../../docs/LEARNING_FLOW.md)。

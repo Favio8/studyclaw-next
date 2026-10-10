@@ -1,7 +1,8 @@
 # StudyClaw 发布 Runbook（v0.1.0-beta 及以后）
 
 > 本文把「CI 已验证、需要人按开关」的发布动作固化为可复现步骤。
-> CI 侧（ci.yml / desktop.yml / release.yml）已全绿；本文只覆盖**本地手动**部分。
+> 适用仓库：当前维护的 `studyclaw-next`，旧 Python 版 `studyclaw/` 已废弃。工作区上层存放构建方案与过程文档，本手册随代码版本维护。
+> 本文的 CI 通过记录与 `0.1.0-beta` 命令是历史发布示例；实际发布前核对当前工作流结果、待发布版本和产物名称。维护约定见 [AGENTS.md](../AGENTS.md)。
 
 ## 0. 前置检查（每次发布前）
 
@@ -9,9 +10,8 @@
 # 以下命令都在仓库根目录（clone 下来的 studyclaw-next/）执行
 git status --porcelain          # 必须为空
 git log --oneline -3            # 确认 HEAD 是待发布提交
-node_modules/.bin/tsc.cmd -b tsconfig.json   # 0 错误
-node_modules/.bin/vitest.cmd run             # 全绿（apps/web 单独一份）
-cd apps/web && node_modules/.bin/vitest.cmd run
+pnpm typecheck                 # project references + Web 类型生成与检查
+pnpm test                      # Node + Web 两个测试项目
 ```
 
 ## 1. npm 发布 @studyclaw/cli

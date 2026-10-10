@@ -253,6 +253,26 @@ function preprocessModeFor(sourceName: string): 'pdf' | 'native' {
 }
 
 /**
+ * MinerU / PDF 产物的 boilerplate 净化（PRD 需求一）：去 HTML 注释与运行
+ * 页眉/页脚。页眉页脚的特征是"短行（≤30 字符）且在全文原样重复 ≥3 次"；
+ * 刻意跳过标题行与表格行——短标题重复出现是真实结构，不是噪音。规则保守：
+ * 命不中的文档零改动。
+ */
+function stripPdfBoilerplate(text: string): string {
+  const noComments = text.replace(/<!--[\s\S]*?-->/g, '')
+  const counts = new Map<string, number>()
+  for (const line of noComments.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.length > 30) continue
+    if (trimmed.startsWith('#') || trimmed.startsWith('|')) continue
+    counts.set(trimmed, (counts.get(trimmed) ?? 0) + 1)
+  }
+  const boilerplate = new Set([...counts.entries()].filter(([, n]) => n >= 3).map(([t]) => t))
+  if (boilerplate.size === 0) return noComments
+  return noComments.split(/\r?\n/).filter(line => !boilerplate.has(line.trim())).join('\n')
+}
+
+/**
  * General-purpose markdown/text preprocessing. The behavior adapts to the
  * source file type:
  *
@@ -271,7 +291,9 @@ function preprocessModeFor(sourceName: string): 'pdf' | 'native' {
  */
 function preprocessMarkdown(text: string, sourceName: string): string {
   const mode = preprocessModeFor(sourceName)
-  const lines = text.split(/\r?\n/)
+  // PDF 路径先过 boilerplate 净化（MinerU/扫描文本的运行页眉页脚）。
+  const source = mode === 'pdf' ? stripPdfBoilerplate(text) : text
+  const lines = source.split(/\r?\n/)
   let inFence = false
   const result: string[] = []
 

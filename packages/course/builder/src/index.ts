@@ -7,7 +7,25 @@
 export { MarkdownIngestor, slug, conceptTypeOf, IngestError, DEFAULT_MAX_CHUNK_CHARS } from './ingestor.ts'
 export { CourseBuilder, computeChecksums, loadSyllabus, loadTaskPool, writeTaskPool, BuildError, DEFAULT_SOURCE_EXTENSIONS, COURSE_STATE_FILES, stateDirOf, migrateLegacyLayout } from './builder.ts'
 export type { BuildReport } from './builder.ts'
-export { extractSourceText, extractTextToMarkdown, ExtractionError, EXTRACTED_EXTENSIONS } from './extract.ts'
+export { extractSourceText, extractTextToMarkdown, extractTextToMarkdownWithEngine, ExtractionError, EXTRACTED_EXTENSIONS } from './extract.ts'
+export {
+  probeMineru,
+  parseWithMineru,
+  resetMineruProbeCache,
+  MineruError,
+  DEFAULT_PARSE_OPTIONS,
+} from './mineru.ts'
+export type { ParseEngine, MineruTier, ParseEngineOptions, MineruProbe, MineruFailureCode } from './mineru.ts'
+export {
+  loadParsedManifest,
+  saveParsedManifest,
+  readParsedText,
+  writeParsedText,
+  parsedEntryStale,
+  parsedFileName,
+  parsedDirOf,
+} from './parsed-cache.ts'
+export type { ParsedManifest, ParsedCacheEntry, ParsedEngine } from './parsed-cache.ts'
 export { LlmTaskGenerator, TaskGenerationError, DEFAULT_MAX_RETRIES } from './task-gen.ts'
 export type { TaskGenerator } from './builder.ts'
 export { structuredCall, extractJsonObject } from './structured.ts'

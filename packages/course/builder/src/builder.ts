@@ -12,7 +12,18 @@ import { mkdir, open, readFile, readdir, rename, stat } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import { withCourseLock } from '@studyclaw/tools'
 import { MarkdownIngestor } from './ingestor.ts'
-import { extractSourceText } from './extract.ts'
+import { extractSourceText, extractTextToMarkdownWithEngine } from './extract.ts'
+import type { ParseEngineOptions } from './mineru.ts'
+import {
+  loadParsedManifest,
+  parsedEntryStale,
+  parsedFileName,
+  readParsedText,
+  saveParsedManifest,
+  writeParsedText,
+  type ParsedEngine,
+  type ParsedManifest,
+} from './parsed-cache.ts'
 import { graphAdjacency, projectChapterDependencies, type DependencyInferrerLike } from './dep-infer.ts'
 import { applySyllabusQualityGuard } from './quality-guard.ts'
 import { answerPositionSkewWarning, enforceTaskQuality } from './quality.ts'
@@ -290,7 +301,83 @@ export class CourseBuilder {
     readonly excludedSourceDirs: ReadonlySet<string> | null = null,
     readonly skipHiddenSourceDirs = false,
     readonly excludedSourceFiles: ReadonlySet<string> = COURSE_STATE_FILES,
+    /** MinerU 解析选项（PRD 需求一）；null = 完全维持内置解析行为。 */
+    readonly parseOptions: ParseEngineOptions | null = null,
   ) {}
+
+  /** parsed/ 缓存的 manifest（build 期间的内存态，结束后落盘）。 */
+  private parsedManifest: ParsedManifest = {}
+  private parsedManifestLoaded = false
+
+  /** 生效的解析引擎（用于 manifest 失效判定）：builtin 关闭时恒 mineru。 */
+  private effectiveParseEngine(): ParsedEngine | null {
+    if (this.parseOptions === null || this.parseOptions.engine === 'builtin') return null
+    return 'mineru'
+  }
+
+  private async ensureParsedManifest(): Promise<void> {
+    if (this.parsedManifestLoaded) return
+    this.parsedManifest = await loadParsedManifest(stateDirOf(this.courseDir))
+    this.parsedManifestLoaded = true
+  }
+
+  /**
+   * 单个资料的 Markdown 文本（PRD 需求一）：
+   * - PDF + MinerU 启用：内容寻址缓存（`<sha12>-<tier>.md`）优先，未命中走
+   *   extract 的降级链（auto 失败回落 builtin 并如实记 manifest，下次构建
+   *   重试 MinerU；engine=mineru 强制时失败上抛 → builder 记 degraded）；
+   * - 其余（md/txt 直读、docx/xlsx/html、engine=builtin 的 PDF）维持内置。
+   */
+  private async extractMarkdown(relPath: string, absPath: string, ext: string, sha256: string): Promise<string> {
+    const parse = this.parseOptions
+    const stateDir = stateDirOf(this.courseDir)
+    if (parse !== null && parse.engine !== 'builtin' && ext === '.pdf') {
+      await this.ensureParsedManifest()
+      const fileName = parsedFileName(sha256, parse.tier)
+      const cached = await readParsedText(stateDir, fileName)
+      if (cached !== null) {
+        this.parsedManifest[relPath] = { sha256, engine: 'mineru', tier: parse.tier, out: fileName }
+        return cached
+      }
+      const outcome = await extractTextToMarkdownWithEngine(absPath, parse)
+      if (outcome.engine === 'mineru') {
+        const out = await writeParsedText(stateDir, fileName, outcome.text)
+        this.parsedManifest[relPath] = { sha256, engine: 'mineru', tier: parse.tier, out }
+      } else {
+        // auto 回落 builtin：builtin 不值得落缓存文件，只记 manifest 以便
+        // 下次构建重试 MinerU（自愈），不把 builtin 结果冒充 mineru 钉住。
+        this.parsedManifest[relPath] = { sha256, engine: 'builtin', tier: parse.tier, out: null }
+      }
+      return outcome.text
+    }
+    return extractSourceText(absPath, ext, parse)
+  }
+
+  /**
+   * 引擎/档位变更的失效判定（PRD F1.5）：manifest 记录的上次 (sha, engine,
+   * tier) 与当前不一致的资料重新抽取。只覆盖 PDF——其余格式不走缓存层，
+   * 对它们做失效判定会导致每次构建都白跑一遍内置抽取。
+   */
+  private async staleByParseConfig(names: string[], checksums: Record<string, string>): Promise<string[]> {
+    const engine = this.effectiveParseEngine()
+    if (engine === null || this.parseOptions === null) return []
+    await this.ensureParsedManifest()
+    const stale: string[] = []
+    for (const name of names) {
+      const ext = name.toLowerCase().match(/\.[^.]*$/)?.[0] ?? ''
+      if (ext !== '.pdf') continue
+      if (parsedEntryStale(this.parsedManifest[name], checksums[name] ?? '', engine, this.parseOptions.tier)) {
+        stale.push(name)
+      }
+    }
+    return stale
+  }
+
+  private async saveParsedManifest(): Promise<void> {
+    if (this.effectiveParseEngine() === null) return
+    await this.ensureParsedManifest()
+    await saveParsedManifest(stateDirOf(this.courseDir), this.parsedManifest)
+  }
 
   private sourcesDir(): string {
     return this.sourceRoot ?? join(this.courseDir, 'sources')
@@ -327,6 +414,16 @@ export class CourseBuilder {
       else report.unchanged.push(name)
     }
     report.removed = Object.keys(stored).filter(name => !(name in current)).sort()
+    // PRD F1.5：引擎/档位变更使 PDF 的 parsed 缓存失效——这些文件 checksum
+    // 没变但必须重新抽取（装 MinerU 后升级既有课程、或用户改档位）。
+    // 已在 added/modified 的文件本就排在抽取计划里，跳过（否则同一文件会
+    // 进 changedFiles 两次，双跑抽取）。
+    for (const name of await this.staleByParseConfig(Object.keys(current).sort(), current)) {
+      if (report.added.includes(name) || report.modified.includes(name)) continue
+      const at = report.unchanged.indexOf(name)
+      if (at >= 0) report.unchanged.splice(at, 1)
+      report.modified.push(name)
+    }
     const changed = report.added.length > 0 || report.modified.length > 0 || report.removed.length > 0
 
     if (!changed) {
@@ -396,7 +493,7 @@ export class CourseBuilder {
           artifact = await ingestor.parseAndChunk(path, this.courseDir.split(/[\\/]/).pop() ?? 'course')
         } else {
           // 抽取文档文本后委托同一 MarkdownIngestor 走双层大纲/切片（Python PdfIngestor 语义）。
-          const markdown = await extractSourceText(path, ext)
+          const markdown = await this.extractMarkdown(name, path, ext, current[name] ?? '')
           artifact = ingestor.parseText(markdown, name, this.courseDir.split(/[\\/]/).pop() ?? 'course')
         }
       } catch {
@@ -454,6 +551,7 @@ export class CourseBuilder {
     await withCourseLock(this.courseDir, async () => {
       report.conceptsSeeded = await this.seedProgress()
       await this.saveChecksums(current)
+      await this.saveParsedManifest()
     })
     return report
   }
@@ -481,7 +579,7 @@ export class CourseBuilder {
         if (ext === '.md' || ext === '.txt') {
           artifact = await ingestor.parseAndChunk(join(sourcesDir, name), this.courseDir.split(/[\\/]/).pop() ?? 'course')
         } else {
-          const markdown = await extractSourceText(join(sourcesDir, name), ext)
+          const markdown = await this.extractMarkdown(name, join(sourcesDir, name), ext, current[name] ?? '')
           artifact = ingestor.parseText(markdown, name, this.courseDir.split(/[\\/]/).pop() ?? 'course')
         }
         artifacts.push({
@@ -504,6 +602,7 @@ export class CourseBuilder {
     await withCourseLock(this.courseDir, async () => {
       report.conceptsSeeded = await this.seedProgress()
       await this.saveChecksums(current)
+      await this.saveParsedManifest()
     })
     const existing = await loadSyllabus(this.courseDir)
     if (existing.granularity !== granularity) {

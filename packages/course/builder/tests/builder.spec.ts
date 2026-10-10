@@ -5,7 +5,7 @@
  * generator (offline).
  */
 
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CourseBuilder, loadSyllabus, loadTaskPool, migrateLegacyLayout, MAX_SOURCE_FILE_BYTES, type TaskGenerator } from '../src/builder.ts'
@@ -312,6 +312,50 @@ describe('CourseBuilder', () => {
     await expect(readFile(join(courseDir, '.studyclaw', 'progress.md'), 'utf8')).resolves.toContain('旧布局看板')
     // 幂等：二次调用不重复迁移、不抛错。
     await migrateLegacyLayout(courseDir)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('布局迁移不再搬走 sources/（新项目先放资料再打开，资料必须留根可见）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-srcstay-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, '.studyclaw'), { recursive: true })
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, 'progress.md'), '# 旧布局看板\n', 'utf8')
+    await writeFile(join(courseDir, 'sources', 'lecture.md'), '# 资料\n', 'utf8')
+    await migrateLegacyLayout(courseDir)
+    // 状态文件照搬，sources 留在根。
+    await expect(readFile(join(courseDir, '.studyclaw', 'progress.md'), 'utf8')).resolves.toBe('# 旧布局看板\n')
+    await expect(readFile(join(courseDir, 'sources', 'lecture.md'), 'utf8')).resolves.toBe('# 资料\n')
+    await expect(stat(join(courseDir, '.studyclaw', 'sources')).catch(() => null)).resolves.toBeNull()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('自愈：旧版误搬的 .studyclaw/sources/ 搬回根（marker 已写也会执行）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-srcrecover-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, '.studyclaw', 'sources'), { recursive: true })
+    await writeFile(join(courseDir, '.studyclaw', '.layout-v2'), 'v2\n', 'utf8')
+    await writeFile(join(courseDir, '.studyclaw', 'sources', 'lecture.md'), '# 被误搬的资料\n', 'utf8')
+    await migrateLegacyLayout(courseDir)
+    await expect(readFile(join(courseDir, 'sources', 'lecture.md'), 'utf8')).resolves.toBe('# 被误搬的资料\n')
+    await expect(stat(join(courseDir, '.studyclaw', 'sources')).catch(() => null)).resolves.toBeNull()
+    // 幂等：二次调用无源可搬，不抛错。
+    await migrateLegacyLayout(courseDir)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('自愈不覆盖：根 sources/ 已存在时跳过搬回（不吞用户资料）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'studyclaw-builder-srcskip-'))
+    const courseDir = join(root, 'c1')
+    await mkdir(join(courseDir, '.studyclaw', 'sources'), { recursive: true })
+    await mkdir(join(courseDir, 'sources'), { recursive: true })
+    await writeFile(join(courseDir, '.studyclaw', '.layout-v2'), 'v2\n', 'utf8')
+    await writeFile(join(courseDir, '.studyclaw', 'sources', 'old.md'), '# 旧副本\n', 'utf8')
+    await writeFile(join(courseDir, 'sources', 'new.md'), '# 用户新资料\n', 'utf8')
+    await migrateLegacyLayout(courseDir)
+    // 根目录的用户资料原样保留，旧副本留在 .studyclaw/ 不动。
+    await expect(readFile(join(courseDir, 'sources', 'new.md'), 'utf8')).resolves.toBe('# 用户新资料\n')
+    await expect(readFile(join(courseDir, '.studyclaw', 'sources', 'old.md'), 'utf8')).resolves.toBe('# 旧副本\n')
     await rm(root, { recursive: true, force: true })
   })
 })

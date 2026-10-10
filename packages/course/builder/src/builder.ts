@@ -50,7 +50,33 @@ export function stateDirOf(workspaceRoot: string): string {
 }
 
 const LEGACY_LAYOUT_MARKER = '.layout-v2'
-const LEGACY_LAYOUT_ARTIFACTS = ['syllabus.json', 'progress.md', 'notes.md', 'tasks', 'history', 'sources', 'courses', '.checksums', '.source-root.json']
+// v1（就地混放）→ v2（状态收拢 .studyclaw/）要搬的 artifact。sources 不在其列：
+// 它在两种布局下都是**资料**（项目即课程的扫描根就是项目根，upload 也落根
+// sources/）——搬进 .studyclaw/ 会让 builder 与 reading 从此看不见它（真机
+// 验证踩坑：新项目先放 sources/ 再打开，资料整体消失）。v1 用户的 sources/
+// 留在根下同样能被就地扫描覆盖。
+const LEGACY_LAYOUT_ARTIFACTS = ['syllabus.json', 'progress.md', 'notes.md', 'tasks', 'history', 'courses', '.checksums', '.source-root.json']
+
+/**
+ * 自愈：旧版迁移曾把根 `sources/` 搬进 `.studyclaw/sources/`（缺陷期产物），
+ * 资料从此对构建与阅读不可见。marker 已写（迁移已完成）且根 `sources/`
+ * 不存在时，把幸存副本搬回根。每次调用都会尝试，搬回成功即自然终止；
+ * 失败静默（下次启动重试），不抛错——marker 已写，迁移主流程不再负责。
+ */
+async function recoverMigratedSources(
+  workspaceRoot: string,
+  stateDir: string,
+  move: (from: string, to: string) => Promise<void>,
+): Promise<void> {
+  const stranded = join(stateDir, 'sources')
+  if ((await stat(stranded).catch(() => null))?.isDirectory() !== true) return
+  if ((await stat(join(workspaceRoot, 'sources')).catch(() => null)) !== null) return
+  await move(stranded, join(workspaceRoot, 'sources')).then(() => {
+    console.log('[studyclaw] 自愈: .studyclaw/sources/ -> 根 sources/（修复旧版迁移误搬的资料）')
+  }).catch(() => {
+    // 占用/锁定导致搬回失败：下次启动重试。
+  })
+}
 
 /**
  * One-shot layout migration: moves pre-v2 root-level artifacts into
@@ -64,7 +90,11 @@ export async function migrateLegacyLayout(
 ): Promise<void> {
   const stateDir = stateDirOf(workspaceRoot)
   const marker = join(stateDir, LEGACY_LAYOUT_MARKER)
-  if ((await stat(marker).catch(() => null)) !== null) return
+  if ((await stat(marker).catch(() => null)) !== null) {
+    // marker 已写：迁移早已完成，但仍要给被旧版误搬的 sources/ 一次搬回机会。
+    await recoverMigratedSources(workspaceRoot, stateDir, move)
+    return
+  }
   const found: string[] = []
   for (const name of LEGACY_LAYOUT_ARTIFACTS) {
     if ((await stat(join(workspaceRoot, name)).catch(() => null)) !== null) found.push(name)

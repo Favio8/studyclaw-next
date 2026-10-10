@@ -9,8 +9,15 @@
  *   5. 静态托管：/ 注入 token tap、无扩展名路由 SPA 回落、编码穿越不泄漏；
  *   5b. 编码穿越（裸 socket 版）：直发未经客户端归一化的路径，验证服务端自身；
  *   6. 上传路由边界：无工作区 → 409（先于 busboy 解析）；
+ *   6b. MinerU 探测：PATH 上的 mineru-kit 反映进 settings.get；
+ *   6c. reading RPC 链路与 reading.parsed 产物下发；
  *   7. C-1 回归：优雅关停（SIGINT）后 host.json 与 host.lock 真正删除；
  *   8. 实例锁自愈：同一 home 下强杀残留 lock 后重启可抢回。
+ *
+ * 用例顺序约束：所有复用共享 Host 的 describe 必须排在「serve 关停与实例锁」
+ * 之前——那个 describe 的 C-1 用例会把共享实例优雅关停（POSIX 真跑 SIGINT，
+ * Windows 跳过），排在它之后的用例在 CI（ubuntu）上全部 ECONNREFUSED，而
+ * Windows 本地永远复现不了（顺序 bug 的教训：2026-10-10 CI 三连红）。
  *
  * 平台注意（POSIX）：tsx CLI 与它拉起的 bin.ts 是两个进程，`child.kill()`
  * 只打到 wrapper 上。因此 POSIX 下 spawn 用 `detached` 让 serve 自成进程组，
@@ -19,7 +26,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -351,77 +358,21 @@ describe("serve HTTP 边界（集成）", () => {
   }, 40_000);
 });
 
-describe("serve 关停与实例锁", () => {
-  it("C-1 回归：优雅关停后 host.json 与 host.lock 均被删除", async () => {
-    if (isWin) return; // Windows 无信号语义，SIGINT 被映射为强杀
-    const target = host!;
-    const exiting = waitForExit(target.child);
-    signalGracefully(target, "SIGINT");
-    await exiting;
-    expect(await waitForGone(join(target.home, "host.json"))).toBe(true);
-    expect(await waitForGone(join(target.home, "host.lock"))).toBe(true);
-  }, 30_000);
-
-  it("实例锁自愈：同一 home 下强杀残留 lock 后重启可抢回", async () => {
-    // 专用实例：关停用例已把共享实例优雅关停（lock 已删），不能复用它的 home。
-    const stale = await startHost();
-    try {
-      const up = await fetch(`http://127.0.0.1:${stale.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
-      expect(up.status).toBe(200);
-      const stalePidBefore = await readLockPid(stale.home);
-      expect(stalePidBefore).toBeGreaterThan(0);
-
-      const exiting = waitForExit(stale.child);
-      killHard(stale);
-      await exiting;
-      // 强杀跳过清理：lock 残留，且锁里的 pid 已随进程消失。
-      expect(existsSync(join(stale.home, "host.lock"))).toBe(true);
-      const stalePid = await readLockPid(stale.home);
-      expect(stalePid).toBe(stalePidBefore);
-
-      // 同一 home 重启：acquireHostInstanceLock 发现陈旧 pid → 抢走锁并起服务。
-      const second = await startHost(stale.home);
-      try {
-        const health = await fetch(`http://127.0.0.1:${second.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
-        expect(health.status).toBe(200);
-        // 锁已易主（不是残留的旧 pid）——这条才是"自愈"的实质断言。
-        expect(await readLockPid(stale.home)).not.toBe(stalePid);
-      } finally {
-        stop(second);
-      }
-    } finally {
-      // 断言失败也要收掉这个专用实例，别把 serve 进程留给后续测试/CI。
-      stop(stale);
-    }
-  }, 60_000);
-});
-
 describe("MinerU 解析接入（集成）", () => {
-  // 两个断言合并到一次 Host 启动：全量套件并行跑时少起一个 serve 进程
-  // （该套件的 workspace/apiproxy 用例对并行负载敏感）。
-  it("PATH 上的 mineru-kit：探测可见 + 真实 spawn 解析产物落 parsed/", async () => {
+  // 独立 Host：探测发生在 Host 进程内，需要把假 mineru-kit 前置进它的 PATH。
+  // 只断言探测可见——产物落盘的完整链路由 parsed-cache.spec.ts（builder 级，
+  // 真实 pdf fixture）与下方 reading.parsed 集成（manifest → HTTP 下发）两层
+  // 覆盖；在 serve 层复刻“无 LLM 配置下异步 build 走完抽取”对 CI 既慢又不稳
+  //（曾为此在 ubuntu runner 上 40s 轮询不到产物）。
+  it("PATH 上的 mineru-kit：settings.get 的探测状态可见", async () => {
     const fakeBin = mkdtempSync(join(tmpdir(), "studyclaw-fakebin-"));
-    if (isWin) {
-      // Windows 只认 .exe（uv/pipx shim）；空文件即可——探测只 stat 不执行。
-      writeFileSync(join(fakeBin, "mineru-kit.exe"), "", "utf8");
-    } else {
-      // POSIX：可执行假 CLI，忽略输入内容，把 -o 产物写成带标记的 Markdown。
-      const script = join(fakeBin, "mineru-kit");
-      writeFileSync(script, [
-        "#!/usr/bin/env node",
-        "const fs = require('node:fs')",
-        "const args = process.argv.slice(2)",
-        "const at = args.indexOf('-o')",
-        "fs.writeFileSync(args[at + 1], '# 第一章 假 MinerU 产物\n\n## 概念甲\n\nSM-2 的 EF 钳制在 [1.3, 2.9]。\n')",
-        "",
-      ].join("\n"), "utf8");
-      chmodSync(script, 0o755);
-    }
-
+    // 探测只 stat 不执行，空文件即可；Windows 只认 .exe（uv/pipx shim 形态）。
+    writeFileSync(join(fakeBin, isWin ? "mineru-kit.exe" : "mineru-kit"), "", "utf8");
     const target = await startHost(undefined, fakeBin);
     const project = mkdtempSync(join(tmpdir(), "studyclaw-mineru-"));
     try {
       // settings.get 需要已打开的工作区（FL-03：未打开时读设置直接报错）。
+      // 注意用 target 自己的端口——base() 指向共享 Host，token 对不上必 401。
       const opened = await fetch(`http://127.0.0.1:${target.port}/api/workspaces.open`, {
         method: "POST",
         headers: auth(target.token),
@@ -430,7 +381,6 @@ describe("MinerU 解析接入（集成）", () => {
       });
       expect(opened.status).toBe(200);
 
-      // 1) 探测：Host 进程内按 PATH → ~/.local/bin → uv tool list 找到假 CLI。
       const res = await fetch(`http://127.0.0.1:${target.port}/api/settings.get`, {
         method: "POST",
         headers: auth(target.token),
@@ -443,49 +393,12 @@ describe("MinerU 解析接入（集成）", () => {
       expect(payload.result.parse.mineru.available).toBe(true);
       expect(payload.result.parse.mineru.command).toContain(fakeBin);
       expect(payload.result.parse.engine).toBe("auto");
-
-      if (isWin) return; // Windows 无法假造 .exe，spawn 端到端只在 POSIX 断言
-
-      // 2) 端到端：假 LLM 配置让构建越过 configProblem 到达抽取阶段；生成阶段
-      // 必然失败（端点不可达），但解析产物在生成之前就已落盘——断言点即此。
-      mkdirSync(join(project, ".studyclaw"), { recursive: true });
-      mkdirSync(join(project, "sources"), { recursive: true });
-      writeFileSync(join(project, ".studyclaw", "config.yaml"), [
-        "llm:",
-        "  provider: fake",
-        "  model: fake-model",
-        "  api_base: http://127.0.0.1:9",
-        "",
-      ].join("\n"), "utf8");
-      writeFileSync(join(project, "sources", "lecture.pdf"), "fake-pdf-bytes", "utf8");
-
-      const synced = await fetch(`http://127.0.0.1:${target.port}/api/courses.sync`, {
-        method: "POST",
-        headers: auth(target.token),
-        body: JSON.stringify({ payload: { courseId: basename(project) } }),
-        signal: AbortSignal.timeout(30_000),
-      });
-      expect(synced.status).toBe(200);
-
-      // 抽取先于 LLM 生成：轮询 parsed/ 内容寻址产物（默认档位 basic）。
-      const parsedDir = join(project, ".studyclaw", "parsed");
-      const deadline = Date.now() + 40_000;
-      let marker = "";
-      while (Date.now() < deadline && marker === "") {
-        for (const name of existsSync(parsedDir) ? readdirSync(parsedDir) : []) {
-          if (!name.endsWith("-basic.md")) continue;
-          const text = readFileSync(join(parsedDir, name), "utf8");
-          if (text.includes("假 MinerU 产物")) { marker = text; break; }
-        }
-        if (marker === "") await sleep(300);
-      }
-      expect(marker).toContain("概念甲");
     } finally {
       killHard(target);
       await waitForExit(target.child);
       rmSync(project, { recursive: true, force: true });
     }
-  }, 90_000);
+  }, 30_000);
 });
 
 describe("reading RPC 与资料路由（集成）", () => {
@@ -657,3 +570,48 @@ describe("reading.parsed 解析视图（集成）", () => {
     }
   }, 30_000);
 });
+describe("serve 关停与实例锁", () => {
+  it("C-1 回归：优雅关停后 host.json 与 host.lock 均被删除", async () => {
+    if (isWin) return; // Windows 无信号语义，SIGINT 被映射为强杀
+    const target = host!;
+    const exiting = waitForExit(target.child);
+    signalGracefully(target, "SIGINT");
+    await exiting;
+    expect(await waitForGone(join(target.home, "host.json"))).toBe(true);
+    expect(await waitForGone(join(target.home, "host.lock"))).toBe(true);
+  }, 30_000);
+
+  it("实例锁自愈：同一 home 下强杀残留 lock 后重启可抢回", async () => {
+    // 专用实例：关停用例已把共享实例优雅关停（lock 已删），不能复用它的 home。
+    const stale = await startHost();
+    try {
+      const up = await fetch(`http://127.0.0.1:${stale.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
+      expect(up.status).toBe(200);
+      const stalePidBefore = await readLockPid(stale.home);
+      expect(stalePidBefore).toBeGreaterThan(0);
+
+      const exiting = waitForExit(stale.child);
+      killHard(stale);
+      await exiting;
+      // 强杀跳过清理：lock 残留，且锁里的 pid 已随进程消失。
+      expect(existsSync(join(stale.home, "host.lock"))).toBe(true);
+      const stalePid = await readLockPid(stale.home);
+      expect(stalePid).toBe(stalePidBefore);
+
+      // 同一 home 重启：acquireHostInstanceLock 发现陈旧 pid → 抢走锁并起服务。
+      const second = await startHost(stale.home);
+      try {
+        const health = await fetch(`http://127.0.0.1:${second.port}/api/health`, { signal: AbortSignal.timeout(8_000) });
+        expect(health.status).toBe(200);
+        // 锁已易主（不是残留的旧 pid）——这条才是"自愈"的实质断言。
+        expect(await readLockPid(stale.home)).not.toBe(stalePid);
+      } finally {
+        stop(second);
+      }
+    } finally {
+      // 断言失败也要收掉这个专用实例，别把 serve 进程留给后续测试/CI。
+      stop(stale);
+    }
+  }, 60_000);
+});
+

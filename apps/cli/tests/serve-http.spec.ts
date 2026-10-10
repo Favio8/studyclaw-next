@@ -486,3 +486,126 @@ describe("MinerU 解析接入（集成）", () => {
     }
   }, 90_000);
 });
+
+describe("reading RPC 与资料路由（集成）", () => {
+  // 复用共享 Host（不新增进程）：本 describe 自己开一个临时项目，测试间
+  // 通过 annotations.json 的状态自然衔接。
+  let project: string;
+  let courseId: string;
+
+  beforeAll(async () => {
+    project = mkdtempSync(join(tmpdir(), "studyclaw-reading-it-"));
+    courseId = basename(project);
+    // 先打开再写资料：旧布局迁移只在首次打开时跑一次（marker 守卫），
+    // 先写后开会把根 sources/ 搬进 .studyclaw/（v1 兼容路径），与线上
+    // 上传落盘路径（根 sources/）不一致。
+    const opened = await fetch(`${base()}/api/workspaces.open`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ payload: { path: project } }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    expect(opened.status).toBe(200);
+    mkdirSync(join(project, "sources"), { recursive: true });
+    writeFileSync(join(project, "sources", "note.md"), "# 笔记\n\nSM-2 的 EF 钳制在 [1.3, 2.9]。\n", "utf8");
+    writeFileSync(join(project, "sources", "lecture.pdf"), "%PDF-1.4 fake", "utf8");
+  });
+
+  const rpc = async (method: string, payload: unknown) => {
+    const res = await fetch(`${base()}/api/${method}`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ payload }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return { status: res.status, json: await res.json() as { ok: boolean; result?: Record<string, unknown>; error?: { code: string; message: string } } };
+  };
+
+  it("load：无标注时返回视图类型与空列表", async () => {
+    const { status, json } = await rpc("reading.load", { source: "sources/note.md" });
+    expect(status).toBe(200);
+    expect(json.result).toMatchObject({ view: "markdown", exists: true, recovered: false });
+    expect(json.result?.highlights).toEqual([]);
+  });
+
+  it("highlight add → list → update → remove 全链路落盘", async () => {
+    const added = await rpc("reading.highlights.add", {
+      source: "sources/note.md",
+      page: 1,
+      rects: [{ x: 0.1, y: 0.2, w: 0.5, h: 0.03 }],
+      quote: "EF 钳制在 [1.3, 2.9]",
+      prefix: "SM-2 的 ",
+      suffix: "，超出即拒",
+      color: "yellow",
+      comment: "",
+      tags: ["考点"],
+    });
+    expect(added.status).toBe(200);
+    const id = String(added.json.result?.id ?? "");
+    expect(id).toMatch(/^hl_/);
+
+    const listed = await rpc("reading.highlights.list", { source: "sources/note.md" });
+    expect((listed.json.result as { highlights: Array<Record<string, unknown>> }).highlights).toHaveLength(1);
+
+    const updated = await rpc("reading.highlights.update", { source: "sources/note.md", id, color: "green", comment: "常考" });
+    expect(updated.json.result).toMatchObject({ color: "green", comment: "常考" });
+
+    const missing = await rpc("reading.highlights.update", { source: "sources/note.md", id: "hl_none", color: "red" });
+    expect(missing.json.error?.code).toBe("annotation-not-found");
+
+    const exported = await rpc("reading.export", { source: "sources/note.md" });
+    expect(String(exported.json.result?.markdown)).toContain("EF 钳制在 [1.3, 2.9]");
+    expect(Number(exported.json.result?.count)).toBe(1);
+
+    const removed = await rpc("reading.highlights.remove", { source: "sources/note.md", id });
+    expect(removed.json.result).toEqual({ removed: true });
+    const after = await rpc("reading.highlights.list", { source: "sources/note.md" });
+    expect((after.json.result as { highlights: unknown[] }).highlights).toEqual([]);
+  });
+
+  it("progress.save：percent 归一，load 读回", async () => {
+    await rpc("reading.progress.save", { source: "sources/note.md", page: 4, percent: 57.6 });
+    const loaded = await rpc("reading.load", { source: "sources/note.md" });
+    expect(loaded.json.result?.progress).toMatchObject({ page: 4, percent: 58 });
+  });
+
+  it("reading.text：md 可读；穿越与非白名单扩展名被拒", async () => {
+    const ok = await rpc("reading.text", { source: "sources/note.md" });
+    expect(String(ok.json.result?.text)).toContain("EF 钳制");
+    const bad = await rpc("reading.text", { source: "../secret.md" });
+    expect(bad.json.ok).toBe(false);
+    const notText = await rpc("reading.text", { source: "sources/lecture.pdf" });
+    expect(notText.json.ok).toBe(false);
+  });
+
+  it("GET reading.file：token 门禁 + 路径守卫", async () => {
+    const noToken = await fetch(`${base()}/api/reading.file?source=${encodeURIComponent("sources/lecture.pdf")}`, { signal: AbortSignal.timeout(8_000) });
+    expect(noToken.status).toBe(401);
+
+    const bad = await fetch(`${base()}/api/reading.file?source=${encodeURIComponent("../secret.md")}`, {
+      headers: auth(), signal: AbortSignal.timeout(8_000),
+    });
+    expect(bad.status).toBe(400);
+
+    const notPdf = await fetch(`${base()}/api/reading.file?source=${encodeURIComponent("sources/note.md")}`, {
+      headers: auth(), signal: AbortSignal.timeout(8_000),
+    });
+    expect(notPdf.status).toBe(400);
+
+    const good = await fetch(`${base()}/api/reading.file?source=${encodeURIComponent("sources/lecture.pdf")}`, {
+      headers: auth(), signal: AbortSignal.timeout(8_000),
+    });
+    expect(good.status).toBe(200);
+    expect(good.headers.get("content-type")).toContain("application/pdf");
+    expect(await good.text()).toContain("%PDF");
+  });
+
+  it("annotations.json 损坏：load 报 recovered 且备份 .bak-*", async () => {
+    writeFileSync(join(project, ".studyclaw", "annotations.json"), "{ 坏 JSON", "utf8");
+    const loaded = await rpc("reading.load", { source: "sources/note.md" });
+    expect(loaded.json.result).toMatchObject({ recovered: true });
+    expect(existsSync(join(project, ".studyclaw"))).toBe(true);
+    const backups = readdirSync(join(project, ".studyclaw")).filter((name) => name.startsWith("annotations.json.bak-"));
+    expect(backups.length).toBe(1);
+  });
+});

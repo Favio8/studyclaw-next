@@ -66,6 +66,7 @@ export type RpcErrorCode =
   | 'agent-not-waiting'
   | 'approval-not-found'
   | 'provider-exists'
+  | 'annotation-not-found'
 
 export interface RpcError {
   readonly code: RpcErrorCode
@@ -179,6 +180,17 @@ export interface HostServices {
   }
   /** Optional deployment capability snapshot used by `tools.list`. */
   readonly toolProviders?: () => Record<string, { available: boolean; reason: string | null; installAction: string | null }>
+  /** Reading surface（PRD 需求三）：annotations.json CRUD + 导出。 */
+  readonly readingService: {
+    load(source: string): Promise<Record<string, unknown>>
+    readText(source: string): Promise<Record<string, unknown>>
+    saveProgress(source: string, page: number, percent: number): Promise<Record<string, unknown>>
+    listHighlights(source: string): Promise<Array<Record<string, unknown>>>
+    addHighlight(source: string, input: Record<string, unknown>): Promise<Record<string, unknown>>
+    updateHighlight(source: string, id: string, patch: Record<string, unknown>): Promise<Record<string, unknown> | null>
+    removeHighlight(source: string, id: string): Promise<boolean>
+    exportMarkdown(source: string): Promise<Record<string, unknown>>
+  }
 }
 
 function workspaceView(workspace: Workspace): WorkspaceView {
@@ -645,6 +657,77 @@ const handlers = {
     payload: z.object({ courseId: z.string().min(1), conceptId: z.string().min(1).max(200), limit: z.number().int().min(1).max(20).default(3) }),
     async run(payload: { courseId: string; conceptId: string; limit: number }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.courseService.evalTrend(payload.courseId, payload.conceptId, payload.limit))
+    },
+  },
+  'reading.load': {
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.load(payload.source))
+    },
+  },
+  'reading.text': {
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.readText(payload.source))
+    },
+  },
+  'reading.progress.save': {
+    payload: z.object({ source: z.string().min(1).max(500), page: z.number().int().min(1).max(100000), percent: z.number().min(0).max(100) }),
+    async run(payload: { source: string; page: number; percent: number }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.saveProgress(payload.source, payload.page, payload.percent))
+    },
+  },
+  'reading.highlights.list': {
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<{ highlights: Array<Record<string, unknown>> }>> {
+      return ok({ highlights: await services.readingService.listHighlights(payload.source) })
+    },
+  },
+  'reading.highlights.add': {
+    payload: z.object({
+      source: z.string().min(1).max(500),
+      page: z.number().int().min(1).max(100000),
+      rects: z.array(z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() })).max(200).default([]),
+      quote: z.string().max(4000).default(''),
+      prefix: z.string().max(1000).default(''),
+      suffix: z.string().max(1000).default(''),
+      color: z.enum(['yellow', 'green', 'blue', 'red']).default('yellow'),
+      comment: z.string().max(4000).default(''),
+      tags: z.array(z.string().max(50)).max(20).default([]),
+      conceptId: z.string().max(200).nullish(),
+    }),
+    async run(payload: Record<string, unknown>, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      const source = String(payload['source'])
+      return ok(await services.readingService.addHighlight(source, payload))
+    },
+  },
+  'reading.highlights.update': {
+    payload: z.object({
+      source: z.string().min(1).max(500),
+      id: z.string().min(1).max(100),
+      color: z.enum(['yellow', 'green', 'blue', 'red']).optional(),
+      comment: z.string().max(4000).optional(),
+      tags: z.array(z.string().max(50)).max(20).optional(),
+      conceptId: z.string().max(200).nullish(),
+    }),
+    async run(payload: Record<string, unknown>, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      const source = String(payload['source'])
+      const id = String(payload['id'])
+      const updated = await services.readingService.updateHighlight(source, id, payload)
+      if (updated === null) return err('annotation-not-found', `标注不存在: ${id}`)
+      return ok(updated)
+    },
+  },
+  'reading.highlights.remove': {
+    payload: z.object({ source: z.string().min(1).max(500), id: z.string().min(1).max(100) }),
+    async run(payload: { source: string; id: string }, services: HostServices): Promise<RpcResponse<{ removed: boolean }>> {
+      return ok({ removed: await services.readingService.removeHighlight(payload.source, payload.id) })
+    },
+  },
+  'reading.export': {
+    payload: z.object({ source: z.string().min(1).max(500) }),
+    async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.exportMarkdown(payload.source))
     },
   },
   'workspace.files': {

@@ -14,7 +14,7 @@ import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, dirname, resolve } from 'node:path'
 import { readFile, realpath, stat } from 'node:fs/promises'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync, createReadStream } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -52,7 +52,8 @@ import {
 } from '@studyclaw/chat-service'
 import { migrateLegacySession } from '@studyclaw/session'
 import type { LearningMode } from '@studyclaw/session'
-import { createCourseService } from '@studyclaw/chat-service'
+import { createCourseService, ReadingService, runReadingAction } from '@studyclaw/chat-service'
+import { resolveSourceRef } from '@studyclaw/tools'
 import { AgentRegistry } from '@studyclaw/agent'
 import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
@@ -558,6 +559,47 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     }
   }
 
+  /** 阅读服务（PRD 需求三）：标注文件在课程根的 .studyclaw/ 下。 */
+  function wrapReadingService(): HostServices['readingService'] {
+    const activeRoot = (): string => registry.lastOpenedPath
+    const readingService = new ReadingService()
+    return {
+      load: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '阅读资料')
+        return readingService.load(activeRoot(), source) as unknown as Record<string, unknown>
+      },
+      readText: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '阅读资料')
+        return readingService.readText(activeRoot(), source) as unknown as Record<string, unknown>
+      },
+      saveProgress: async (source, page, percent) => {
+        requireWorkspaceRootForSettings(activeRoot(), '保存阅读进度')
+        return readingService.saveProgress(activeRoot(), source, page, percent) as unknown as Record<string, unknown>
+      },
+      listHighlights: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '阅读标注')
+        return readingService.listHighlights(activeRoot(), source) as unknown as Array<Record<string, unknown>>
+      },
+      addHighlight: async (source, input) => {
+        requireWorkspaceRootForSettings(activeRoot(), '添加标注')
+        return readingService.addHighlight(activeRoot(), source, input) as unknown as Record<string, unknown>
+      },
+      updateHighlight: async (source, id, patch) => {
+        requireWorkspaceRootForSettings(activeRoot(), '更新标注')
+        const updated = await readingService.updateHighlight(activeRoot(), source, id, patch)
+        return updated as unknown as Record<string, unknown> | null
+      },
+      removeHighlight: async (source, id) => {
+        requireWorkspaceRootForSettings(activeRoot(), '删除标注')
+        return readingService.removeHighlight(activeRoot(), source, id)
+      },
+      exportMarkdown: async source => {
+        requireWorkspaceRootForSettings(activeRoot(), '导出标注')
+        return readingService.exportMarkdown(activeRoot(), source) as unknown as Record<string, unknown>
+      },
+    }
+  }
+
   const services: HostServices = {
     registry: {
       create: (path, title) => registry.create(path, title),
@@ -713,6 +755,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       credential: async (providerId, apiKey) => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存 API Key'); return setCredential(registry.lastOpenedPath, providerId, apiKey) as unknown as Record<string, unknown> },
     },
     courseService: wrapCourseService(),
+    readingService: wrapReadingService(),
     toolProviders: () => ({
       subprocess: { available: false, reason: '默认拒绝无隔离的本机命令执行', installAction: '配置 sandbox Provider' },
       network: { available: true, reason: null, installAction: null },
@@ -884,6 +927,52 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     }
     if (request.method === 'GET' || request.method === 'HEAD') {
       // FL-21：非 /api 的 GET/HEAD 交给静态托管（Web UI）；/api 的 GET 仍 405。
+      if (url.pathname === '/api/reading.file') {
+        // 阅读器取资料字节（pdf.js 渲染用）。路径守卫与 read_source 同款
+        // （resolveSourceRef：源根内、拒绝穿越/隐藏段/8.3 短名），再限定 .pdf。
+        // server 回调非 async，整支包进 IIFE（与静态托管同款）。
+        const source = url.searchParams.get('source') ?? ''
+        const root = registry.lastOpenedPath
+        void (async () => {
+          const badRequest = (message: string): void => {
+            response.writeHead(400)
+            response.end(JSON.stringify({ error: { code: 'invalid-request', message, details: null } }))
+          }
+          if (root === '' || source.trim() === '') {
+            badRequest(root === '' ? '请先在左栏添加/打开一个项目' : 'source 不能为空')
+            return
+          }
+          let target: string
+          try {
+            target = await resolveSourceRef(root, source)
+          } catch (error) {
+            badRequest(error instanceof Error ? error.message : String(error))
+            return
+          }
+          if (!target.toLowerCase().endsWith('.pdf')) {
+            badRequest('阅读器只直接渲染 .pdf（其他格式走解析视图）')
+            return
+          }
+          const info = await stat(target).catch(() => null)
+          if (info === null || !info.isFile()) {
+            response.writeHead(404)
+            response.end(JSON.stringify({ error: { code: 'not-found', message: `no such file '${source}'`, details: null } }))
+            return
+          }
+          response.writeHead(200, {
+            'Content-Type': 'application/pdf',
+            'Content-Length': info.size,
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff',
+          })
+          if (request.method === 'HEAD') {
+            response.end()
+            return
+          }
+          createReadStream(target).pipe(response)
+        })()
+        return
+      }
       if (!url.pathname.startsWith('/api/') && staticHost !== null) {
         void (async () => {
           const hit = await staticHost.respond(url.pathname)
@@ -961,6 +1050,11 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         // 两种形式都路由到同一处理函数（保持向后兼容，修复 Quiz SSE 断路）。
         if (method === 'eval.submit' || method === 'eval/submit') {
           await handleEvalSubmit(response, body)
+          return
+        }
+        // 阅读 LLM 动作（PRD 需求三）：划词解释/翻译，SSE 帧 token…/done/error。
+        if (method === 'reading/explain' || method === 'reading/translate') {
+          await handleReadingAction(method === 'reading/explain' ? 'explain' : 'translate', request, response, body)
           return
         }
         if (method === 'acp') {
@@ -1284,6 +1378,64 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       }
     } catch (error) {
       writeFrame('error', { code: 'EVAL_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
+    }
+    response.end()
+  }
+
+  /**
+   * `POST /api/reading/explain` | `POST /api/reading/translate` (SSE)：阅读
+   * 划词动作（PRD 需求三）。帧：token… / done / error。客户端断连即中止
+   * LLM 请求（与 chat/stream 同款 AbortController 语义）。
+   */
+  async function handleReadingAction(
+    kind: 'explain' | 'translate',
+    request: import('node:http').IncomingMessage,
+    response: import('node:http').ServerResponse,
+    body: string,
+  ): Promise<void> {
+    const abortController = new AbortController()
+    request.once('aborted', () => abortController.abort('client'))
+    request.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
+    let input: { source?: unknown; selection?: unknown }
+    try {
+      input = JSON.parse(body === '' ? '{}' : body) as typeof input
+    } catch {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'request body is not valid JSON', details: null } }))
+      return
+    }
+    const source = typeof input.source === 'string' ? input.source : ''
+    const selection = typeof input.selection === 'string' ? input.selection : ''
+    if (source === '' || selection.trim() === '') {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'source/selection are required', details: null } }))
+      return
+    }
+    if (registry.lastOpenedPath === '') {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: '请先在左栏添加/打开一个项目', details: null } }))
+      return
+    }
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+    const writeFrame = (event: string, data: unknown): void => {
+      if (response.writableEnded || response.destroyed) return
+      response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    try {
+      for await (const frame of runReadingAction(
+        kind,
+        { workspaceRoot: registry.lastOpenedPath, source, selection },
+        configFacts,
+        abortController.signal,
+      )) {
+        writeFrame(String(frame['event'] ?? ''), frame['data'])
+      }
+    } catch (error) {
+      writeFrame('error', { code: 'READING_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
     }
     response.end()
   }

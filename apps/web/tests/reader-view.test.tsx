@@ -345,3 +345,51 @@ describe("ReaderView 划词建卡（P3）", () => {
     await waitFor(() => expect(screen.getByText(/概念 c_ef/)).toBeDefined());
   });
 });
+
+describe("阅读流生命周期（回归）", () => {
+  it("换资料会掐断上一份资料的在途解释流", async () => {
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/a.pdf",
+      view: "pdf",
+      exists: true,
+      progress: { page: 1, percent: 0, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    // 流式 mock：第一个 token 后等待，第二个 token 只在未中止时才发出。
+    let releaseSecond: () => void = () => {};
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    apiMocks.readingExplain.mockImplementation(async function* (_source: string, _selection: string, signal?: AbortSignal) {
+      yield { event: "token", data: { delta: "第一段" } };
+      await secondGate;
+      if (signal?.aborted) return;
+      yield { event: "token", data: { delta: "第二段" } };
+      yield { event: "done", data: { kind: "explain" } };
+    });
+    render(<ReaderView />);
+    await readingOpen("sources/a.pdf");
+    await waitFor(() => expect(screen.getByTestId("pdf-canvas")).toBeDefined());
+
+    readingSelectionChanged(SELECTION);
+    await waitFor(() => expect(screen.getByTestId("selection-popover")).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: /解释/ }));
+    await waitFor(() => expect(screen.getByTestId("reading-action-card").textContent).toContain("第一段"));
+
+    // 换资料：readingOpen 必须先 abort 旧流。
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/b.md",
+      view: "markdown",
+      exists: true,
+      progress: { page: 1, percent: 0, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    await readingOpen("sources/b.md");
+    releaseSecond();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // 旧流的第二段不得落到新资料的 action 卡上（action 已被 readingOpen 清空）。
+    expect(useAppStore.getState().reader.action).toBeNull();
+    expect(screen.queryByTestId("reading-action-card")).toBeNull();
+  });
+});

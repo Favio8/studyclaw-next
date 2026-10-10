@@ -25,6 +25,9 @@ function errorMessage(exc: unknown): string {
 
 /** 打开一份资料：读进度 + 标注，按扩展名决定视图。 */
 export async function readingOpen(source: string): Promise<void> {
+  // 先掐掉上一份资料的在途解释/翻译流：否则旧流的 token 会继续 append 进
+  // 新资料的 action 卡（store 是共享单例）。
+  abortActiveReading();
   useAppStore.getState().setReader({ loading: true, error: null, source, selection: null, action: null });
   try {
     const payload = await api.readingLoad(source);

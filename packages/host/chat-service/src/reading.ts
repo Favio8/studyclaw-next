@@ -74,6 +74,9 @@ export interface ReadingLoadResult {
 
 const EMPTY_PROGRESS: ReadingProgress = { page: 1, percent: 0, updatedAt: '' }
 
+/** notes.md 追加写链条：同进程内并发 append 串行，避免读-改-写丢更新。 */
+let notesAppendChain: Promise<unknown> = Promise.resolve()
+
 function annotationsPathOf(stateDir: string): string {
   return join(stateDir, 'annotations.json')
 }
@@ -358,9 +361,17 @@ export class ReadingService {
     const stateDir = join(workspaceRoot, '.studyclaw')
     await mkdir(stateDir, { recursive: true })
     const notesPath = join(stateDir, 'notes.md')
-    const existing = await readFile(notesPath, 'utf8').catch(() => '')
-    const separator = existing === '' || existing.endsWith('\n') ? '\n' : '\n\n'
-    await writeFile(notesPath, `${existing}${separator}<!-- reading-export ${new Date().toISOString()} source=${source} -->\n${markdown}\n`, 'utf8')
+    // 读-改-写串行化：并发导出（多点两次/多标签页）若各读各写，后写的
+    // 会覆盖前一份内容。模块级链保证同一进程内 append 顺序不丢。
+    const run = notesAppendChain.then(async () => {
+      const existing = await readFile(notesPath, 'utf8').catch(() => '')
+      const separator = existing === '' || existing.endsWith('\n') ? '\n' : '\n\n'
+      await writeFile(notesPath, `${existing}${separator}<!-- reading-export ${new Date().toISOString()} source=${source} -->\n${markdown}\n`, 'utf8')
+    })
+    notesAppendChain = run.catch(() => {
+      // 单次失败不毒化链条（调用方仍会收到本次错误）。
+    })
+    await run
     return { appended: true, count }
   }
 

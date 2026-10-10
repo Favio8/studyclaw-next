@@ -64,9 +64,11 @@ let probeCache: { at: number; result: MineruProbe } | null = null
 
 const UNAVAILABLE: MineruProbe = { available: false, command: null, reason: 'not-installed' }
 
-/** 可执行候选名：POSIX 无扩展名；Windows 只认 .exe（uv/pipx shim），.cmd/.bat 刻意跳过。 */
+/** 可执行候选名：Windows 只认 .exe（uv/pipx 的 shim 形态）；无扩展名候选
+ *  仅 POSIX 有效——Windows 上 execFile 一个无扩展名文件必然 ENOENT，把它
+ *  算进探测等于报"已安装"却起不来。 */
 function candidateNames(base: string): string[] {
-  return process.platform === 'win32' ? [`${base}.exe`, base] : [base]
+  return process.platform === 'win32' ? [`${base}.exe`] : [base]
 }
 
 async function isFile(path: string): Promise<boolean> {

@@ -235,3 +235,22 @@ describe('ReadingService 痕迹与追加笔记（P3）', () => {
     expect(notes2).toContain('第二条')
   })
 })
+
+describe('appendNotes 并发串行（回归）', () => {
+  it('并发两次追加都落盘，互不覆盖', async () => {
+    const root = await workspace()
+    const service = new ReadingService()
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, quote: '第一条标注' })
+    await service.addHighlight(root, 'sources/a.pdf', { ...HIGHLIGHT_INPUT, quote: '第二条标注' })
+    // 同一进程内并发触发两次导出追加。
+    const results = await Promise.all([
+      service.appendNotes(root, 'sources/a.pdf'),
+      service.appendNotes(root, 'sources/a.pdf'),
+    ])
+    expect(results.every(item => item.appended)).toBe(true)
+    const notes = await readFile(join(root, '.studyclaw', 'notes.md'), 'utf8')
+    // 两条标注在两次导出中都出现（后一次覆盖前一次会只剩一份）。
+    expect(notes.match(/第一条标注/g)?.length).toBe(2)
+    expect(notes.match(/第二条标注/g)?.length).toBe(2)
+  })
+})

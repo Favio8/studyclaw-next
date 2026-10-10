@@ -50,7 +50,11 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
   const pageElRef = useRef<HTMLDivElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const docRef = useRef<{ cleanup: () => Promise<unknown>; numPages: number; getPage: (n: number) => Promise<import("pdfjs-dist").PDFPageProxy> } | null>(null);
+  // 同时持有 loading task 与 document：卸载/换资料时 task.destroy() 才会
+  // 真正收掉 pdf.js worker（只 cleanup() document 会泄漏 worker，反复开
+  // 文档后 worker 累积）。
+  const taskRef = useRef<{ destroy: () => Promise<void> } | null>(null);
+  const docRef = useRef<{ numPages: number; getPage: (n: number) => Promise<import("pdfjs-dist").PDFPageProxy> } | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
 
@@ -68,11 +72,16 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
         );
         // 带鉴权抓字节（pdf.js 自己发请求不会带 Bearer token）。
         const bytes = await api.readingFileBytes(source);
-        const doc = await pdfjs.getDocument({ data: bytes }).promise;
+        const task = pdfjs.getDocument({ data: bytes });
+        const doc = await task.promise;
         if (cancelled) {
           void doc.cleanup();
+          void task.destroy().catch(() => {
+            // 已销毁/失败的任务：忽略。
+          });
           return;
         }
+        taskRef.current = task;
         docRef.current = doc as unknown as typeof docRef.current;
         onPageCount(doc.numPages);
         setStatus("ready");
@@ -85,8 +94,12 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
     void load();
     return () => {
       cancelled = true;
-      void docRef.current?.cleanup();
+      const task = taskRef.current;
+      taskRef.current = null;
       docRef.current = null;
+      if (task !== null) void task.destroy().catch(() => {
+        // 卸载即销毁；销毁中的任务报错无意义。
+      });
     };
     // onPageCount 是稳定 setState 包装；source 才是重载触发项。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -126,7 +139,9 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
         textLayer.replaceChildren();
         const textContent = await pdfPage.getTextContent();
         // 扫描件：整页零文本项 → 上报，由 ReaderView 切到解析视图（OCR 产物）。
-        onScanned?.(textContent.items.length === 0);
+        // 只对文档首页判定：混合型 PDF（前几页有文本、中间夹扫描页）不会
+        // 因为翻页在整个视图间反复横跳。
+        if (page <= 1) onScanned?.(textContent.items.length === 0);
         const textLayerInstance = new pdfjs.TextLayer({
           textContentSource: textContent,
           container: textLayer,
@@ -184,14 +199,20 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
     });
   }, [page]);
 
-  // 滚轮翻页（阅读器容器内单页视图）。
+  // 滚轮翻页：仅在滚动容器已到顶/到底时接管——否则放大后的页面应该先
+  // 正常滚动（旧实现无条件 preventDefault，高页直接滚不动）。
   useEffect(() => {
     const el = pageElRef.current;
-    if (el === null) return;
+    const scroller = el?.parentElement ?? null;
+    if (el === null || scroller === null) return;
     const onWheel = (event: WheelEvent) => {
       if (Math.abs(event.deltaY) < 40) return;
+      const atTop = scroller.scrollTop <= 0;
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+      const goingDown = event.deltaY > 0;
+      if (goingDown ? !atBottom : !atTop) return; // 还有可滚的量，让给原生滚动
       event.preventDefault();
-      onPageChange(page + (event.deltaY > 0 ? 1 : -1));
+      onPageChange(page + (goingDown ? 1 : -1));
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);

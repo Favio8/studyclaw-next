@@ -275,6 +275,15 @@ export interface QuizTaskView {
   answerRationale: string | null;
 }
 
+/** L1：courses.evalTrend 返回（某概念最近评测，时间升序）。 */
+export interface ConceptEvalTrend {
+  conceptId: string;
+  recent: Array<{ ts: string; passed: boolean; score: number }>;
+  total: number;
+  /** 末尾连续未通过次数（0 = 最近一次通过）。 */
+  consecutiveFailures: number;
+}
+
 export interface HeatmapDay {
   date: string;
   score: number;

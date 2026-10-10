@@ -2,10 +2,12 @@
 
 import { useEffect } from "react";
 import type { CSSProperties } from "react";
-import { AlertCircle, Check, CircleHelp, ListChecks, RefreshCw, Send, Target, X } from "lucide-react";
+import { AlertCircle, Check, CircleHelp, ListChecks, RefreshCw, Send, Sparkles, Target, X } from "lucide-react";
 import { pct } from "@/src/lib/format";
+import { MODES, MODE_DESCRIPTIONS, modeLabel } from "@/src/lib/modes";
 import { quizAnswer, quizLoad, quizNext, quizReset, quizRetry } from "@/src/lib/quizFlow";
 import { useAppStore } from "@/src/store/useAppStore";
+import { useSessionActions } from "@/src/hooks/useSessionActions";
 import { Clawzy } from "@/src/components/mascot";
 import {
   PanelEmptyState,
@@ -16,6 +18,51 @@ import {
   StatusPill,
   panelSurfaceClass,
 } from "@/src/components/panel/PanelPrimitives";
+import type { LearningMode } from "@/src/types";
+
+/** L1：连续评测未过后的换风格建议卡（可忽略；不自动跳转）。 */
+function StyleSuggestionCard({ conceptId, consecutiveFailures }: { conceptId: string; consecutiveFailures: number }) {
+  const progress = useAppStore((s) => s.progress);
+  const setMode = useAppStore((s) => s.setMode);
+  const setFocusConcept = useAppStore((s) => s.setFocusConcept);
+  const setQuiz = useAppStore((s) => s.setQuiz);
+  const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
+  const courseId = useAppStore((s) => s.activeCourseId);
+  const { createSession } = useSessionActions();
+  const conceptName = progress?.concepts.find((item) => item.id === conceptId)?.name ?? conceptId;
+
+  function applyStyle(next: LearningMode) {
+    setMode(next);
+    // 聚焦概念：新对话首轮即带该概念上下文（useChatStream 发送时读取）。
+    setFocusConcept(conceptId);
+    setQuiz({ styleSuggestion: null });
+    void createSession(undefined, courseId ?? undefined);
+    flashStatusBanner(`已切换 · ${modeLabel(next)}，新对话将聚焦「${conceptName}」`);
+  }
+
+  return (
+    <div className="mt-3 rounded-md border border-accent-focus/25 bg-accent-focus/8 p-3">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-accent-focus">
+        <Sparkles size={13} strokeWidth={1.8} aria-hidden />
+        连续 {consecutiveFailures} 次未通过「{conceptName}」，换个方式学？
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-1.5">
+        {MODES.map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            title={MODE_DESCRIPTIONS[item.value]}
+            onClick={() => applyStyle(item.value)}
+            className="inline-flex h-7 items-center justify-center rounded-md border border-border-line bg-bg-panel px-2 text-[11px] text-text-primary transition-colors hover:border-accent-focus/40 hover:text-accent-focus focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[10px] leading-4 text-text-faint">点击即以该风格开新对话并聚焦这个知识点；也可以忽略，继续当前练习。</p>
+    </div>
+  );
+}
 
 function QuizModeControl() {
   const mode = useAppStore((s) => s.quiz.mode);
@@ -230,6 +277,13 @@ export default function QuizTab() {
                 <span className="text-white/75">Space</span>
               </button>
             </div>
+          ) : null}
+
+          {answered && quiz.styleSuggestion ? (
+            <StyleSuggestionCard
+              conceptId={quiz.styleSuggestion.conceptId}
+              consecutiveFailures={quiz.styleSuggestion.consecutiveFailures}
+            />
           ) : null}
 
           {quiz.error ? (

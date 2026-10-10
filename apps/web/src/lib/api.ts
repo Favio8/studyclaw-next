@@ -8,6 +8,7 @@
 
 import type {
   ApiErrorPayload,
+  ConceptEvalTrend,
   CourseSummary,
   WakeupCard,
   EvalEvent,
@@ -345,6 +346,10 @@ export const api = {
 
   quiz: (courseId: string, mode: "review" | "new", count = 5, dueOnly = false) =>
     rpc<{ tasks: QuizTaskView[] }>("courses.quiz", { courseId, mode, count, ...(dueOnly ? { dueOnly } : {}) }),
+
+  /** L1：某概念最近评测趋势（连续未过 → 前端提示换学习风格）。 */
+  evalTrend: (courseId: string, conceptId: string, limit = 3) =>
+    rpc<ConceptEvalTrend>("courses.evalTrend", { courseId, conceptId, limit }),
 
   heatmap: (weeks = 12) =>
     rpc<HeatmapPayload>("metrics.heatmap", { weeks }),

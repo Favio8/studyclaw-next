@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { quizLoad, quizReset, storeState } = vi.hoisted(() => {
+const { quizLoad, quizReset, storeState, createSessionMock } = vi.hoisted(() => {
   const quizLoad = vi.fn();
   const quizReset = vi.fn();
+  const createSessionMock = vi.fn();
   // 测试 mock：宽松类型（any），允许各用例按场景改写 quiz 状态而不受
   // 字面量推断的窄类型约束。
   const storeState: any = {
@@ -32,9 +33,10 @@ const { quizLoad, quizReset, storeState } = vi.hoisted(() => {
       loading: false,
       lastAnswer: null,
       answerText: "",
+      styleSuggestion: null,
     },
   };
-  return { quizLoad, quizReset, storeState };
+  return { quizLoad, quizReset, storeState, createSessionMock };
 });
 
 vi.mock("../src/store/useAppStore", () => ({
@@ -47,6 +49,9 @@ vi.mock("../src/lib/quizFlow", () => ({
   quizAnswer: vi.fn(),
   quizNext: vi.fn(),
   quizRetry: vi.fn(),
+}));
+vi.mock("../src/hooks/useSessionActions", () => ({
+  useSessionActions: () => ({ createSession: createSessionMock }),
 }));
 
 import QuizTab from "../src/components/panel/QuizTab";
@@ -118,5 +123,40 @@ describe("QuizTab", () => {
     const correct = screen.getByRole("button", { name: /连接模型与真实环境的控制系统/ });
     expect(correct.className).toContain("border-accent-pass");
     expect(screen.getByText(/正确答案：B/)).toBeDefined();
+  });
+
+  it("连续未过显示换风格建议卡；点击以该风格开新对话并聚焦概念", () => {
+    storeState.quiz.phase = "done";
+    storeState.quiz.result = { score: 0.2, passed: false, feedback: "再想想依赖的方向。", misconceptions: [] };
+    storeState.quiz.styleSuggestion = { conceptId: "concept-1", consecutiveFailures: 3 };
+    storeState.progress = { concepts: [{ id: "concept-1", name: "调度" }] };
+    storeState.setMode = vi.fn();
+    storeState.setFocusConcept = vi.fn();
+    storeState.flashStatusBanner = vi.fn();
+
+    render(<QuizTab />);
+
+    expect(screen.getByText(/连续 3 次未通过/)).toBeDefined();
+    expect(screen.getByText(/换个方式学/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "费曼输出" }));
+    expect(storeState.setMode).toHaveBeenCalledWith("feynman");
+    expect(storeState.setFocusConcept).toHaveBeenCalledWith("concept-1");
+    expect(storeState.setQuiz).toHaveBeenCalledWith({ styleSuggestion: null });
+    expect(createSessionMock).toHaveBeenCalled();
+    expect(storeState.flashStatusBanner).toHaveBeenCalled();
+
+    // 收尾：清掉建议，避免泄漏到后续用例
+    storeState.quiz.styleSuggestion = null;
+    storeState.quiz.phase = "idle";
+    storeState.quiz.result = null;
+  });
+
+  it("无建议时不渲染建议卡", () => {
+    storeState.quiz.phase = "done";
+    storeState.quiz.result = { score: 0.2, passed: false, feedback: "", misconceptions: [] };
+    storeState.quiz.styleSuggestion = null;
+    render(<QuizTab />);
+    expect(screen.queryByText(/换个方式学/)).toBeNull();
   });
 });

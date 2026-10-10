@@ -174,6 +174,7 @@ export interface HostServices {
     tools(providerStatus?: Record<string, { available: boolean; reason: string | null; installAction: string | null }>): Array<Record<string, unknown>>
     heatmap(weeks: number): Promise<Record<string, unknown>>
     heatmapDay(date: string): Promise<Record<string, unknown>>
+    evalTrend(courseId: string, conceptId: string, limit: number): Promise<Record<string, unknown>>
     createCourse(courseName: string, importPaths: string[]): Promise<Record<string, unknown>>
   }
   /** Optional deployment capability snapshot used by `tools.list`. */
@@ -629,6 +630,13 @@ const handlers = {
     payload: z.object({ courseId: z.string().min(1) }),
     async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.courseService.files(payload.courseId))
+    },
+  },
+  'courses.evalTrend': {
+    // L1：某概念最近评测趋势。quiz 结果帧后查询，连续未过即提示换学习风格。
+    payload: z.object({ courseId: z.string().min(1), conceptId: z.string().min(1).max(200), limit: z.number().int().min(1).max(20).default(3) }),
+    async run(payload: { courseId: string; conceptId: string; limit: number }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.evalTrend(payload.courseId, payload.conceptId, payload.limit))
     },
   },
   'workspace.files': {

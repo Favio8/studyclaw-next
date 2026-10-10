@@ -603,6 +603,75 @@ export async function heatmapDay(workspaceRoot: string, date: string): Promise<H
 }
 
 // ---------------------------------------------------------------------------
+// Concept eval trend（L1：连续评测失败 → 换风格建议的数据源）
+// ---------------------------------------------------------------------------
+
+export interface EvalTrendRecord {
+  readonly ts: string
+  readonly passed: boolean
+  readonly score: number
+}
+
+export interface ConceptEvalTrend {
+  readonly conceptId: string
+  /** 时间升序的最近 limit 条评测。 */
+  readonly recent: EvalTrendRecord[]
+  /** 该概念全部评测次数。 */
+  readonly total: number
+  /** 末尾连续未通过次数（0 = 最近一次通过）。 */
+  readonly consecutiveFailures: number
+}
+
+/**
+ * 某概念的评测趋势：扫描课程历史的 eval 审计行（兼容 legacy 顶层行与
+ * events 信封行，口径同 heatmap）。纯读，不写任何状态——调用方（宿主
+ * courses.evalTrend）在 quiz 结果帧后查询，连续未过即提示换学习风格。
+ */
+export async function conceptEvalTrend(workspaceRoot: string, conceptId: string, limit = 3): Promise<ConceptEvalTrend> {
+  const historyDir = await historyDirOf(workspaceRoot)
+  const records: EvalTrendRecord[] = []
+  if ((await stat(historyDir).catch(() => null))?.isDirectory()) {
+    for (const name of (await readdir(historyDir)).filter(name => name.endsWith('.jsonl'))) {
+      const text = await readFile(join(historyDir, name), 'utf8').catch(() => '')
+      for (const line of text.split(/\r?\n/)) {
+        if (line.trim() === '') continue
+        let row: Record<string, unknown>
+        try {
+          row = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        const payload = (typeof row['payload'] === 'object' && row['payload'] !== null) ? row['payload'] as Record<string, unknown> : {}
+        const isEval = row['type'] === 'eval'
+          || (typeof row['task_id'] === 'string' && row['misconceptions'] !== undefined)
+          || (typeof payload['task_id'] === 'string' && payload['misconceptions'] !== undefined)
+        if (!isEval) continue
+        const key = String(row['concept_id'] ?? payload['concept_id'] ?? '')
+        if (key !== conceptId) continue
+        records.push({
+          ts: typeof row['ts'] === 'string' ? row['ts'] : '',
+          passed: Boolean(row['passed'] ?? payload['passed']),
+          score: Number(row['score'] ?? payload['score'] ?? 0) || 0,
+        })
+      }
+    }
+  }
+  // L8 同款：跨文件按时间序折叠，字典序文件迭代会把「先错后对」误判。
+  records.sort((a, b) => a.ts.localeCompare(b.ts))
+  let consecutiveFailures = 0
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (records[index]!.passed) break
+    consecutiveFailures += 1
+  }
+  return {
+    conceptId,
+    recent: records.slice(Math.max(0, records.length - Math.max(1, limit))),
+    total: records.length,
+    consecutiveFailures,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Re-exports
 // ---------------------------------------------------------------------------
 

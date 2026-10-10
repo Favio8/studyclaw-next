@@ -553,6 +553,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       tools: providerStatus => courseService.tools(providerStatus),
       heatmap: async weeks => courseService.heatmap(activeRoot(), weeks),
       heatmapDay: async date => courseService.heatmapDay(activeRoot(), date),
+      evalTrend: async (courseId, conceptId, limit) => courseService.evalTrend(activeRoot(), courseId, conceptId, limit),
       createCourse: async (courseName, importPaths) => courseService.createCourse(activeRoot(), courseName, importPaths),
     }
   }

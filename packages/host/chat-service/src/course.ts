@@ -33,6 +33,7 @@ import {
   readGlobalMemory,
   heatmap,
   heatmapDay,
+  conceptEvalTrend,
 } from '@studyclaw/learning'
 import { createDeepSeekToolClient } from './adapter.ts'
 import { fetchUrlSafe } from './fetch-url-safe.ts'
@@ -507,6 +508,8 @@ export interface CourseService {
   tools(providerStatus?: Record<string, { available: boolean; reason: string | null; installAction: string | null }>): Array<Record<string, unknown>>
   heatmap(workspaceRoot: string, weeks: number): Promise<Record<string, unknown>>
   heatmapDay(workspaceRoot: string, date: string): Promise<Record<string, unknown>>
+  /** L1：某概念评测趋势（连续失败 → 前端提示换学习风格）。纯读 history。 */
+  evalTrend(workspaceRoot: string, courseId: string, conceptId: string, limit: number): Promise<Record<string, unknown>>
   buildJob(workspaceRoot: string, courseId: string): string | null
   createCourse(workspaceRoot: string, courseName: string, importPaths: string[]): Promise<Record<string, unknown>>
   /** Write an empty course skeleton when none exists (no LLM, idempotent). */
@@ -793,6 +796,10 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     },
     heatmap: (workspaceRoot, weeks) => heatmap(workspaceRoot, weeks) as unknown as Promise<Record<string, unknown>>,
     heatmapDay: (workspaceRoot, date) => heatmapDay(workspaceRoot, date) as unknown as Promise<Record<string, unknown>>,
+    async evalTrend(workspaceRoot, courseId, conceptId, limit) {
+      await requireCourse(workspaceRoot, courseId)
+      return conceptEvalTrend(workspaceRoot, conceptId, limit) as unknown as Record<string, unknown>
+    },
     buildJob: () => null,
     async createCourse(workspaceRoot, _courseName, importPaths) {
       // 项目即课程：材料直接落到项目根（就地），随后构建大纲（无 LLM 配置时

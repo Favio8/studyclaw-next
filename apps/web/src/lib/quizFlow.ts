@@ -56,6 +56,7 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
     lastAnswer: null,
     lastEvalId: null,
     answerText: "",
+    styleSuggestion: null,
   });
   try {
     const { tasks } = await api.quiz(courseId, mode, 5, dueOnly);
@@ -188,6 +189,8 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
               feedback: ev.data.feedback,
               misconceptions: ev.data.misconceptions,
             },
+            // 通过即清除此前的换风格建议（建议只挂在连续失败上）
+            ...(ev.data.passed ? { styleSuggestion: null } : {}),
           });
           // P0-⑤ + P1：quiz 结果触发爪爪脉冲——答对 celebrate（2400ms 举爪
           // 跳跃）、答错 encourage（4000ms 委屈拍拍加油，§7.2：与 alerting
@@ -230,6 +233,21 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
     }
     if (abort.signal.aborted) return;
     useAppStore.getState().setQuiz({ phase: "done" });
+    // L1：本题未过 → 查该概念评测趋势；最近 3 次连续未过才记换风格建议。
+    // 纯读 history 的增强查询，失败静默（建议不是主流程，不打断结算）。
+    const settled = useAppStore.getState().quiz.result;
+    if (settled !== null && !settled.passed) {
+      void api.evalTrend(activeCourseId, task.conceptId, 3).then((trend) => {
+        if (useAppStore.getState().activeCourseId !== activeCourseId) return;
+        if (trend.total >= 3 && trend.consecutiveFailures >= 3) {
+          useAppStore.getState().setQuiz({
+            styleSuggestion: { conceptId: task.conceptId, consecutiveFailures: trend.consecutiveFailures },
+          });
+        }
+      }).catch(() => {
+        // 趋势查询失败：保持无建议，评测结果本身不受影响。
+      });
+    }
     // 结算后：面板/课程列表刷新 + 角标（左栏 Due、右栏数据、热力图）
     void refreshPanelData();
     void refreshCourseList();

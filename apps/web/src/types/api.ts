@@ -347,6 +347,16 @@ export interface ReadingActionEvent {
   };
 }
 
+/** P2.5：reading.parsed 返回（解析视图产物）。 */
+export interface ReadingParsedPayload {
+  source: string;
+  available: boolean;
+  engine: "mineru" | "builtin" | null;
+  tier: string | null;
+  markdown: string;
+  reason: string | null;
+}
+
 export interface HeatmapDay {
   date: string;
   score: number;

@@ -26,6 +26,8 @@ interface PdfCanvasProps {
   onPageCount: (count: number) => void;
   onPageChange: (page: number) => void;
   onHighlightClick: (id: string) => void;
+  /** 文本层为空（扫描件）时回调，ReaderView 据此切解析视图。 */
+  onScanned?: (scanned: boolean) => void;
 }
 
 /** 容器坐标 → 页面归一化坐标（0-1，相对页面宽高）。 */
@@ -44,7 +46,7 @@ function toNormalized(clientRects: DOMRect[], pageEl: HTMLElement): Array<{ x: n
   return rects;
 }
 
-export default function PdfCanvas({ source, page, highlights, onPageCount, onPageChange, onHighlightClick }: PdfCanvasProps) {
+export default function PdfCanvas({ source, page, highlights, onPageCount, onPageChange, onHighlightClick, onScanned }: PdfCanvasProps) {
   const pageElRef = useRef<HTMLDivElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -122,8 +124,11 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
       const textLayer = textLayerRef.current;
       if (textLayer !== null) {
         textLayer.replaceChildren();
+        const textContent = await pdfPage.getTextContent();
+        // 扫描件：整页零文本项 → 上报，由 ReaderView 切到解析视图（OCR 产物）。
+        onScanned?.(textContent.items.length === 0);
         const textLayerInstance = new pdfjs.TextLayer({
-          textContentSource: await pdfPage.getTextContent(),
+          textContentSource: textContent,
           container: textLayer,
           viewport,
         });
@@ -136,7 +141,7 @@ export default function PdfCanvas({ source, page, highlights, onPageCount, onPag
     return () => {
       cancelled = true;
     };
-  }, [page, status]);
+  }, [page, status, onScanned]);
 
   // 选区 → 双锚 + 归一化 rects + 浮层锚点。
   const captureSelection = useCallback(() => {

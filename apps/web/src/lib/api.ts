@@ -14,6 +14,7 @@ import type {
   CourseSummary,
   ReadingActionEvent,
   ReadingLoadPayload,
+  ReadingParsedPayload,
   ReadingProgressView,
   WakeupCard,
   EvalEvent,
@@ -361,6 +362,9 @@ export const api = {
     rpc<ReadingLoadPayload>("reading.load", { source }),
   readingText: (source: string) =>
     rpc<{ text: string; truncated: boolean }>("reading.text", { source }),
+  /** 解析视图产物（P2.5：docx/xlsx/html 与扫描件 PDF 的 MinerU Markdown）。 */
+  readingParsed: (source: string) =>
+    rpc<ReadingParsedPayload>("reading.parsed", { source }),
   readingSaveProgress: (source: string, page: number, percent: number) =>
     rpc<ReadingProgressView>("reading.progress.save", { source, page, percent }),
   readingHighlights: (source: string) =>

@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, X } from "lucide-react";
 import MaterialTree from "@/src/components/reader/MaterialTree";
 import PdfCanvas from "@/src/components/reader/PdfCanvas";
+import ParsedView from "@/src/components/reader/ParsedView";
 import MarkdownReader from "@/src/components/reader/MarkdownReader";
 import AnnotationRail from "@/src/components/reader/AnnotationRail";
 import SelectionPopover from "@/src/components/reader/SelectionPopover";
@@ -66,6 +67,15 @@ export default function ReaderView() {
   const reader = useAppStore((s) => s.reader);
   const courseId = useAppStore((s) => s.activeCourseId);
   const [pageCount, setPageCount] = useState(0);
+  // 扫描件（PDF 零文本层）→ 切解析视图（MinerU OCR 产物）。
+  // 换资料时在渲染期重置判定（React 官方 prop 变化调态模式，不用 effect）。
+  const [scanned, setScanned] = useState(false);
+  const [scannedFor, setScannedFor] = useState(reader.source);
+  if (scannedFor !== reader.source) {
+    setScannedFor(reader.source);
+    setScanned(false);
+  }
+  const onScanned = useCallback((value: boolean) => setScanned(value), []);
 
   // 进入阅读活动时默认打开第一份 PDF（无则留空态由用户点选）。
   useEffect(() => {
@@ -167,7 +177,7 @@ export default function ReaderView() {
             <BookOpen size={22} strokeWidth={1.8} className="text-text-faint" aria-hidden />
             <p className="text-[13px] text-text-muted">从左侧资料树选一份文件开始精读。</p>
           </div>
-        ) : reader.view === "pdf" ? (
+        ) : reader.view === "pdf" && !scanned ? (
           <PdfCanvas
             source={reader.source}
             page={reader.progress.page}
@@ -175,18 +185,13 @@ export default function ReaderView() {
             onPageCount={setPageCount}
             onPageChange={gotoPage}
             onHighlightClick={locateHighlight}
+            onScanned={onScanned}
           />
         ) : reader.view === "markdown" ? (
           <MarkdownReader source={reader.source} />
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
-            <BookOpen size={22} strokeWidth={1.8} className="text-text-faint" aria-hidden />
-            <p className="text-[13px] leading-6 text-text-muted">
-              该格式暂不支持直接阅读（当前支持 PDF 与 Markdown/纯文本）。
-              <br />
-               docx/xlsx/html 的解析视图将随 MinerU 接入后提供。
-            </p>
-          </div>
+          // 扫描件 PDF 与 docx/xlsx/html 等：解析视图（MinerU 产物）。
+          <ParsedView source={reader.source} />
         )}
       </div>
       <AnnotationRail onLocate={locate} />

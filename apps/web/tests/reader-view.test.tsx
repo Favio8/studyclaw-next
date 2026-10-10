@@ -20,6 +20,7 @@ const { apiMocks } = vi.hoisted(() => ({
     readingTranslate: vi.fn(),
     readingFileBytes: vi.fn(),
     readingText: vi.fn(),
+    readingParsed: vi.fn(),
   },
 }));
 
@@ -28,17 +29,17 @@ vi.mock("../src/lib/api", () => ({
   api: apiMocks,
 }));
 vi.mock("../src/components/reader/PdfCanvas", () => ({
-  default: ({ source, page, onPageChange }: { source: string; page: number; onPageChange: (page: number) => void }) => (
+  default: ({ source, page, onPageChange, onScanned }: { source: string; page: number; onPageChange: (page: number) => void; onScanned?: (value: boolean) => void }) => (
     <div data-testid="pdf-canvas">
       pdf:{source}:{page}
       <button type="button" onClick={() => onPageChange(page + 1)}>stub-next</button>
+      <button type="button" onClick={() => onScanned?.(true)}>stub-scanned</button>
     </div>
   ),
 }));
 vi.mock("../src/components/reader/MarkdownReader", () => ({
   default: ({ source }: { source: string }) => <div data-testid="md-reader">md:{source}</div>,
 }));
-
 import ReaderView from "../src/components/reader/ReaderView";
 import { readingOpen, readingSelectionChanged } from "../src/lib/readingFlow";
 import { useAppStore } from "../src/store/useAppStore";
@@ -73,6 +74,7 @@ beforeEach(() => {
   apiMocks.readingExport.mockReset();
   apiMocks.readingExplain.mockReset();
   apiMocks.readingTranslate.mockReset();
+  apiMocks.readingParsed.mockReset();
 });
 
 afterEach(() => {
@@ -193,5 +195,58 @@ describe("ReaderView", () => {
     // pageCount=0 时 percent 不落库（无总页数），仅验证翻页不炸。
     fireEvent.click(screen.getByRole("button", { name: "stub-next" }));
     await waitFor(() => expect(screen.getByTestId("pdf-canvas").textContent).toContain("pdf:sources/a.pdf:2"));
+  });
+});
+
+describe("ReaderView 解析视图（P2.5）", () => {
+  it("docx 等不支持的格式：走解析视图并展示产物", async () => {
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/handout.docx",
+      view: "unsupported",
+      exists: true,
+      progress: { page: 1, percent: 0, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    apiMocks.readingParsed.mockResolvedValue({
+      source: "sources/handout.docx",
+      available: true,
+      engine: "mineru",
+      tier: "standard",
+      markdown: "# 解析产物\n\n表格与公式保真。",
+      reason: null,
+    });
+    render(<ReaderView />);
+    await readingOpen("sources/handout.docx");
+    await waitFor(() => expect(screen.getByText("解析视图")).toBeDefined());
+    expect(screen.getByText(/表格与公式保真/)).toBeDefined();
+    expect(screen.getByText(/mineru \/ standard/)).toBeDefined();
+  });
+
+  it("扫描件 PDF：文本层为空 → 切解析视图并给出构建引导", async () => {
+    apiMocks.readingLoad.mockResolvedValue({
+      source: "sources/scan.pdf",
+      view: "pdf",
+      exists: true,
+      progress: { page: 1, percent: 0, updatedAt: "" },
+      highlights: [],
+      recovered: false,
+    });
+    apiMocks.readingParsed.mockResolvedValue({
+      source: "sources/scan.pdf",
+      available: false,
+      engine: null,
+      tier: null,
+      markdown: "",
+      reason: "这份资料还没有解析产物：在设置里启用 MinerU 并重新构建课程即可阅读",
+    });
+    render(<ReaderView />);
+    await readingOpen("sources/scan.pdf");
+    await waitFor(() => expect(screen.getByTestId("pdf-canvas")).toBeDefined());
+    // PdfCanvas 桩模拟 pdf.js 上报“整页零文本层”（扫描件）。
+    fireEvent.click(screen.getByRole("button", { name: "stub-scanned" }));
+    await waitFor(() => expect(screen.getByText(/在设置里启用 MinerU/)).toBeDefined());
+    expect(apiMocks.readingParsed).toHaveBeenCalledWith("sources/scan.pdf");
+    expect(screen.queryByTestId("pdf-canvas")).toBeNull();
   });
 });

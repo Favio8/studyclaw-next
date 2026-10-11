@@ -21,16 +21,27 @@ export class SessionError extends Error {
   }
 }
 
-/** In-process serialization for whole-file meta rewrites (P1-6). */
-const metaRewriteLocks = new Map<string, Promise<void>>()
+/**
+ * In-process serialization for every write to one session file (P1-6).
+ *
+ * Scope matters: a meta rewrite is read-all → replace-line-0 → write tmp →
+ * rename. An append that lands between the read and the rename is silently
+ * dropped by that rename, because the replacement was serialised from a
+ * snapshot taken before the append. Measured at 2 lost lines per 60
+ * concurrent append+rename rounds, i.e. a user message can disappear when
+ * they rename a session while a turn is still streaming. Appends therefore
+ * take the same per-path lock as the rewrites, which makes the two mutually
+ * exclusive for the whole read-modify-rename window.
+ */
+const fileWriteLocks = new Map<string, Promise<void>>()
 
-async function withMetaRewriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = metaRewriteLocks.get(key) ?? Promise.resolve()
+async function withFileWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = fileWriteLocks.get(key) ?? Promise.resolve()
   const run = previous.then(fn, fn)
   const settled = run.then(() => undefined, () => undefined)
-  metaRewriteLocks.set(key, settled)
+  fileWriteLocks.set(key, settled)
   void settled.then(() => {
-    if (metaRewriteLocks.get(key) === settled) metaRewriteLocks.delete(key)
+    if (fileWriteLocks.get(key) === settled) fileWriteLocks.delete(key)
   })
   return run
 }
@@ -369,7 +380,11 @@ export class SessionStore {
   async append(sessionId: string, ...lines: HistoryLine[]): Promise<void> {
     const path = this.pathFor(sessionId)
     if ((await stat(path).catch(() => null)) === null) throw new SessionError(`会话不存在: ${sessionId}`)
-    await writeFile(path, lines.map(dumps).join('\n') + '\n', { encoding: 'utf8', flag: 'a' })
+    // 与 meta 重写共用同一把按路径的锁：重写是 read-all → rename，若不加锁，
+    // 落在两者之间的追加会被 rename 用旧快照整体覆盖掉（消息静默丢失）。
+    await withFileWriteLock(path, async () => {
+      await writeFile(path, lines.map(dumps).join('\n') + '\n', { encoding: 'utf8', flag: 'a' })
+    })
   }
 
   /**
@@ -400,7 +415,7 @@ export class SessionStore {
    */
   private async rewriteMetaLine(sessionId: string, metaLine: SessionMetaLine): Promise<void> {
     const path = this.pathFor(sessionId)
-    await withMetaRewriteLock(path, async () => {
+    await withFileWriteLock(path, async () => {
       const text = await readFile(path, 'utf8')
       const rows = text.split(/\r?\n/)
       rows[0] = dumps(metaLine)

@@ -9,6 +9,12 @@
 
 ### 修复
 
+- **会话历史可能被静默丢弃**：meta 重写（改名 / 标题回填）是「读全量 → 改首行
+  → 写 tmp → rename」，而 append 只靠 O_APPEND、**不与重写互斥**。落在两者
+  之间的追加会被 rename 用旧快照整体覆盖——用户在 Agent 流式写入中途改会话名，
+  就可能有一条消息凭空消失；POSIX 上是静默丢失，Windows 上还会因句柄冲突
+  抛 EPERM。实测未修复时 60 轮并发里丢 2 条。append 现与重写共用同一把按路径
+  的进程内锁（`withFileWriteLock`），两者在整段读-改-写窗口内互斥；
 - **ACP stdio 无法取消**：`studyclaw acp` 的传输层是「读一行、等它跑完、
   再读下一行」。一次长时间的 `session.prompt` 会占住读循环，期间到达的
   `session.cancel` 只能堆在 readline 缓冲里，直到 prompt 自己结束才被发出
@@ -80,6 +86,9 @@
 - `acp-stdio.spec.ts`：用「prompt 等到 cancel 送达才放行」的桩复现串行死锁
   （还原成串行传输即超时失败），另覆盖整行写入不交叉、坏行不中断后续请求、
   在途上限、空行忽略；
+- `store-write-race.spec.ts`：append 与改名的并发写入。检出为概率性
+  （回退修复约 4/5 命中），但保证有修复时永不失败（实测 6/6）；断言覆盖
+  静默丢行与 Windows EPERM 两种故障形态；
 - 解析产物 manifest 逐文件持久化、builder 布局迁移补三条用例；
 - 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 18/18 通过（含命中测试与二次划词）。
 

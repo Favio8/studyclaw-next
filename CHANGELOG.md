@@ -110,6 +110,12 @@
   已过期记录立刻走超时）；
 - `sse-body-lifecycle.test.tsx`：SSE 响应体生命周期——提前 break、收到 error 帧
   后退出、调用方中途抛错三种路径都必须取消响应体；正常读完不报错；
+- 已知测试不稳定（**非本次改动引入**，留档以便单独排查）：`serve-http.spec.ts`
+  的多个 describe 共享同一个 Host 且各自新建/删除临时工作区，Host 注册表里会留下
+  已删除目录的路径，表现为偶发 `realpath` ENOENT 与
+  `reading.parsed 解析视图` 用例失败（实测约 5 次全量里失败 1 次，单跑必绿）；
+  `workspace.spec.ts` 的 `insertBefore` 用例同样偶发。两者单独运行与绝大多数
+  全量运行都通过，本轮改动未触碰这些文件。
 - 解析产物 manifest 逐文件持久化、builder 布局迁移补三条用例；
 - 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 18/18 通过（含命中测试与二次划词）。
 

@@ -155,6 +155,9 @@ interface PendingApproval extends ApprovalRequest {
 }
 
 /** Host-neutral approval broker shared by Web, CLI and ACP adapters. */
+/** 审批默认存活时长；restore 兜底重算 expiresAt 时复用同一口径。 */
+const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000
+
 export class ApprovalQueue {
   private readonly pending = new Map<string, PendingApproval>()
   private readonly resolvedListeners = new Set<(request: ApprovalRequest, decision: ApprovalDecision) => void | Promise<void>>()
@@ -173,7 +176,7 @@ export class ApprovalQueue {
     args: Record<string, unknown>
     timeoutMs?: number
   }): { request: ApprovalRequest; decision: Promise<ApprovalDecision> } {
-    const timeoutMs = Math.max(1, input.timeoutMs ?? 5 * 60_000)
+    const timeoutMs = Math.max(1, input.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS)
     const approvalId = id('approval')
     const createdAt = new Date()
     const request = {
@@ -206,9 +209,16 @@ export class ApprovalQueue {
       const { resolve: _resolve, timer: _timer, ...request } = existing
       return request
     }
-    const createdAt = new Date(input.createdAt)
-    const expiresAt = new Date(input.expiresAt)
-    const remaining = Math.max(0, expiresAt.getTime() - Date.now())
+    const createdMs = new Date(input.createdAt).getTime()
+    const createdAtIso = Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : new Date().toISOString()
+    // expiresAt 必须先归一化再算 remaining：原实现先用原始字符串算出
+    // remaining = max(0, NaN - now) = NaN，随后兜底分支又用 Date.now()+NaN
+    // 去 toISOString() ——直接抛 RangeError: Invalid time value。于是任何一条
+    // expiresAt 损坏的审批记录（旧 schema / 手改日志 / 截断写入）在重放时
+    // 都会把恢复路径炸掉，而 createdAt 的同类防护却是有效的——纯粹是顺序错了。
+    const expiresMs = new Date(input.expiresAt).getTime()
+    const expiresMsSafe = Number.isFinite(expiresMs) ? expiresMs : Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS
+    const remaining = Math.max(0, expiresMsSafe - Date.now())
     let resolvePromise!: (decision: ApprovalDecision) => void
     const decision = new Promise<ApprovalDecision>(resolve => { resolvePromise = resolve })
     const request: ApprovalRequest = {
@@ -218,8 +228,8 @@ export class ApprovalQueue {
       name: input.name,
       policy: input.policy,
       args: input.args,
-      createdAt: Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString(),
-      expiresAt: Number.isNaN(expiresAt.getTime()) ? new Date(Date.now() + remaining).toISOString() : expiresAt.toISOString(),
+      createdAt: createdAtIso,
+      expiresAt: new Date(expiresMsSafe).toISOString(),
       status: 'pending',
     }
     const pending: PendingApproval = {

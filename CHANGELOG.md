@@ -9,6 +9,21 @@
 
 ### 修复
 
+- **审批重放遇到损坏时间戳直接崩**：`ApprovalQueue.restore` 对 `createdAt` 做了
+  NaN 兜底，对 `expiresAt` 却用错了顺序——先用原始字符串算出
+  `remaining = max(0, NaN - now) = NaN`，再在兜底分支里 `Date.now()+NaN` 去
+  `toISOString()`，直接抛 `RangeError: Invalid time value`。于是任何一条
+  expiresAt 损坏的审批记录（旧 schema / 手改日志 / 写到一半被截断）在重放时
+  都会把恢复路径炸掉。改为先归一化再算剩余时长，损坏时按默认时长兜底；
+- **SSE 响应体泄漏**：前端 `streamSse` 在调用方提前退出（收到 error 帧、用户
+  关掉阅读动作卡、切走面板）时既不 `cancel()` 也不 `releaseLock()`——生成器的
+  `.return()` 只结束本函数。结果是底层连接保持打开，**服务端还会继续把 token
+  推完**（真金白银的 LLM 费用），浏览器连接池也被慢慢占满。实测 cancels=0。
+  读取循环包进 try/finally，退出时取消并释放；
+- **会话改名偶发失败（Windows）**：meta 重写的 `rename` 会被并发打开目标文件的
+  进程直接拒绝——杀软实时扫描、搜索索引器都会造成转瞬即逝的 EPERM/EBUSY/EACCES。
+  进程内锁只挡得住本进程，看不见这些外部占用，于是一次偶发占用直接冒泡成用户
+  可见的「改名失败」。对临时占用类错误加有界退避重试（真实错误照常抛出）；
 - **会话历史可能被静默丢弃**：meta 重写（改名 / 标题回填）是「读全量 → 改首行
   → 写 tmp → rename」，而 append 只靠 O_APPEND、**不与重写互斥**。落在两者
   之间的追加会被 rename 用旧快照整体覆盖——用户在 Agent 流式写入中途改会话名，
@@ -88,7 +103,13 @@
   在途上限、空行忽略；
 - `store-write-race.spec.ts`：append 与改名的并发写入。检出为概率性
   （回退修复约 4/5 命中），但保证有修复时永不失败（实测 6/6）；断言覆盖
-  静默丢行与 Windows EPERM 两种故障形态；
+  静默丢行与 Windows EPERM 两种故障形态；改名重试路径另有一条连做 30 次的
+  「不冒泡」用例；
+- `approval-restore.spec.ts`：审批恢复的容错（损坏/空/非法 expiresAt 与
+  createdAt 同时损坏均不抛错、兜底后仍是可用 pending、损坏项仍可被解析移除、
+  已过期记录立刻走超时）；
+- `sse-body-lifecycle.test.tsx`：SSE 响应体生命周期——提前 break、收到 error 帧
+  后退出、调用方中途抛错三种路径都必须取消响应体；正常读完不报错；
 - 解析产物 manifest 逐文件持久化、builder 布局迁移补三条用例；
 - 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 18/18 通过（含命中测试与二次划词）。
 

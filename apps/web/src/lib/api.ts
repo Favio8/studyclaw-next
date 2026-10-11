@@ -200,22 +200,32 @@ export async function* streamSse<T extends { event: string }>(
       boundary = buffer.indexOf("\n\n");
     }
   }
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // UI-28：SSE 规范允许 CRLF 行终止；服务端当前输出 LF，这里统一归一化，
-    // 防止跨实现（代理/其他宿主）用 \r\n 时帧边界永远匹配不到。
-    // W-5：规范同样允许孤立 \r 作为行终止符（旧实现只处理 \r\n）。
+  // 调用方随时可以 break（收到 error 帧、用户关掉卡片、切走面板），
+  // 生成器的 .return() 只结束本函数——没有 finally 的话 reader 既不被
+  // cancel 也不 releaseLock：底层连接保持打开，服务端还会继续把 token 推完
+  // （真金白银的 LLM 费用），连接池也会被慢慢占满。
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // UI-28：SSE 规范允许 CRLF 行终止；服务端当前输出 LF，这里统一归一化，
+      // 防止跨实现（代理/其他宿主）用 \r\n 时帧边界永远匹配不到。
+      // W-5：规范同样允许孤立 \r 作为行终止符（旧实现只处理 \r\n）。
+      if (buffer.includes("\r")) buffer = buffer.replace(/\r\n?/g, "\n");
+      yield* drainBlocks();
+    }
+    // W-5：flush 解码器——跨 chunk 的多字节 UTF-8 尾字节不再被静默丢弃。
+    buffer += decoder.decode();
     if (buffer.includes("\r")) buffer = buffer.replace(/\r\n?/g, "\n");
     yield* drainBlocks();
+    const tail = parseSseBlock<T>(buffer);
+    if (tail) yield tail;
+  } finally {
+    // cancel 对已读完的流是安全的空操作；releaseLock 防止 reader 悬挂。
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  // W-5：flush 解码器——跨 chunk 的多字节 UTF-8 尾字节不再被静默丢弃。
-  buffer += decoder.decode();
-  if (buffer.includes("\r")) buffer = buffer.replace(/\r\n?/g, "\n");
-  yield* drainBlocks();
-  const tail = parseSseBlock<T>(buffer);
-  if (tail) yield tail;
 }
 
 function parseSseBlock<T extends { event: string }>(block: string): T | null {

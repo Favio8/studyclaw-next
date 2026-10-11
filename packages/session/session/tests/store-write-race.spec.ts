@@ -107,4 +107,18 @@ describe('SessionStore 写并发', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('目标文件被短暂占用时改名不冒泡（Windows 杀软/索引器占用 → EPERM/EBUSY）', async () => {
+    const { root, store, sessionId } = await setup()
+    try {
+      // 真实占用难以稳定制造，这里锁的是「占用转瞬即逝、重试能过」这个语义：
+      // 连做多次改名，任何一次外部占用都不该冒泡成用户可见的「改名失败」。
+      for (let i = 0; i < 30; i++) {
+        await expect(store.renameSession(sessionId, `t-${i}`)).resolves.toBeUndefined()
+      }
+      expect((await store.readMeta(sessionId))?.title).toBe('t-29')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

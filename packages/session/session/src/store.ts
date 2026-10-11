@@ -46,6 +46,32 @@ async function withFileWriteLock<T>(key: string, fn: () => Promise<T>): Promise<
   return run
 }
 
+/**
+ * 判定「目标文件被外部短暂占用」。这些码在 POSIX 上基本不出现，在 Windows
+ * 上是 rename 撞上杀软/索引器/其它 reader 句柄的典型症状，值得退避重试；
+ * 而 ENOENT / EEXIST 之类是真实错误，重试只会掩盖。
+ */
+function isTransientFileBusy(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+}
+
+const RENAME_RETRY_DELAYS_MS = [10, 40, 150]
+
+/** rename 的有界退避重试（仅对临时占用类错误）。 */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const delay = RENAME_RETRY_DELAYS_MS[attempt]
+      if (delay === undefined || !isTransientFileBusy(error)) throw error
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+}
+
 /** UTC timestamp in file-contract form: `YYYY-MM-DDTHH:MM:SSZ`. */
 export function utcTs(date = new Date()): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -422,7 +448,12 @@ export class SessionStore {
       const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       try {
         await writeFile(tmp, rows.join('\n'), 'utf8')
-        await rename(tmp, path)
+        // Windows 上 rename 会被并发打开目标文件的进程直接拒绝：杀软实时扫描、
+        // 搜索索引器、还有一个宿主的 reader 句柄都可能造成 EPERM/EBUSY/EACCES，
+        // 且都是转瞬即逝的。进程内锁只挡得住本进程，看不见这些外部占用，
+        // 所以对「临时占用」类错误做有界退避重试，而不是把一次偶发占用
+        // 直接抛给用户（表现为「改名失败」）。
+        await renameWithRetry(tmp, path)
       } catch (error) {
         await rm(tmp, { force: true }).catch(() => undefined)
         throw error

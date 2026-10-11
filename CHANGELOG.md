@@ -9,6 +9,13 @@
 
 ### 修复
 
+- **ACP stdio 无法取消**：`studyclaw acp` 的传输层是「读一行、等它跑完、
+  再读下一行」。一次长时间的 `session.prompt` 会占住读循环，期间到达的
+  `session.cancel` 只能堆在 readline 缓冲里，直到 prompt 自己结束才被发出
+  ——而宿主 HTTP 层按请求 id 存了 abort controller、本就支持并发取消，
+  `initialize` 也声明了 `cancellation: true`。结果是卡住的回合只能杀进程，
+  等于把这个能力在 stdio 上悄悄废掉。传输改为并发处理（带在途上限），
+  stdout 写入仍串行化以保证每行完整、响应不互相穿插；
 - **打开资料时整读文件**：`reading.load` 判定资料是否存在时用
   `readFile(path, 'utf8')`，只为拿一个布尔值就把整份 PDF 读进内存再丢弃。
   实测 200MB 文件 110ms vs `stat` 0.115ms（约三个数量级），且每次点开资料
@@ -70,6 +77,9 @@
 - `process-guards.spec.ts`：进程级兜底的四条契约（含未捕获异常仍退出、
   重复安装不叠加监听器、循环引用原因不会让记录本身抛错）；
 - `markdown-view-hooks.test.tsx`：钉住 bubble 两侧渲染出等价内容；
+- `acp-stdio.spec.ts`：用「prompt 等到 cancel 送达才放行」的桩复现串行死锁
+  （还原成串行传输即超时失败），另覆盖整行写入不交叉、坏行不中断后续请求、
+  在途上限、空行忽略；
 - 解析产物 manifest 逐文件持久化、builder 布局迁移补三条用例；
 - 阅读全链路 `e2e-reader.mjs` 在真实 Edge 下 18/18 通过（含命中测试与二次划词）。
 

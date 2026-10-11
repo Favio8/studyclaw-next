@@ -60,6 +60,7 @@ import { UsageError } from './lib/args.ts'
 import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from './lib/http-guards.ts'
 import { installHostFileLogging } from './lib/host-logger.ts'
 import { installProcessGuards } from './lib/process-guards.ts'
+import { runAcpStdio } from './lib/acp-stdio.ts'
 import { createStaticHost } from './lib/static-host.ts'
 import type { StaticHost } from './lib/static-host.ts'
 import { quizCommand } from './commands/quiz.ts'
@@ -467,10 +468,11 @@ async function planTodoCommand(kind: 'plan' | 'todo', argv: string[]): Promise<v
 async function acpStdio(): Promise<void> {
   const { createInterface } = await import('node:readline')
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
-  for await (const line of input) {
-    if (line.trim() === '') continue
-    try {
-      const request = parseAcpRequest(JSON.parse(line) as unknown)
+  await runAcpStdio({
+    lines: input,
+    // stdout 是 NDJSON 协议通道：一次 write 一整行，且等写完再排下一行。
+    write: text => new Promise<void>((resolve) => { process.stdout.write(text, () => resolve()) }),
+    send: async (request) => {
       const wantsStream = request.method === 'session.prompt' || request.method === 'session.send' || request.method === 'prompt'
       const outgoing = wantsStream && typeof request.params === 'object' && request.params !== null
         ? { ...request, params: { ...(request.params as Record<string, unknown>), stream: true } }
@@ -480,12 +482,10 @@ async function acpStdio(): Promise<void> {
         headers: { 'content-type': 'application/json', ...authHeaders(defaultClientDeps()), ...(wantsStream ? { accept: 'application/x-ndjson' } : {}) },
         body: JSON.stringify(outgoing),
       })
-      process.stdout.write(`${await response.text()}\n`)
-    } catch (error) {
-      const code = error instanceof AcpProtocolError ? error.code : -32603
-      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message: error instanceof Error ? error.message : String(error) } })}\n`)
-    }
-  }
+      return response.text()
+    },
+  })
+  input.close()
 }
 
 export interface ServeOptions {

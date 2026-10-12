@@ -29,6 +29,28 @@ export async function smokeDirectoryPicker({ base, token, hostPid, directory, re
     getText(hwnd, buffer, 512)
     return buffer.toString('utf16le').split('\0')[0]
   }
+  // A cold `Get-CimInstance Win32_Process` on a fresh Windows runner routinely
+  // outlasts the 5s this used to allow — the warm cost on a developer machine is
+  // already ~2s, so 5s was a race that only a warm machine won. The ownership
+  // assertion itself is unchanged; only the transport budget and the diagnostics
+  // are fixed, so a future failure states whether it timed out or WMI is unusable.
+  const ownedPids = () => {
+    const children = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${hostPid}" | Select-Object -ExpandProperty ProcessId`],
+    { encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+    if (children.status !== 0) {
+      throw new Error(
+        `Cannot identify the fixture picker process: Get-CimInstance exited ${children.status}` +
+        `${children.error ? ` (${children.error.code})` : ''}` +
+        `${children.stderr ? ` — ${children.stderr.trim()}` : ''}`,
+      )
+    }
+    return new Set(children.stdout.trim().split(/\s+/).filter(Boolean).map(Number))
+  }
+  // Each pick may spawn its own worker, so this is scoped to one `exercise` call:
+  // reusing the set across picks would miss the new worker's pid, while recomputing
+  // it on every poll of a failing lookup would re-spawn PowerShell six times.
+  let owned = null
   const findDialog = () => {
     const candidates = []
     enumerate(cb => enumWindows(cb, 0), hwnd => {
@@ -40,12 +62,8 @@ export async function smokeDirectoryPicker({ base, token, hostPid, directory, re
       return 1
     })
     if (candidates.length === 0) return null
-    const children = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${hostPid}" | Select-Object -ExpandProperty ProcessId`],
-    { encoding: 'utf8', windowsHide: true, timeout: 5000 })
-    if (children.status !== 0) throw new Error('Cannot identify the fixture picker process')
-    const ownedPids = new Set(children.stdout.trim().split(/\s+/).map(Number))
-    return candidates.find(candidate => ownedPids.has(candidate.pid))?.hwnd ?? null
+    owned ??= ownedPids()
+    return candidates.find(candidate => owned.has(candidate.pid))?.hwnd ?? null
   }
   const rpc = async (method, payload = {}) => {
     const response = await fetch(`${base}/api/${method}`, {
@@ -57,6 +75,7 @@ export async function smokeDirectoryPicker({ base, token, hostPid, directory, re
     return envelope.result
   }
   const exercise = async cancel => {
+    owned = null
     const result = requestPick ? requestPick(cancel) : rpc('host.pickDirectory')
     // Observe early RPC failures without an unhandled rejection while looking
     // for the modal window. A missing worker must fail, not pass as cancellation.

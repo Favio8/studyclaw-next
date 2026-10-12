@@ -1,12 +1,28 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
+
+/** Same directory regardless of how the path is spelled (8.3 short name, junction, symlink). */
+const sameDirectory = (a, b) => {
+  try {
+    const left = statSync(a, { bigint: true })
+    const right = statSync(b, { bigint: true })
+    return left.ino === right.ino && left.dev === right.dev
+  } catch { return false }
+}
 
 /** Exercise real Win32 UI through an authenticated, built Host RPC. Only
  * automate windows owned by this fixture Host's child, never a user's dialog. */
 export async function smokeDirectoryPicker({ base, token, hostPid, directory, requestPick = undefined }) {
   if (process.platform !== 'win32') return
   assert(Number.isInteger(hostPid) && hostPid > 0)
+  // The picker returns the canonical path Windows hands back, and the workspace
+  // registry stores `fs.realpath`. The fixture lives under `os.tmpdir()`, which on
+  // a GitHub Windows runner is the 8.3 short name (RUNNER~1) and on macOS is a
+  // symlink — so comparing against the unresolved input fails on those hosts.
+  // Callers create the fixture before calling, so realpath is safe here.
+  const canonicalDirectory = realpathSync(directory)
   // Automation uses the repository's tooling. Loading the fixture's native
   // DLL here pins its install directory until this verifier process exits.
   const koffi = createRequire(new URL('../../apps/cli/package.json', import.meta.url))('koffi')
@@ -101,19 +117,32 @@ export async function smokeDirectoryPicker({ base, token, hostPid, directory, re
           return 1
         })
         assert(edit && select, 'Folder dialog is missing its path field or Select button')
-        assert(sendText(edit, 0x0c, 0, Buffer.from(`${directory}\0`, 'utf16le')), 'Could not enter fixture path')
+        assert(sendText(edit, 0x0c, 0, Buffer.from(`${canonicalDirectory}\0`, 'utf16le')), 'Could not enter fixture path')
         assert(post(select, 0x00f5, 0, 0), 'Could not select fixture folder')
       }
-      assert.deepEqual(await result, { path: cancel ? null : directory })
+      const picked = await result
+      if (cancel) {
+        assert.equal(picked.path, null)
+      } else {
+        // The shell returns the path in its own canonical form: on a GitHub Windows
+        // runner that is the long name even though the fixture was typed as the 8.3
+        // short one, and Node's `fs.realpath` does not expand 8.3 short names.
+        // Comparing directory identity keeps this assertion about "it selected our
+        // fixture" rather than about how either side happens to spell the path.
+        assert(
+          sameDirectory(picked.path, canonicalDirectory),
+          `Picker returned ${picked.path}, expected the fixture ${canonicalDirectory}`,
+        )
+      }
     } finally {
       // If an assertion fails, close only this fixture's dialog.
       post(dialog, 0x10, 0, 0)
     }
   }
   await exercise(false)
-  const opened = await rpc('workspaces.open', { path: directory })
-  assert.equal(opened.workspace.path, directory)
-  const listed = await rpc('workspaces.courses', { path: directory })
+  const opened = await rpc('workspaces.open', { path: canonicalDirectory })
+  assert.equal(opened.workspace.path, canonicalDirectory)
+  const listed = await rpc('workspaces.courses', { path: canonicalDirectory })
   assert.equal(listed.missing, false)
   await exercise(true)
   assert.equal(findDialog(), null, 'Picker left an orphan dialog')

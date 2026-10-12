@@ -26,7 +26,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { createServer, request as httpRequest } from "node:http";
 import { createZip } from "../../../packages/course/builder/src/zip.ts";
@@ -704,7 +704,11 @@ describe("M3 二进制导出/导入通道（真实 Host）", () => {
         method: "POST", headers: auth(), body: JSON.stringify({ payload: {} }),
       });
       const tree = await workspaces.json() as { result: { items: Array<{ path: string }> } };
-      expect(tree.result.items.some(item => item.path === join(target, courseId))).toBe(true);
+      // 工作区注册表存的是 fs.realpath 规范路径。tmpdir 在 macOS 上是 /var 软链到
+      // /private/var，在 GH Windows runner 上 TEMP 是 8.3 短名（RUNNER~1），两者都
+      // 与 realpath 结果不一致——直接拿未解析路径比对只在 tmpdir 恰好规范时才通过。
+      const canonicalCourse = realpathSync(join(target, courseId));
+      expect(tree.result.items.some(item => item.path === canonicalCourse)).toBe(true);
     } finally {
       rmSync(courseDir, { recursive: true, force: true });
       rmSync(target, { recursive: true, force: true });

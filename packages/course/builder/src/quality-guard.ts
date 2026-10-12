@@ -28,6 +28,13 @@ export function normalizeName(name: string): string {
     .trim()
 }
 
+/** Chinese characters and English words are comparable name units. Keep long
+ * unbroken tokens at their original length so pathological labels still warn. */
+function nameUnits(name: string): number {
+  return name.replace(/[A-Za-z][A-Za-z0-9]*(?:['’-][A-Za-z0-9]+)*/g,
+    word => word.length <= MAX_CONCEPT_NAME_LENGTH ? 'a' : word).replace(/\s/g, '').length
+}
+
 /**
  * 大纲质量校验（纯函数，immutable，只读检查）：
  * 概念/章节名净化、长度上限、重复名、空章节、规模护栏。
@@ -48,10 +55,11 @@ export function checkSyllabusQuality(syllabus: Syllabus): SyllabusQualityIssue[]
       if (clean !== concept.name) {
         issues.push({ code: 'name-whitespace', detail: `概念「${concept.name}」名称含不规整空白` })
       }
-      if (concept.name.length > MAX_CONCEPT_NAME_LENGTH) {
+      const units = nameUnits(concept.name)
+      if (units > MAX_CONCEPT_NAME_LENGTH) {
         issues.push({
           code: 'name-too-long',
-          detail: `概念「${concept.name}」名称达 ${concept.name.length} 字（上限 ${MAX_CONCEPT_NAME_LENGTH}）`,
+          detail: `概念「${concept.name}」名称达 ${units} 字词（上限 ${MAX_CONCEPT_NAME_LENGTH}）`,
         })
       }
       const seen = names.get(clean)

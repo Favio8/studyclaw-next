@@ -5,7 +5,11 @@
  * @module @studyclaw/tools/src/result
  */
 
-import { MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
+import { MAX_TOOL_MESSAGE_CHARS, MAX_SOURCE_MESSAGE_CHARS } from './specs.ts'
+
+export function formatSourceLine(n: number, text: string): string {
+  return `${n}: ${text}`
+}
 
 /** Recoverable tool failure (bad args / policy); maps to `rejected`. */
 export class ToolError extends Error {
@@ -32,6 +36,13 @@ const MODEL_DATA_KEYS = new Set([
 ])
 
 function serializeModelData(data: Record<string, unknown>): string {
+  if (Array.isArray(data['lines']) && typeof data['startLine'] === 'number' && typeof data['totalLines'] === 'number') {
+    const lines = data['lines'] as Array<{ n: number; text: string }>
+    return [
+      ...lines.map(line => formatSourceLine(line.n, line.text)),
+      ...(typeof data['nextLine'] === 'number' ? [`下一段起始行: ${data['nextLine']}`] : []),
+    ].join('\n')
+  }
   const pieces: string[] = []
   for (const [key, value] of Object.entries(data)) {
     if (!MODEL_DATA_KEYS.has(key)) continue
@@ -74,15 +85,17 @@ export class ToolResult {
    * 现在按白名单键裁剪 data 序列化进消息体，并遵守全局字符预算——
    * 超预算截尾并显式标记，防 token 爆炸，也不把 audit 数据整个灌回去。
    */
-  toToolMessage(maxChars: number = MAX_TOOL_MESSAGE_CHARS): string {
+  toToolMessage(maxChars?: number): string {
+    const limit = maxChars ?? (Array.isArray(this.data['lines']) && typeof this.data['startLine'] === 'number'
+      ? MAX_SOURCE_MESSAGE_CHARS : MAX_TOOL_MESSAGE_CHARS)
     const parts: string[] = [this.summary]
     if (this.status === 'success' || this.status === 'degraded') {
       const body = serializeModelData(this.data)
       if (body !== '') parts.push(body)
     }
     let message = parts.filter(part => part !== '').join('\n')
-    if (message.length > maxChars) {
-      message = `${message.slice(0, maxChars)}\n…[内容超预算已截断，原长 ${message.length} 字符]`
+    if (message.length > limit) {
+      message = `${message.slice(0, limit)}\n…[内容超预算已截断，原长 ${message.length} 字符]`
     }
     return message
   }

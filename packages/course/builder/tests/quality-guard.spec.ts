@@ -30,6 +30,15 @@ describe('normalizeName', () => {
 })
 
 describe('checkSyllabusQuality', () => {
+  it('measures multiword English names by words while keeping the long-token guard', () => {
+    const syllabus = makeSyllabus({ concepts: [
+      { id: 'c1', name: 'Representation: Implicit vs. Explicit Memory', type: 'mechanism', prerequisites: [], masteryScore: 0 },
+      { id: 'c2', name: 'x'.repeat(MAX_CONCEPT_NAME_LENGTH + 1), type: 'mechanism', prerequisites: [], masteryScore: 0 },
+    ] })
+    const lengths = checkSyllabusQuality(syllabus).filter(issue => issue.code === 'name-too-long')
+    expect(lengths).toHaveLength(1)
+    expect(lengths[0]!.detail).not.toContain('Representation')
+  })
   it('flags whitespace and overlength concept names', () => {
     const long = 'x'.repeat(MAX_CONCEPT_NAME_LENGTH + 1)
     const syllabus = makeSyllabus({

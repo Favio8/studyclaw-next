@@ -155,7 +155,8 @@ describe('CourseBuilder × MinerU 缓存', () => {
     expect(first.degraded).not.toContain('sources/lecture.pdf') // 内置解析成功，文件本身不进 degraded
     let manifest = await loadParsedManifest(join(courseDir, '.studyclaw'))
     expect(Object.values(manifest)[0]?.engine).toBe('builtin')
-    expect(Object.values(manifest)[0]?.out).toBeNull()
+    expect(Object.values(manifest)[0]?.out).toBeTruthy()
+    expect(await readParsedText(join(courseDir, '.studyclaw'), Object.values(manifest)[0]!.out!)).toContain('Ease factor is clamped')
     // MinerU 恢复后：manifest builtin ≠ mineru → 重试并改写归因
     parseWithMineruMock.mockResolvedValue('# MinerU 恢复\n\n正文。\n')
     await make().build(1)
@@ -164,14 +165,17 @@ describe('CourseBuilder × MinerU 缓存', () => {
     expect(Object.values(manifest)[0]?.engine).toBe('mineru')
   })
 
-  it('engine=builtin：不写 manifest、不调用 MinerU', async () => {
+  it('engine=builtin：缓存真实内置产物，不调用 MinerU', async () => {
     const courseDir = await courseWithPdf()
     const builder = new CourseBuilder(courseDir, new FakeGenerator(), null, null, 'fine', ['.pdf'], courseDir, join(courseDir, '.studyclaw'), null, false, undefined, options('builtin'))
     const report = await builder.build(1)
     expect(report.degraded).not.toContain('sources/lecture.pdf')
     expect(parseWithMineruMock).not.toHaveBeenCalled()
     const parsedDir = join(courseDir, '.studyclaw', 'parsed')
-    await expect(readFile(join(parsedDir, 'manifest.json'), 'utf8')).rejects.toThrow()
+    const manifest = await loadParsedManifest(join(courseDir, '.studyclaw'))
+    expect(Object.values(manifest)[0]?.engine).toBe('builtin')
+    expect(await readParsedText(join(courseDir, '.studyclaw'), Object.values(manifest)[0]!.out!)).toContain('Ease factor is clamped')
+    expect(await readFile(join(parsedDir, 'manifest.json'), 'utf8')).toContain('builtin')
   })
 
   it('LLM 生成阶段抛错：已成功的解析 manifest 仍然落盘（真机验证发现）', async () => {

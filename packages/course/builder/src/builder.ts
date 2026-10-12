@@ -6,9 +6,8 @@
  * `builder.py::CourseBuilder`.
  * @module @studyclaw/course-builder/src/builder
  */
-
 import { createHash } from 'node:crypto'
-import { mkdir, open, readFile, readdir, rename, stat } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import { withCourseLock } from '@studyclaw/tools'
 import { MarkdownIngestor } from './ingestor.ts'
@@ -29,8 +28,10 @@ import { applySyllabusQualityGuard } from './quality-guard.ts'
 import { answerPositionSkewWarning, enforceTaskQuality } from './quality.ts'
 import { harnessTask, syllabus, type Chapter, type HarnessTask, type IngestArtifact, type Syllabus } from './models.ts'
 import type { ProgressRecordMutable } from './progress.ts'
+import { renameWithRetry } from '@studyclaw/fs-atomic'
 
-export const DEFAULT_SOURCE_EXTENSIONS = ['.md', '.txt', '.pdf', '.docx', '.xlsx', '.html', '.htm']
+import { SOURCE_EXTENSIONS } from './formats.ts'
+export const DEFAULT_SOURCE_EXTENSIONS = SOURCE_EXTENSIONS
 
 /** 项目即课程布局下的状态/元数据文件名——就地扫描资料时一律跳过。 */
 export const COURSE_STATE_FILES = new Set([
@@ -39,6 +40,7 @@ export const COURSE_STATE_FILES = new Set([
   'notes.md',
   '.checksums',
   '.source-root.json',
+  'studyclaw-export.json',
 ])
 
 /**
@@ -82,11 +84,11 @@ async function recoverMigratedSources(
  * One-shot layout migration: moves pre-v2 root-level artifacts into
  * `.studyclaw/`. Idempotent and marker-guarded; existing files inside the
  * state directory always win over the legacy copy.
- * `move` 可注入（测试/特殊 FS 场景），默认 fs rename。
+ * `move` 可注入（测试/特殊 FS 场景），默认走带退避重试的 rename。
  */
 export async function migrateLegacyLayout(
   workspaceRoot: string,
-  move: (from: string, to: string) => Promise<void> = rename,
+  move: (from: string, to: string) => Promise<void> = renameWithRetry,
 ): Promise<void> {
   const stateDir = stateDirOf(workspaceRoot)
   const marker = join(stateDir, LEGACY_LAYOUT_MARKER)
@@ -212,11 +214,14 @@ async function atomicWrite(path: string, content: string): Promise<void> {
   } finally {
     await handle.close()
   }
-  await rename(tmp, path)
+  await renameWithRetry(tmp, path)
 }
 
 async function loadJson<T>(path: string): Promise<T | null> {
-  const raw = await readFile(path, 'utf8').catch(() => null)
+  const raw = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
   if (raw === null) return null
   try {
     return JSON.parse(raw) as T
@@ -361,31 +366,31 @@ export class CourseBuilder {
   private async extractMarkdown(relPath: string, absPath: string, ext: string, sha256: string): Promise<string> {
     const parse = this.parseOptions
     const stateDir = stateDirOf(this.courseDir)
-    if (parse !== null && parse.engine !== 'builtin' && ext === '.pdf') {
-      await this.ensureParsedManifest()
-      const fileName = parsedFileName(sha256, parse.tier)
-      const cached = await readParsedText(stateDir, fileName)
+    if (ext === '.md' || ext === '.txt') return extractSourceText(absPath, ext, parse)
+    await this.ensureParsedManifest()
+    const tier = parse !== null && parse.engine !== 'builtin' ? parse.tier : 'builtin'
+    const expectsMineru = parse !== null && parse.engine !== 'builtin'
+    if (expectsMineru) {
+      const legacyName = parsedFileName(sha256, tier)
+      const cached = await readParsedText(stateDir, legacyName)
       if (cached !== null) {
-        this.parsedManifest[relPath] = { sha256, engine: 'mineru', tier: parse.tier, out: fileName }
+        this.parsedManifest[relPath] = { sha256, engine: 'mineru', tier, out: legacyName }
+        await this.saveParsedManifest()
         return cached
       }
-      const outcome = await extractTextToMarkdownWithEngine(absPath, parse)
-      if (outcome.engine === 'mineru') {
-        const out = await writeParsedText(stateDir, fileName, outcome.text)
-        this.parsedManifest[relPath] = { sha256, engine: 'mineru', tier: parse.tier, out }
-      } else {
-        // auto 回落 builtin：builtin 不值得落缓存文件，只记 manifest 以便
-        // 下次构建重试 MinerU（自愈），不把 builtin 结果冒充 mineru 钉住。
-        this.parsedManifest[relPath] = { sha256, engine: 'builtin', tier: parse.tier, out: null }
-      }
-      // 增量持久化：manifest 若等 build 收尾才落盘，LLM 生成阶段失败会把
-      // 已经花钱跑完的解析结果一起埋掉（真机验证发现：reading.parsed 因
-      // manifest 缺失报"未构建"，尽管产物文件就在 parsed/ 里）。此处每
-      // 个 PDF 解析完即写，幂等且文件极小。
-      await this.saveParsedManifest()
-      return outcome.text
     }
-    return extractSourceText(absPath, ext, parse)
+    const prior = this.parsedManifest[relPath]
+    if (prior?.sha256 === sha256 && prior.tier === tier && prior.out !== null) {
+      const cached = await readParsedText(stateDir, prior.out)
+      if (cached !== null && (!expectsMineru || prior.engine === 'mineru')) return cached
+    }
+    const outcome = await extractTextToMarkdownWithEngine(absPath, parse)
+    const fileName = parsedFileName(sha256, outcome.engine === 'mineru' ? tier : tier === 'builtin' ? 'builtin' : `builtin-${tier}`)
+    const out = await writeParsedText(stateDir, fileName, outcome.text)
+    this.parsedManifest[relPath] = { sha256, engine: outcome.engine, tier, out }
+    await this.saveParsedManifest()
+    return outcome.text
+
   }
 
   /**
@@ -409,7 +414,6 @@ export class CourseBuilder {
   }
 
   private async saveParsedManifest(): Promise<void> {
-    if (this.effectiveParseEngine() === null) return
     await this.ensureParsedManifest()
     await saveParsedManifest(stateDirOf(this.courseDir), this.parsedManifest)
   }
@@ -474,6 +478,8 @@ export class CourseBuilder {
     }
 
     const artifacts: IngestArtifact[] = []
+    const failedFiles = new Set<string>()
+    const retryNewFiles = new Set<string>()
     const changedFiles = [...report.added, ...report.modified]
     // T-20：slug 去重集提升为整个 build 全局（单 ingestor 实例）——旧实现
     // 每文件新建 ingestor、seen 按文件隔离，两个讲义的「概述」会得同一
@@ -533,6 +539,7 @@ export class CourseBuilder {
         }
       } catch {
         report.degraded.push(name)
+        failedFiles.add(name)
         continue
       } finally {
         ingestor.release(added)
@@ -552,6 +559,7 @@ export class CourseBuilder {
       // F-17：空/纯文本文档零章节不再静默成功——标入 degraded 显式告警。
       if (normalized.chunks.length === 0) {
         report.degraded.push(`${name}（未解析出任何概念块）`)
+        failedFiles.add(name)
         continue
       }
       artifacts.push(normalized)
@@ -560,14 +568,26 @@ export class CourseBuilder {
       }
     }
     const generatedAll: HarnessTask[] = []
+    const generatedFiles = new Map<HarnessTask, string>()
     let finished = 0
     await mapWithConcurrency(generatePlan, maxConcurrency, async unit => {
-      generatedAll.push(...await this.generator.generateTasks(unit.chunk, tasksPerChunk))
+      const tasks = await this.generator.generateTasks(unit.chunk, tasksPerChunk)
+      for (const task of tasks) generatedFiles.set(task, unit.file)
+      generatedAll.push(...tasks)
       finished += 1
       if (onProgress !== undefined) onProgress(finished, generatePlan.length, `${unit.file} · ${unit.chunk.title}`)
     })
     // 题卡质量闸（零 LLM）：去重/长度失衡/答案键越界，不合格卡进 degraded。
     const gate = enforceTaskQuality(generatedAll)
+    const filesWithCards = new Set(gate.kept.map(task => generatedFiles.get(task)!))
+    for (const artifact of artifacts) {
+      if (!filesWithCards.has(artifact.source_file)) {
+        failedFiles.add(artifact.source_file)
+        retryNewFiles.add(artifact.source_file)
+        report.degraded.push(`${artifact.source_file}（未生成有效题卡，保留旧状态并等待重试）`)
+      }
+    }
+    const committedArtifacts = artifacts.filter(artifact => !failedFiles.has(artifact.source_file))
     for (const drop of gate.dropped) report.degraded.push(`${drop.taskId}：${drop.reason}`)
     const skew = answerPositionSkewWarning(gate.answerPositionHistogram)
     if (skew !== null) console.warn(`[quality-gate] ${skew}`)
@@ -576,16 +596,16 @@ export class CourseBuilder {
     // 课程锁只包无 LLM 的写段（快），生成与依赖推断留在锁外——文件锁的
     // 30s 超时不会误伤并发评测。
     await withCourseLock(this.courseDir, async () => {
-      await this.updateTaskPool([...report.added, ...report.modified], report)
+      await this.updateTaskPool(committedArtifacts.map(artifact => artifact.source_file), report)
       report.tasksGenerated = await this.mergeTasks(gate.kept)
-      await this.mergeSyllabus(artifacts, report, new Set(Object.keys(current)))
+      await this.mergeSyllabus(committedArtifacts, report, new Set(Object.keys(current)))
     })
     if (onProgress !== undefined) onProgress(changedFiles.length, changedFiles.length, '')
 
-    await this.applyDependencyInference(artifacts, report)
+    await this.applyDependencyInference(committedArtifacts, report)
     await withCourseLock(this.courseDir, async () => {
       report.conceptsSeeded = await this.seedProgress()
-      await this.saveChecksums(current)
+      await this.saveChecksums(this.retryableChecksums(current, stored, failedFiles, retryNewFiles))
       await this.saveParsedManifest()
     })
     return report
@@ -601,6 +621,8 @@ export class CourseBuilder {
       skipped.push(`${name}（${Math.round(size / 1024 / 1024)}MB 超过 ${Math.round(MAX_SOURCE_FILE_BYTES / 1024 / 1024)}MB 上限，已跳过）`)
     })
     const report = emptyReport()
+    const stored = await this.loadChecksums()
+    const failedFiles = new Set<string>()
     report.degraded.push(...skipped)
     // L6：无变更路径此前沿用 emptyReport 的 '1.0.0' 假版本——以磁盘上的
     // 当前版本为基线，mergeSyllabus 增长时再自行 bump。
@@ -617,6 +639,11 @@ export class CourseBuilder {
           const markdown = await this.extractMarkdown(name, join(sourcesDir, name), ext, current[name] ?? '')
           artifact = ingestor.parseText(markdown, name, this.courseDir.split(/[\\/]/).pop() ?? 'course')
         }
+        if (artifact.chunks.length === 0) {
+          failedFiles.add(name)
+          report.degraded.push(`${name}（未解析出任何概念块）`)
+          continue
+        }
         artifacts.push({
           ...artifact,
           source_file: name,
@@ -630,13 +657,14 @@ export class CourseBuilder {
         report.added.push(name)
       } catch {
         report.degraded.push(name)
+        failedFiles.add(name)
       }
     }
     await withCourseLock(this.courseDir, () => this.mergeSyllabus(artifacts, report, new Set(Object.keys(current))))
     await this.applyDependencyInference(artifacts, report)
     await withCourseLock(this.courseDir, async () => {
       report.conceptsSeeded = await this.seedProgress()
-      await this.saveChecksums(current)
+      await this.saveChecksums(this.retryableChecksums(current, stored, failedFiles))
       await this.saveParsedManifest()
     })
     const existing = await loadSyllabus(this.courseDir)
@@ -849,7 +877,7 @@ export class CourseBuilder {
         refreshed.push({
           conceptId, name: meta.name, chapter: meta.chapter,
           mastery: 0, evals: 0, passRate: 0, streak: 0, ef: 2.5,
-          nextReviewAt: null, misattribution: 'none',
+          nextReviewAt: null, misattribution: 'none', exposure: 0,
         })
         changed = true
       } else {
@@ -871,6 +899,17 @@ export class CourseBuilder {
     const dir = this.checksumsDir ?? stateDirOf(this.courseDir)
     const parsed = await loadJson<Record<string, string>>(join(dir, '.checksums'))
     return parsed ?? {}
+  }
+
+  private retryableChecksums(current: Record<string, string>, stored: Record<string, string>, failed: ReadonlySet<string>, retryNew: ReadonlySet<string> = new Set()): Record<string, string> {
+    const next = { ...current }
+    for (const file of failed) {
+      if (Object.hasOwn(stored, file)) next[file] = stored[file]!
+      // Preserve the existing stable-degradation cache for newly unparseable
+      // inputs. Existing learning state and empty LLM output remain retryable.
+      else if (retryNew.has(file)) delete next[file]
+    }
+    return next
   }
 
   private async saveChecksums(table: Record<string, string>): Promise<void> {

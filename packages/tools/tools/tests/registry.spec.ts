@@ -34,6 +34,18 @@ async function setup(): Promise<{ root: string; courseDir: string; wsRoot: strin
 }
 
 describe('ToolRegistry', () => {
+  it('没有源根绑定时，search_sources 也排除题池和依赖目录', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    try {
+      await mkdir(join(courseDir, 'tasks'))
+      await mkdir(join(courseDir, 'node_modules'))
+      await writeFile(join(courseDir, 'tasks', 'task.json'), 'EXCLUDED FIXTURE')
+      await writeFile(join(courseDir, 'node_modules', 'fixture.txt'), 'EXCLUDED FIXTURE')
+      const result = await defaultToolRegistry(courseDir, wsRoot).execute('search_sources', { query: 'EXCLUDED FIXTURE' }, { courseDir, workspaceRoot: wsRoot })
+      expect(result.data['matches']).toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('publishes DSH execution, render and provider metadata for every spec', () => {
     const specs = [...buildDefaultSpecs(), ...buildGenericSpecs()]
     expect(specs.every(spec => spec.execution === 'parallel' || spec.execution === 'exclusive')).toBe(true)

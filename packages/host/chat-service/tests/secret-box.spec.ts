@@ -17,6 +17,22 @@ const home = await mkdtemp(join(tmpdir(), 'studyclaw-secretbox-'))
 afterAll(() => rm(home, { recursive: true, force: true }))
 
 describe('unsealCredentials 密封判定', () => {
+  it('首次并发密封共用一把主密钥，所有结果都能解密', async () => {
+    const fresh = await mkdtemp(join(tmpdir(), 'studyclaw-master-race-'))
+    const previous = process.env.STUDYCLAW_HOME
+    process.env.STUDYCLAW_HOME = fresh
+    try {
+      const sealed = await Promise.all(Array.from({ length: 8 }, (_, index) => sealCredentials({ fixture: `FAKE-${index}` })))
+      for (let index = 0; index < sealed.length; index++) {
+        expect((await unsealCredentials(sealed[index]!)).data).toEqual({ fixture: `FAKE-${index}` })
+      }
+    } finally {
+      if (previous === undefined) delete process.env.STUDYCLAW_HOME
+      else process.env.STUDYCLAW_HOME = previous
+      await rm(fresh, { recursive: true, force: true })
+    }
+  })
+
   it('RV-5：明文值含 "sealed": true 字样仍按明文解析，不被误判为信封', async () => {
     const raw = JSON.stringify({ openai: '这个值里恰好有 "sealed": true 字样', keep: 'v1' }, null, 2)
     const result = await unsealCredentials(raw)

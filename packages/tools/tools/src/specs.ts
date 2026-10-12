@@ -38,6 +38,9 @@ export const MAX_READ_LINES = 200
 export const MAX_FILE_BYTES = 256 * 1024
 export const MAX_NOTE_CHARS = 4000
 export const MAX_TOOL_MESSAGE_CHARS = 4000
+/** Source excerpts need enough room for a useful section, with complete lines. */
+export const MAX_SOURCE_TEXT_CHARS = 24_000
+export const MAX_SOURCE_MESSAGE_CHARS = 32_000
 
 const spec = (
   name: string,
@@ -85,7 +88,7 @@ export function buildDefaultSpecs(): ToolSpec[] {
   return [
     spec(
       'read_source',
-      '按行读取课程源文件/切片（限长，课程资料根内相对路径）',
+      '按行读取课程资料正文，通常一次读取相关章节（最多 200 行）；先用 search_sources 定位。返回实际展示范围与 nextLine，未返回部分不算已读。PDF/Office 使用抽取正文行号。资料足够回答时直接作答。',
       {
         type: 'object',
         properties: {

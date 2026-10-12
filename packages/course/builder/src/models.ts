@@ -7,6 +7,21 @@
 
 import { z } from 'zod'
 
+/** Persisted reading state, shared by archive rendering and import validation. */
+export const annotationsFile = z.object({
+  version: z.literal(1),
+  sources: z.record(z.string(), z.object({
+    progress: z.object({ page: z.number().int().min(1), percent: z.number().min(0).max(100), updatedAt: z.string() }),
+    highlights: z.array(z.object({
+      id: z.string(), page: z.number().int().min(1),
+      rects: z.array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), w: z.number().min(0).max(1), h: z.number().min(0).max(1) })),
+      quote: z.object({ text: z.string(), prefix: z.string(), suffix: z.string() }),
+      color: z.enum(['yellow', 'green', 'blue', 'red']), comment: z.string(), tags: z.array(z.string()),
+      conceptId: z.string().nullable(), createdAt: z.string(),
+    })),
+  })),
+})
+
 export const conceptType = z.enum(['mechanism', 'practice', 'scenario'])
 export type ConceptType = z.infer<typeof conceptType>
 
@@ -14,6 +29,7 @@ export const taskType = z.enum(['concept', 'scenario', 'debug_edge'])
 export type TaskType = z.infer<typeof taskType>
 
 export const sourceRef = z.object({
+  page: z.number().int().min(1).optional(),
   file: z.string(),
   chunk_id: z.string().optional(),
   line_range: z.array(z.number()).optional(),
@@ -26,6 +42,9 @@ export const concept = z.object({
   type: conceptType.default('mechanism'),
   prerequisites: z.array(z.string()).default([]),
   mastery_score: z.number().default(0),
+  definition: z.string().optional(),
+  learning_objective: z.string().optional(),
+  evidence: z.array(z.object({ source: z.string(), page: z.number().int().min(1), block_id: z.string(), quote: z.string() })).optional(),
 })
 export type Concept = z.infer<typeof concept>
 
@@ -47,6 +66,8 @@ export const syllabus = z.object({
   title: z.string(),
   version: z.string().default('1.0.0'),
   granularity: z.enum(['fine', 'coarse']).default('fine'),
+  concept_origin: z.enum(['headings', 'semantic']).optional(),
+  document_outline: z.array(z.object({ title: z.string(), source: z.string() })).optional(),
   chapters: z.array(chapter).default([]),
   adjacency: z.record(z.string(), z.array(z.string())).default({}),
 })

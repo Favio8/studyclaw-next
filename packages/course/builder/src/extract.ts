@@ -8,6 +8,10 @@
  * @module @studyclaw/course-builder/src/extract
  */
 
+import { documentKind } from './formats.ts'
+import { officePreview } from './document-preview.ts'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import * as nodeFs from 'node:fs'
 import mammoth from 'mammoth'
@@ -28,7 +32,7 @@ export class ExtractionError extends Error {
 }
 
 /** Non-plain-text extensions handed to the structured extractors. */
-export const EXTRACTED_EXTENSIONS = ['.pdf', '.docx', '.xlsx', '.html', '.htm'] as const
+export const EXTRACTED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.png', '.jpg', '.jpeg', '.webp', '.xlsx', '.html', '.htm'] as const
 
 // Turndown (with domino, a lightweight DOM) is stateless once constructed;
 // reuse one instance across files so the converter warms up only once.
@@ -118,6 +122,16 @@ async function extractHtmlToMarkdown(sourcePath: string): Promise<string> {
 
 /** 抽取主路径：返回文本与实际产出引擎（auto 回落 builtin 时如实报告）。 */
 async function extractToMarkdownOutcome(sourcePath: string, parse: ParseEngineOptions | null): Promise<{ text: string; engine: 'mineru' | 'builtin' }> {
+  const kind = documentKind(sourcePath)
+  if (kind === 'office' && !sourcePath.toLowerCase().endsWith('.docx')) {
+    const preview = await officePreview(sourcePath, join(tmpdir(), 'studyclaw-document-cache'))
+    return extractPdfWithFallback(preview, parse)
+  }
+  if (kind === 'image') {
+    const text = await parseWithMineru(sourcePath, parse?.tier ?? 'basic', parse?.timeoutSec ?? 300)
+    if (!text.trim()) throw new ExtractionError('图片未识别出正文')
+    return { text, engine: 'mineru' }
+  }
   if (sourcePath.toLowerCase().endsWith('.xlsx')) {
     return { text: await extractXlsxToMarkdown(sourcePath), engine: 'builtin' }
   }

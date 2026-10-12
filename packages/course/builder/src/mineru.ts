@@ -20,6 +20,7 @@ import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { z } from 'zod'
 
 /** 解析引擎开关：auto=探测到 mineru-kit 则用它，否则内置；mineru=强制（缺失即降级）；builtin=只用内置。 */
 export type ParseEngine = 'auto' | 'mineru' | 'builtin'
@@ -205,4 +206,25 @@ export async function parseWithMineru(
       // 临时目录清理失败不影响解析结果。
     })
   }
+}
+
+/** MinerU 4's local middle JSON retains page numbers and normalized geometry. */
+export async function parseDocumentWithMineru(sourcePath: string, tier: MineruTier = 'basic', timeoutSec = 300): Promise<Array<{ page: number; text: string; bbox: [number, number, number, number] | null }>> {
+  const probe = await probeMineru()
+  if (!probe.command) throw new MineruError('not-installed', '图片 / 扫描件 OCR 需要安装 MinerU：uv tool install "mineru>=4.0,<5"')
+  const work = await mkdtemp(join(tmpdir(), 'studyclaw-mineru-json-'))
+  try {
+    const output = join(work, 'middle.json')
+    await runCommand(probe.command, ['parse', sourcePath, '-o', output, '--format', 'middle_json', '--tier', tier], timeoutSec * 1000)
+    const schema = z.object({ schema: z.literal('docvortex.middle'), pages: z.array(z.object({ page_idx: z.number().int().min(0), blocks: z.array(z.object({ bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(), content: z.array(z.unknown()) })) })) })
+    const document = schema.parse(JSON.parse(await readFile(output, 'utf8')))
+    const collect = (value: unknown): string => {
+      if (typeof value === 'string') return value
+      if (Array.isArray(value)) return value.map(collect).filter(Boolean).join(' ')
+      if (typeof value !== 'object' || value === null) return ''
+      const record = value as Record<string, unknown>
+      return collect(record['content'] ?? record['text'] ?? record['children'] ?? '')
+    }
+    return document.pages.flatMap(page => page.blocks.map(block => ({ page: page.page_idx + 1, text: collect(block.content).trim(), bbox: block.bbox ?? null })).filter(block => block.text !== ''))
+  } finally { await rm(work, { recursive: true, force: true }) }
 }

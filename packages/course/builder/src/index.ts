@@ -5,7 +5,7 @@
  */
 
 export { MarkdownIngestor, slug, conceptTypeOf, IngestError, DEFAULT_MAX_CHUNK_CHARS } from './ingestor.ts'
-export { CourseBuilder, computeChecksums, loadSyllabus, loadTaskPool, writeTaskPool, BuildError, DEFAULT_SOURCE_EXTENSIONS, COURSE_STATE_FILES, stateDirOf, migrateLegacyLayout } from './builder.ts'
+export { CourseBuilder, computeChecksums, loadSyllabus, loadTaskPool, writeTaskPool, BuildError, DEFAULT_SOURCE_EXTENSIONS, COURSE_STATE_FILES, MAX_SOURCE_FILE_BYTES, stateDirOf, migrateLegacyLayout } from './builder.ts'
 export type { BuildReport } from './builder.ts'
 export { extractSourceText, extractTextToMarkdown, extractTextToMarkdownWithEngine, ExtractionError, EXTRACTED_EXTENSIONS } from './extract.ts'
 export {
@@ -84,6 +84,7 @@ export {
   loadProgressBoard,
   saveProgressBoard,
   upsertProgressRecord,
+  recordExposure,
   dueRecords,
   scoreToQuality,
   updateEf,
@@ -92,3 +93,20 @@ export {
   localDateKey,
 } from './progress.ts'
 export type { ProgressBoard, ProgressRecord } from './progress.ts'
+export { EXPORT_FORMAT_VERSION, NEVER_EXPORTED, collectBackupEntries, createCourseBackup, loadCourseExportData, renderCourseMarkdown } from './export.ts'
+export type { CourseExportData } from './export.ts'
+export { ImportError, importCourseBackup } from './import.ts'
+export type { ImportResult } from './import.ts'
+export { createZip, readZip } from './zip.ts'
+export type { ZipEntry } from './zip.ts'
+
+export { DOCUMENT_FORMATS, SOURCE_EXTENSIONS, documentKind } from './formats.ts'
+export { officePreview } from './document-preview.ts'
+
+export { readSourceDocument } from './source-document.ts'
+export type { SourceDocument, SourceBlock } from './source-document.ts'
+
+export { parseDocumentWithMineru } from './mineru.ts'
+
+export { courseDataDirectory } from './data-directory.ts'
+export { annotationsFile } from './models.ts'

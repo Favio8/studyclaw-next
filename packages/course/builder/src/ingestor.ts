@@ -272,6 +272,43 @@ function stripPdfBoilerplate(text: string): string {
   return noComments.split(/\r?\n/).filter(line => !boilerplate.has(line.trim())).join('\n')
 }
 
+/** Plain PDF extraction loses IEEE-style heading markup. Restore its hierarchy
+ * only when multiple numbered uppercase chapters establish an academic outline. */
+function repairAcademicHeadings(text: string): string {
+  const lines = text.split(/\r?\n/)
+  const chapter = /^[IVXLCDM]+\.\s+([A-Z][A-Z0-9 ,:;()&/–—-]{3,})$/
+  const references = /^(?:REFERENCES|BIBLIOGRAPHY)$/
+  if (lines.some(line => HEADING_RE.test(line))
+    || lines.filter(line => !line.includes('\t') && chapter.test(line.trim())).length < 2) return text
+  const result: string[] = []
+  let inChapter = false
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!
+    const trimmed = line.trim()
+    // Bibliographies remain in the original PDF, but are not teaching material.
+    if (inChapter && references.test(trimmed)) break
+    const heading = line.includes('\t') ? null : chapter.exec(trimmed)
+    if (heading !== null) {
+      let title = heading[1]!
+      while (i + 1 < lines.length) {
+        const continuation = lines[i + 1]!.trim()
+        if (lines[i + 1]!.includes('\t') || references.test(continuation)
+          || !/^[A-Z][A-Z ,:;()&/–—-]{2,}$/.test(continuation)) break
+        title += ` ${continuation}`
+        i += 1
+      }
+      result.push(`# ${title}`)
+      inChapter = true
+      continue
+    }
+    const subsection = inChapter && !line.includes('\t') ? /^[A-Z]\.\s+([A-Z].{2,139})$/.exec(trimmed) : null
+    if (subsection !== null && !SENTENCE_END_RE.test(subsection[1]!) && !/[=@]/.test(subsection[1]!)) {
+      result.push(`## ${subsection[1]}`)
+    } else result.push(line)
+  }
+  return result.join('\n')
+}
+
 /**
  * General-purpose markdown/text preprocessing. The behavior adapts to the
  * source file type:
@@ -292,7 +329,7 @@ function stripPdfBoilerplate(text: string): string {
 function preprocessMarkdown(text: string, sourceName: string): string {
   const mode = preprocessModeFor(sourceName)
   // PDF 路径先过 boilerplate 净化（MinerU/扫描文本的运行页眉页脚）。
-  const source = mode === 'pdf' ? stripPdfBoilerplate(text) : text
+  const source = mode === 'pdf' ? repairAcademicHeadings(stripPdfBoilerplate(text)) : text
   const lines = source.split(/\r?\n/)
   let inFence = false
   const result: string[] = []

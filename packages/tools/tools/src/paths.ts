@@ -6,8 +6,8 @@
  * @module @studyclaw/tools/src/paths
  */
 
-import { readFile, stat } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { lstat, readFile, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { ToolRejected } from './result.ts'
 
 export const SOURCE_ROOT_BINDING_NAME = '.source-root.json'
@@ -36,6 +36,7 @@ export const SOURCE_EXCLUDED_FILES = new Set([
   'notes.md',
   '.checksums',
   '.source-root.json',
+  'studyclaw-export.json',
 ])
 
 /**
@@ -48,6 +49,36 @@ export const SOURCE_EXCLUDED_FILES = new Set([
  */
 export function isEightDotThreeSegment(segment: string): boolean {
   return /^[^./\\]+~\d+$/i.test(segment)
+}
+
+function contained(root: string, target: string): boolean {
+  const rel = relative(root, target)
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
+function protectedSegment(segment: string): boolean {
+  const name = process.platform === 'win32' ? segment.toLowerCase() : segment
+  return segment.startsWith('.') || INPLACE_SOURCE_EXCLUDED_DIRS.has(name) || isEightDotThreeSegment(segment)
+}
+
+/** Preserve missing-file handling while resolving every existing ancestor. */
+async function canonicalSourceTarget(target: string): Promise<string> {
+  const tail: string[] = []
+  let current = target
+  for (;;) {
+    try { return join(await realpath(current), ...tail) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const existing = await lstat(current).catch((cause: NodeJS.ErrnoException) => {
+        if (cause.code === 'ENOENT') return null
+        throw cause
+      })
+      if (existing !== null) throw new ToolRejected('路径包含不可解析的符号链接')
+      const parent = dirname(current)
+      if (parent === current) throw error
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
 }
 
 /**
@@ -68,8 +99,12 @@ export async function courseSourceRoot(courseDir: string): Promise<string> {
       // 根越界读全部 .md/.txt。限定绑定必须在 courseDir 内，否则忽略该绑定
       // 回退规范的项目根（不抛错：宿主还有其他调用方依赖宽松语义）。
       const base = resolve(courseDir)
-      const prefix = base.endsWith(sep) ? base : base + sep
-      if (target === base || target.startsWith(prefix)) return target
+      if (contained(base, target)) {
+        const realBase = await realpath(base)
+        const realTarget = await canonicalSourceTarget(target)
+        const parts = relative(realBase, realTarget).split(sep).filter(Boolean)
+        if (contained(realBase, realTarget) && !parts.some(protectedSegment)) return realTarget
+      }
     }
   } catch {
     // No binding / unreadable: fall through to the canonical project root.
@@ -103,8 +138,8 @@ export async function resolveStateFile(courseDir: string, name: string): Promise
  * @returns the resolved absolute path.
  */
 export async function resolveSourceRef(courseDir: string, ref: string): Promise<string> {
-  const root = resolve(await courseSourceRoot(courseDir))
-  if (!(await stat(root).catch(() => null))?.isDirectory()) {
+  const root = await realpath(await courseSourceRoot(courseDir)).catch(() => null)
+  if (root === null || !(await stat(root).catch(() => null))?.isDirectory()) {
     throw new ToolRejected('课程资料根目录不存在（先运行 studyclaw build）')
   }
   if (typeof ref !== 'string' || ref.trim() === '') {
@@ -123,8 +158,7 @@ export async function resolveSourceRef(courseDir: string, ref: string): Promise<
   if (parts.some(isEightDotThreeSegment)) {
     throw new ToolRejected('路径段疑似 Windows 8.3 短名别名（如 STUDYC~1），已拒绝')
   }
-  const excluded = (await isInplaceCourse(courseDir)) ? INPLACE_SOURCE_EXCLUDED_DIRS : new Set<string>()
-  if (parts.some(part => part.startsWith('.') || excluded.has(part))) {
+  if (parts.some(protectedSegment)) {
     throw new ToolRejected('不允许访问隐藏文件/目录或课程内部状态目录')
   }
   const target = resolve(root, ...parts)
@@ -136,5 +170,9 @@ export async function resolveSourceRef(courseDir: string, ref: string): Promise<
   if (target !== root && !target.startsWith(prefix)) {
     throw new ToolRejected('path 超出课程资料根目录')
   }
-  return target
+  const canonical = await canonicalSourceTarget(target)
+  if (!contained(root, canonical)) throw new ToolRejected('路径不能通过符号链接越界')
+  const canonicalParts = relative(root, canonical).split(sep).filter(Boolean)
+  if (canonicalParts.some(protectedSegment)) throw new ToolRejected('不允许经链接访问隐藏文件或课程内部状态目录')
+  return canonical
 }

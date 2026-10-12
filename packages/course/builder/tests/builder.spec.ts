@@ -43,6 +43,38 @@ async function setup(): Promise<{ root: string; courseDir: string; generator: Fa
 }
 
 describe('CourseBuilder', () => {
+  it('生成器返回零张有效卡时不退役旧卡，并保留重试指纹', async () => {
+    const { root, courseDir, generator } = await setup()
+    try {
+      const builder = new CourseBuilder(courseDir, generator)
+      await builder.build(1)
+      const before = await loadTaskPool(courseDir)
+      const fingerprints = await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')
+      await writeFile(join(courseDir, 'sources', 'a.md'), DOC + '\n新增说明。')
+      generator.generateTasks = async () => []
+      const report = await builder.build(1)
+      expect(report.degraded.some(item => item.includes('未生成有效题卡'))).toBe(true)
+      expect(await loadTaskPool(courseDir)).toEqual(before)
+      expect(await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')).toBe(fingerprints)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('资料摄取失败保留旧题卡与指纹，下次构建重试', async () => {
+    const { root, courseDir, generator } = await setup()
+    try {
+      const builder = new CourseBuilder(courseDir, generator)
+      await builder.build(1)
+      const before = await loadTaskPool(courseDir)
+      const checksums = await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')
+      await writeFile(join(courseDir, 'sources', 'a.md'), '')
+      const failed = await builder.build(1)
+      expect(failed.degraded.length).toBeGreaterThan(0)
+      expect(await loadTaskPool(courseDir)).toEqual(before)
+      expect(await readFile(join(courseDir, '.studyclaw', '.checksums'), 'utf8')).toBe(checksums)
+      expect((await builder.build(1)).modified).toContain('a.md')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('first build: generates tasks, merges syllabus, seeds progress', async () => {
     const { root, courseDir, generator } = await setup()
     const builder = new CourseBuilder(courseDir, generator)

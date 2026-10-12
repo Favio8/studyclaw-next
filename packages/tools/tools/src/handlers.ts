@@ -5,11 +5,11 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { courseSourceRoot, isEightDotThreeSegment, isInplaceCourse, INPLACE_SOURCE_EXCLUDED_DIRS, resolveSourceRef, resolveStateFile } from './paths.ts'
-import { ToolRejected } from './result.ts'
-import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS } from './specs.ts'
+import { courseSourceRoot, isEightDotThreeSegment, INPLACE_SOURCE_EXCLUDED_DIRS, SOURCE_EXCLUDED_FILES, resolveSourceRef, resolveStateFile } from './paths.ts'
+import { ToolRejected, formatSourceLine } from './result.ts'
+import { MAX_FILE_BYTES, MAX_NOTE_CHARS, MAX_READ_LINES, MAX_TOOL_MESSAGE_CHARS, MAX_SOURCE_TEXT_CHARS } from './specs.ts'
 
 /** Per-course in-process lock. P1-6：旧实现返回的是"上一个等待者"的 promise，
  * 临界区从未真正互斥。现在返回值挂到"上一个持有者完成后才结算"的链上，
@@ -48,10 +48,20 @@ function holderPidFromLock(raw: string): number {
 
 /** 锁可否抢走：内容不可读/无 pid、或持有者进程已死。活着则不抢（互斥语义核心）。 */
 async function canStealCourseLock(lockPath: string): Promise<boolean> {
-  const raw = await readFile(lockPath, 'utf8').catch(() => null)
+  const raw = await readFile(lockPath, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
   if (raw === null) return true
   const pid = holderPidFromLock(raw)
-  return !(pid !== 0 && pid !== process.pid && isPidAlive(pid))
+  if (pid !== 0) return !isPidAlive(pid)
+  // wx creation precedes token publication. A fresh empty file may belong to
+  // a live writer; give initialization a grace period before crash recovery.
+  const info = await stat(lockPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+  return info === null || Date.now() - info.mtimeMs > 5_000
 }
 
 async function withCourseFileLock<T>(courseDir: string, fn: () => Promise<T>): Promise<T> {
@@ -112,7 +122,11 @@ async function withCourseFileLock<T>(courseDir: string, fn: () => Promise<T>): P
   }
 }
 
-export function withCourseLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export async function withCourseLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  key = await realpath(resolve(key)).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return resolve(key)
+    throw error
+  })
   const previous = courseLocks.get(key) ?? Promise.resolve()
   // run 只在之前的临界区完全结束后才开始执行（无论成败）；文件锁在临界区内
   // 再取，进程内调用者被链先行串行化，不会自相等待。
@@ -153,6 +167,8 @@ export interface ToolProviders {
  * avoids a dependency from the low-level tool registry back into chat-service.
  */
 export interface ToolActions {
+  /** Shared Host document extraction; paths have already passed source guards. */
+  readonly extractSourceText?: (path: string) => Promise<string>
   readonly getTaskPool: (ctx: ToolActionContext, args: Record<string, unknown>) => Promise<ToolHandlerResult>
   readonly createCard: (ctx: ToolActionContext, args: Record<string, unknown>) => Promise<ToolHandlerResult>
   readonly generateDynamicCard: (ctx: ToolActionContext, args: Record<string, unknown>) => Promise<ToolHandlerResult>
@@ -438,13 +454,15 @@ export async function handlerReadSource(ctx: ToolContext, args: Record<string, u
     throw new ToolRejected(`文件不存在: ${rel(await courseSourceRoot(ctx.courseDir), path)}`)
   }
   const suffix = path.toLowerCase().match(/\.[^.]*$/)?.[0]
-  if (suffix !== '.md' && suffix !== '.txt') {
+  const extracted = /\.(pdf|docx?|pptx?|png|jpe?g|webp|xlsx|html|htm)$/i.test(path) && ctx.actions?.extractSourceText !== undefined
+  if (suffix !== '.md' && suffix !== '.txt' && !extracted) {
     throw new ToolRejected(`暂不支持读取该文件类型: ${rel(await courseSourceRoot(ctx.courseDir), path)}`)
   }
   const size = (await stat(realPath)).size
-  if (size > MAX_FILE_BYTES) throw new ToolRejected(`文件过大（>${MAX_FILE_BYTES / 1024}KB），请用 search_sources 精确定位`)
+  if (!extracted && size > MAX_FILE_BYTES) throw new ToolRejected(`文件过大（>${MAX_FILE_BYTES / 1024}KB），请用 search_sources 精确定位`)
   const rootForRead = await courseSourceRoot(ctx.courseDir)
-  const text = await readFile(realPath, 'utf8').catch(() => { throw new ToolRejected(`课程文件不是 UTF-8 文本: ${rel(rootForRead, path)}`) })
+  const text = extracted ? await ctx.actions!.extractSourceText!(realPath)
+    : await readFile(realPath, 'utf8').catch(() => { throw new ToolRejected(`课程文件不是 UTF-8 文本: ${rel(rootForRead, path)}`) })
   const lines = text.split(/\r?\n/)
   const total = lines.length
   const start = Math.max(1, Number(args['startLine'] ?? 1))
@@ -452,8 +470,23 @@ export async function handlerReadSource(ctx: ToolContext, args: Record<string, u
   const maxLines = Number(args['maxLines'] ?? MAX_READ_LINES)
   end = Math.min(total, Math.max(start, end))
   const kept = lines.slice(start - 1, end)
-  const truncated = kept.length > maxLines
-  const shown = kept.slice(0, maxLines)
+  const shown: Array<{ n: number; text: string }> = []
+  let usedChars = 0
+  let partialLine = false
+  for (const line of kept.slice(0, maxLines)) {
+    const n = start + shown.length
+    const cost = formatSourceLine(n, line).length + 1
+    if (usedChars + cost > MAX_SOURCE_TEXT_CHARS) {
+      if (shown.length === 0) {
+        shown.push({ n, text: line.slice(0, MAX_SOURCE_TEXT_CHARS - String(n).length - 3) })
+        partialLine = true
+      }
+      break
+    }
+    shown.push({ n, text: line })
+    usedChars += cost
+  }
+  const truncated = partialLine || shown.length < kept.length
   const root = await courseSourceRoot(ctx.courseDir)
   const relPath = rel(root, path)
   const last = shown.length > 0 ? start + shown.length - 1 : start - 1
@@ -463,9 +496,11 @@ export async function handlerReadSource(ctx: ToolContext, args: Record<string, u
     startLine: start,
     endLine: last,
     truncated,
-    lines: shown.map((line, index) => ({ n: start + index, text: line })),
+    partialLine,
+    nextLine: !partialLine && shown.length > 0 && last < total ? last + 1 : null,
+    lines: shown,
   }
-  return [`已读取 ${relPath} ${start}-${last} 行（共 ${total} 行）${truncated ? '（已截断）' : ''}`, data]
+  return [`已读取 ${relPath} ${start}-${last} 行（共 ${total} 行）${partialLine ? '（该行过长，仅展示开头；请搜索关键词定位所需内容）' : truncated ? `（本段结束，下次从第 ${last + 1} 行继续）` : ''}`, data]
 }
 
 async function* iterSourceFiles(root: string, signal?: AbortSignal): AsyncGenerator<string> {
@@ -484,10 +519,12 @@ async function* iterSourceFiles(root: string, signal?: AbortSignal): AsyncGenera
       if (entry.name.startsWith('.')) continue
       if (entry.isSymbolicLink()) continue
       if (entry.isDirectory()) {
+        const name = process.platform === 'win32' ? entry.name.toLowerCase() : entry.name
+        if (INPLACE_SOURCE_EXCLUDED_DIRS.has(name)) continue
         stack.push(join(current, entry.name))
         continue
       }
-      if (entry.isFile()) yield join(current, entry.name)
+      if (entry.isFile() && !(current === root && SOURCE_EXCLUDED_FILES.has(entry.name))) yield join(current, entry.name)
     }
   }
 }
@@ -503,22 +540,20 @@ export async function handlerSearchSources(ctx: ToolContext, args: Record<string
   if (!(await stat(root).catch(() => null))?.isDirectory()) {
     return ['0 处匹配', { matches: [], filesScanned: 0, totalMatches: 0 }]
   }
-  const inplace = await isInplaceCourse(ctx.courseDir)
   const matches: Array<{ file: string; line: number; text: string }> = []
   let filesScanned = 0
   let skippedOversize = 0
   // 二进制/富文档无法按行 utf8 grep，静默读会产生乱码匹配；显式跳过并上报。
-  const BINARY_SOURCE_RE = /\.(pdf|docx?|pptx?|xlsx?|rtf|odt)$/i
+  const BINARY_SOURCE_RE = /\.(pdf|docx?|pptx?|png|jpe?g|webp|xlsx?|rtf|odt)$/i
   for await (const path of iterSourceFiles(root, ctx.signal)) {
     // 达到上限后必须整树退出：break 只能跳出当前文件的行循环。
     if (ctx.signal?.aborted || matches.length >= maxResults) break
-    const parts = relative(root, path).split(/[\\/]/)
-    if (inplace && parts.some(part => INPLACE_SOURCE_EXCLUDED_DIRS.has(part))) continue
-    if ((await stat(path)).size > MAX_FILE_BYTES) { skippedOversize += 1; continue }
-    if (BINARY_SOURCE_RE.test(path)) { skippedOversize += 1; continue }
+    const extracted = /\.(pdf|docx?|pptx?|png|jpe?g|webp|xlsx|html|htm)$/i.test(path) && ctx.actions?.extractSourceText !== undefined
+    if (!extracted && (await stat(path)).size > MAX_FILE_BYTES) { skippedOversize += 1; continue }
+    if (BINARY_SOURCE_RE.test(path) && !extracted) { skippedOversize += 1; continue }
     let text: string
     try {
-      text = await readFile(path, 'utf8')
+      text = extracted ? await ctx.actions!.extractSourceText!(path) : await readFile(path, 'utf8')
     } catch {
       continue
     }
@@ -687,7 +722,7 @@ export async function handlerGetMemory(ctx: ToolContext, _args: Record<string, u
 
 async function runInjectedAction(
   ctx: ToolContext,
-  name: keyof ToolActions,
+  name: Exclude<keyof ToolActions, 'extractSourceText'>,
   args: Record<string, unknown>,
 ): Promise<ToolHandlerResult> {
   const action = ctx.actions?.[name]
@@ -724,6 +759,34 @@ export function handlerSyncSources(ctx: ToolContext, args: Record<string, unknow
   return runInjectedAction(ctx, 'syncSources', args)
 }
 
+/** Chat and reading append to the same notes file under the same course lock. */
+export async function appendCourseNotes(courseDir: string, content: string): Promise<void> {
+  await withCourseLock(courseDir, async () => {
+    const inspect = (path: string) => lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    const stateDir = join(courseDir, '.studyclaw')
+    const v2 = join(stateDir, 'notes.md')
+    const legacy = join(courseDir, 'notes.md')
+    // An initialized v2 course must use v2 even for its very first note.
+    // Unmigrated legacy courses retain their existing root-level notes/layout.
+    const useV2 = await inspect(v2) !== null || await inspect(join(stateDir, '.layout-v2')) !== null
+      || await inspect(join(stateDir, 'syllabus.json')) !== null
+      || (await inspect(legacy) === null && await inspect(join(courseDir, 'syllabus.json')) === null)
+    const path = useV2 ? v2 : legacy
+    const existing = await inspect(path)
+    let old = ''
+    if (existing !== null) {
+      if (existing.isSymbolicLink()) throw new Error('学生笔记路径不允许是符号链接（防越界读取/污染）')
+      if (!existing.isFile()) throw new Error('学生笔记路径被占用（非文件）: notes.md')
+      old = await readFile(path, 'utf8')
+      if (old !== '' && !old.endsWith('\n')) old += '\n'
+    }
+    await writeFile(path, old + content, 'utf8')
+  })
+}
+
 /** `write_note`: append one line to notes.md (append-only, per-course lock). */
 export async function handlerWriteNote(ctx: ToolContext, args: Record<string, unknown>): Promise<[string, Record<string, unknown>]> {
   const content = String(args['content'] ?? '').trim()
@@ -736,18 +799,7 @@ export async function handlerWriteNote(ctx: ToolContext, args: Record<string, un
   if (chapterId !== undefined && !validRefId(chapterId)) throw new ToolRejected('chapterId 只能包含字母/数字/下划线/连字符（禁止换行注入）')
   const prefix = conceptId === undefined ? '' : `[${conceptId}] `
   const line = `- ${noteLineTs()} ${prefix}${normalized}\n`
-  const path = join(ctx.courseDir, 'notes.md')
-  await withCourseLock(ctx.courseDir, async () => {
-    let old = ''
-    const existing = await stat(path).catch(() => null)
-    if (existing !== null) {
-      if (existing.isSymbolicLink()) throw new Error('学生笔记路径不允许是符号链接（防越界读取/污染）')
-      if (!existing.isFile()) throw new Error(`学生笔记路径被占用（非文件）: notes.md`)
-      old = await readFile(path, 'utf8')
-      if (old !== '' && !old.endsWith('\n')) old += '\n'
-    }
-    await writeFile(path, old + line, 'utf8')
-  })
+  await appendCourseNotes(ctx.courseDir, line)
   return ['已记录', { file: 'notes.md', appended: normalized.length, lines: 1 }]
 }
 

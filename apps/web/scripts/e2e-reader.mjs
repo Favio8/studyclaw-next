@@ -1,240 +1,47 @@
-/**
- * PDF 辅助阅读端到端验收（真实 Edge + 静态导出产物，由 Host 同源托管）。
- *
- * 这是 jsdom 测不到的另一半：pdf.js 画布渲染、文本层命中、真实鼠标划词、
- * 高亮覆盖层的指针事件语义、窄容器下标注浮层的开合。
- *
- * 前置：
- *   1. `pnpm build:web` 产出 apps/web/out；
- *   2. `pnpm serve --port 8080 --insecure-no-token` 启动 Host 并打开一个
- *      含 PDF 资料的课程工作区（阅读树里要有 sources/lecture.pdf）。
- *   3. 本机装有 Edge（STUDYCLAW_EDGE 可覆盖路径）。
- *
- * 用法：node scripts/e2e-reader.mjs   （STUDYCLAW_BASE / OUT_DIR 可覆盖）
+/** Real PDF/Office reader acceptance. Run from repository root after build:web + serve.
+ * The selected Host workspace supplies the source (STUDYCLAW_SOURCE can select one).
+ * Uses the page's injected token; renderer, mouse selection, APIs and storage are real.
+ * Outputs stay in ignored verify_tmp. Test highlight is removed on completion.
  */
-import { chromium } from "playwright-core";
-import { mkdir } from "node:fs/promises";
-
-const EDGE = process.env.STUDYCLAW_EDGE ?? "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
-const BASE = process.env.STUDYCLAW_BASE ?? "http://127.0.0.1:8080";
-const OUT = process.env.OUT_DIR ?? "C:/Users/19949/AppData/Local/Temp/opencode/e2e";
-
-await mkdir(OUT, { recursive: true });
-
-const results = [];
-const step = (name, ok, detail = "") => {
-  results.push({ name, ok, detail });
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
-};
-
-const browser = await chromium.launch({ executablePath: EDGE, headless: true });
-const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
-const page = await context.newPage();
-
-const consoleErrors = [];
-page.on("console", (msg) => {
-  if (msg.type() === "error") consoleErrors.push(msg.text());
-});
-page.on("pageerror", (err) => consoleErrors.push(`pageerror: ${err.message}`));
-
-try {
-  await page.goto(BASE, { waitUntil: "networkidle" });
-  await page.waitForTimeout(1500);
-  await page.screenshot({ path: `${OUT}/01-console.png` });
-
-  // 进入「阅读」学习活动。
-  const readingTab = page.getByRole("button", { name: /阅读/ }).first();
-  if ((await readingTab.count()) === 0) {
-    step("找到阅读活动入口", false, "控制台未渲染阅读入口");
-  } else {
-    await readingTab.click();
-    await page.waitForTimeout(1200);
-    step("切到阅读活动", true);
-  }
-
-  // 资料树：点击 lecture.pdf（自动打开首份 PDF 时可能已打开）。
-  const pdfItem = page.locator('button[title="sources/lecture.pdf"]');
-  if ((await pdfItem.count()) > 0) {
-    await pdfItem.first().click();
-    await page.waitForTimeout(2500);
-  }
-  await page.screenshot({ path: `${OUT}/02-reader-pdf.png` });
-
-  const pageEl = page.getByTestId("pdf-page");
-  step("PDF 页面元素渲染", (await pageEl.count()) > 0);
-
-  const canvasBox = await page.locator("canvas").first().boundingBox();
-  step(
-    "canvas 有实际尺寸",
-    canvasBox !== null && canvasBox.width > 50 && canvasBox.height > 50,
-    canvasBox === null ? "no box" : `${Math.round(canvasBox.width)}x${Math.round(canvasBox.height)}`,
-  );
-
-  const textLayer = page.getByTestId("pdf-text-layer");
-  const spanCount = await textLayer.locator("span").count();
-  step("文本层有 span（可选中）", spanCount > 0, `${spanCount} spans`);
-
-  // 文本层字号/定位换算变量是否真的落到 CSS 上。
-  const scaleInfo = await pageEl.evaluate((el) => {
-    const layer = el.querySelector(".textLayer");
-    const span = layer?.querySelector("span");
-    const cs = span === null || span === undefined ? null : getComputedStyle(span);
-    return {
-      totalScaleFactor: getComputedStyle(el).getPropertyValue("--total-scale-factor").trim(),
-      spanFontSize: cs === null ? null : cs.fontSize,
-      spanLeft: cs === null ? null : cs.left,
-      spanTop: cs === null ? null : cs.top,
-      spanColor: cs === null ? null : cs.color,
-      layerPosition: layer === null ? null : getComputedStyle(layer).position,
-    };
-  });
-  console.log("  textLayer:", JSON.stringify(scaleInfo));
-  step(
-    "文本层按 --total-scale-factor 换算",
-    scaleInfo.totalScaleFactor !== "" && scaleInfo.spanFontSize !== null,
-    `factor=${scaleInfo.totalScaleFactor} fontSize=${scaleInfo.spanFontSize}`,
-  );
-  step("文本层为绝对定位覆盖层", scaleInfo.layerPosition === "absolute", String(scaleInfo.layerPosition));
-
-  // 真实划词：把鼠标拖过第一段文字。
-  const target = textLayer.locator("span").filter({ hasText: /\S/ }).first();
-  const box = await target.boundingBox();
-  if (box === null) {
-    step("取得可划词的文本 span", false);
-  } else {
-    await page.mouse.move(box.x + 2, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(box.x + Math.min(box.width - 2, 120), box.y + box.height / 2, { steps: 12 });
-    await page.mouse.up();
-    await page.waitForTimeout(600);
-    await page.screenshot({ path: `${OUT}/03-selection.png` });
-    const selected = await page.evaluate(() => window.getSelection()?.toString() ?? "");
-    step("浏览器原生选区非空", selected.trim().length > 0, JSON.stringify(selected.slice(0, 40)));
-  }
-
-  const popover = page.getByTestId("selection-popover");
-  step("划词浮层出现", (await popover.count()) > 0);
-
-  if ((await popover.count()) > 0) {
-    await page.getByRole("button", { name: "高亮（黄）" }).click();
-    await page.waitForTimeout(1200);
-    await page.screenshot({ path: `${OUT}/04-highlighted.png` });
-    const railText = await page.locator("text=/标注 \\d+/").first().textContent().catch(() => null);
-    step("标注栏计数 +1", railText !== null && /标注 [1-9]/.test(railText), String(railText));
-    step("浮层已收起", (await popover.count()) === 0);
-
-    // 命中测试：高亮块坐标处的顶层元素必须属于 textLayer（可被选中的那层）。
-    // 这是「已高亮原文仍可划词」的前提——高亮块曾是可点 button 且 DOM 序更靠后。
-    step(
-      "高亮块不吃指针事件（顶层命中为文本层）",
-      await page.evaluate(() => {
-        const m = document.querySelector('[data-testid="pdf-highlight-layer"] > div');
-        if (m === null) return false;
-        const r = m.getBoundingClientRect();
-        const el = document.elementFromPoint(r.x + 2, r.y + r.height / 2);
-        return el !== null && el.closest(".textLayer") !== null;
-      }),
-    );
-
-    // 真实用户路径：在仍处于选中状态的原文上再次划词。
-    // 先点空白处清掉旧选区（等价于用户换手重选），再跨高亮块拖拽。
-    const markRect = await page.evaluate(() => {
-      const m = document.querySelector('[data-testid="pdf-highlight-layer"] > div');
-      if (m === null) return null;
-      const r = m.getBoundingClientRect();
-      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
-    });
-    if (markRect === null || markRect.w < 10) {
-      step("找到已渲染的高亮块", false, JSON.stringify(markRect));
-    } else {
-      await page.mouse.click(950, 600); // 取消旧选区，避免浏览器启动原生 HTML5 drag
-      await page.waitForTimeout(300);
-      await page.mouse.move(markRect.x + 1, markRect.y + markRect.h / 2);
-      await page.mouse.down();
-      await page.mouse.move(markRect.x + Math.min(markRect.w - 1, 80), markRect.y + markRect.h / 2, { steps: 10 });
-      await page.mouse.up();
-      await page.waitForTimeout(600);
-      const reselect = await page.evaluate(() => window.getSelection()?.toString() ?? "");
-      step(
-        "已高亮的原文仍可再次划词",
-        reselect.trim().length > 0 && (await page.getByTestId("selection-popover").count()) > 0,
-        JSON.stringify(reselect.slice(0, 30)),
-      );
-      await page.screenshot({ path: `${OUT}/04b-reselect.png` });
-    }
-  }
-
-  // 翻页。
-  const nextBtn = page.getByRole("button", { name: "下一页" });
-  const before = await page.locator("text=/\\d+ · \\d+%/").first().textContent().catch(() => null);
-  if ((await nextBtn.count()) > 0 && (await nextBtn.isEnabled())) {
-    await nextBtn.click();
-    await page.waitForTimeout(1500);
-    const after = await page.locator("text=/\\d+ · \\d+%/").first().textContent().catch(() => null);
-    step("翻页更新页码", before !== after, `${before} -> ${after}`);
-    await page.screenshot({ path: `${OUT}/05-page2.png` });
-  }
-
-  // 窄容器：标注栏退场为浮层，且必须能再关掉。
-  await page.setViewportSize({ width: 1000, height: 900 });
-  await page.waitForTimeout(1500);
-  const railToggle = page.getByRole("button", { name: "标注列表" });
-  if ((await railToggle.count()) > 0) {
-    await railToggle.click();
-    await page.waitForTimeout(700);
-    await page.screenshot({ path: `${OUT}/08-narrow-rail.png` });
-    const railVisible = await page.locator("text=/标注 \\d+/").first().isVisible().catch(() => false);
-    step("窄容器标注浮层可打开", railVisible);
-    // 回归：浮层曾盖住切换钮导致无法关闭。
-    await railToggle.click({ timeout: 5000 });
-    await page.waitForTimeout(500);
-    step(
-      "窄容器标注浮层可关闭",
-      (await railToggle.getAttribute("aria-expanded")) === "false",
-    );
-    await page.screenshot({ path: `${OUT}/09-narrow-rail-closed.png` });
-  } else {
-    step("窄容器出现标注浮层切换钮", false, "未找到「标注列表」按钮");
-  }
-
-  await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.waitForTimeout(1200);
-  step(
-    "回到宽容器后标注栏恢复常驻",
-    (await page.getByRole("button", { name: "标注列表" }).count()) === 0
-      && (await page.locator("text=/标注 \\d+/").first().isVisible().catch(() => false)),
-  );
-
-  // 缩放自适应：窄化视口后 canvas 应按新宽度重排。
-  const wideBox = await page.locator("canvas").first().boundingBox();
-  await page.setViewportSize({ width: 1000, height: 900 });
-  await page.waitForTimeout(1500);
-  const narrowBox = await page.locator("canvas").first().boundingBox();
-  step(
-    "视口收窄后画布重排",
-    narrowBox !== null && wideBox !== null && narrowBox.width < wideBox.width,
-    `${Math.round(wideBox?.width ?? 0)} -> ${Math.round(narrowBox?.width ?? 0)}`,
-  );
-  await page.screenshot({ path: `${OUT}/06-narrow.png` });
-  await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.waitForTimeout(1500);
-
-  // md 资料：走 MarkdownReader，选区链路一致。
-  await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.waitForTimeout(500);
-  const mdItem = page.locator('button[title="sources/notes.md"]');
-  if ((await mdItem.count()) > 0) {
-    await mdItem.first().click();
-    await page.waitForTimeout(1500);
-    await page.screenshot({ path: `${OUT}/07-markdown.png` });
-    step("md 资料走 MarkdownReader", (await page.locator("text=阅读笔记示例").count()) > 0);
-  }
-
-  step("无未捕获的控制台错误", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
-} finally {
-  await browser.close();
-}
-
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} passed`);
-if (failed.length > 0) process.exitCode = 1;
+import { chromium } from 'playwright-core';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import assert from 'node:assert/strict';
+const base=process.env.STUDYCLAW_BASE ?? 'http://127.0.0.1:8080';
+const out=process.env.OUT_DIR ?? fileURLToPath(new URL('../../../verify_tmp/e2e-reader/',import.meta.url));
+await mkdir(out,{recursive:true});
+const browser=await chromium.launch({executablePath:process.env.STUDYCLAW_EDGE ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true});
+const page=await browser.newPage({viewport:{width:1280,height:900}}),errors=[],checks=[];
+page.setDefaultTimeout(30000);page.on('pageerror',error=>errors.push(error.message));
+let token,source,highlightId,oldProgress;
+async function rpc(method,payload){const response=await fetch(`${base}/api/${method}`,{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify({payload})});const result=await response.json();assert(result.ok,JSON.stringify(result.error));return result.result;}
+const pass=name=>{checks.push(name);console.log('PASS '+name);};
+try{
+ await page.goto(base,{waitUntil:'domcontentloaded'});
+ await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent.includes('新对话')&&!button.disabled));
+ token=await page.evaluate(()=>window.__STUDYCLAW__?.token);
+ const workspaces=await rpc('workspaces.list');assert(workspaces.current,'Open a test learning workspace first');
+ const courseId=workspaces.current.split(/[\\/]/).pop(),files=(await rpc('courses.files',{courseId})).files;
+ source=process.env.STUDYCLAW_SOURCE ?? files.find(file=>/\.pdf$/i.test(file.relative))?.relative ?? files.find(file=>/\.(docx?|pptx?)$/i.test(file.relative))?.relative;
+ assert(source,'A real PDF or Office source is required');
+ oldProgress=(await rpc('reading.load',{source})).progress;
+ await rpc('reading.progress.save',{source,page:1,percent:0});
+ await page.getByRole('button',{name:'阅读',exact:true}).click();
+ await page.getByRole('button',{name:'资料列表',exact:true}).click();await page.locator(`button[title=${JSON.stringify(source)}]`).click();
+ await page.getByRole('button',{name:'资料列表',exact:true}).click();
+ const firstPage=page.locator('[data-pdf-page="1"]');
+ await page.waitForFunction(()=>document.querySelector('[data-pdf-page="1"]')?.querySelectorAll('.textLayer span').length>20 && Boolean(document.querySelector('[data-pdf-page="1"]')?.dataset.renderedScale) && document.querySelector('[data-pdf-page="1"]').getBoundingClientRect().width>1000);
+ assert((await firstPage.boundingBox()).width>1000);pass('Reading space is dominant at 1280px');
+ await page.getByRole('button',{name:'标注列表',exact:true}).click();const bar=await page.getByTestId('reader-toolbar').boundingBox(),drawer=await page.getByTestId('annotation-drawer').boundingBox();assert(drawer.y>=bar.y+bar.height-1);await page.getByRole('button',{name:'标注列表',exact:true}).click();pass('Annotation drawer opens and closes without covering controls');
+ await page.getByRole('combobox',{name:'缩放模式'}).selectOption('1');await page.waitForFunction(()=>document.querySelector('[data-pdf-page="1"]')?.dataset.renderedScale==='1');
+ const box=await page.evaluate(()=>{const span=[...document.querySelectorAll('.textLayer span')].find(element=>element.textContent.length>30);assertSpan(span);function assertSpan(value){if(!value)throw Error('No actual selectable PDF text');}const rect=span.getBoundingClientRect();return {x:rect.x,y:rect.y,width:rect.width,height:rect.height};});
+ await page.mouse.move(box.x+2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width-2,box.y+box.height/2,{steps:12});await page.mouse.up();await page.getByTestId('selection-popover').locator('button').first().click();
+ const record=(await rpc('reading.highlights.list',{source})).highlights.at(-1);highlightId=record.id;
+ await page.getByRole('combobox',{name:'缩放模式'}).selectOption('2');await page.waitForFunction(()=>document.querySelector('[data-pdf-page="1"]')?.dataset.renderedScale==='2');
+ const pageBox=await firstPage.boundingBox(),mark=await firstPage.locator('[data-testid=pdf-highlight-layer] div').last().boundingBox(),rect=record.rects.at(-1);
+ assert(Math.abs(mark.x-pageBox.x-rect.x*pageBox.width)<2);assert(Math.abs(mark.y-pageBox.y-rect.y*pageBox.height)<2);pass('Real selection is persisted and stays aligned at 200%');
+ await page.getByTestId('reader-scroller').click({position:{x:4,y:4}});await page.keyboard.press('f');await page.getByRole('button',{name:'退出专注阅读',exact:true}).waitFor();await page.keyboard.press('Escape');await page.getByRole('button',{name:'专注阅读',exact:true}).waitFor();pass('Focus keyboard shortcuts work');
+ assert.equal(errors.length,0);await page.screenshot({path:join(out,'reader.png')});await writeFile(join(out,'report.json'),JSON.stringify({passed:true,checks,errors},null,2));
+}catch(error){await page.screenshot({path:join(out,'failure.png')}).catch(()=>{});await writeFile(join(out,'report.json'),JSON.stringify({passed:false,checks,error:String(error),errors},null,2));console.error(String(error));process.exitCode=1;}
+finally{if(highlightId)await rpc('reading.highlights.remove',{source,id:highlightId});if(oldProgress)await rpc('reading.progress.save',{source,page:oldProgress.page,percent:oldProgress.percent});await browser.close();}

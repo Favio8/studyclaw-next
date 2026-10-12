@@ -13,7 +13,7 @@ import { api } from "@/src/lib/api";
 import { readingSelectionChanged } from "@/src/lib/readingFlow";
 import type { ReaderSelection } from "@/src/store/useAppStore";
 
-export default function MarkdownReader({ source }: { source: string }) {
+export default function MarkdownReader({ source, zoom = 1 }: { source: string; zoom?: number }) {
   const [text, setText] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -72,7 +72,7 @@ export default function MarkdownReader({ source }: { source: string }) {
 
   return (
     <div ref={bodyRef} onMouseUp={captureSelection} className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-      <MarkdownView content={text} />
+      <div style={{ zoom }}><MarkdownView content={text} /></div>
     </div>
   );
 }

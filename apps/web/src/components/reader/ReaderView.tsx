@@ -7,14 +7,20 @@
  * 扫描件 OCR 文本层与 docx/xlsx/html 解析视图在 P2.5（依赖 MinerU）。
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, StickyNote, X } from "lucide-react";
+import ConceptEditor from "@/src/components/panel/ConceptEditor";
+import MarkdownView from "@/src/components/chat/MarkdownView";
+import { useCallback, useEffect, useState } from "react";
+import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, StickyNote, X, FolderOpen, Maximize, Minimize, Plus, Minus } from "lucide-react";
+import { isReaderEditable, stepZoom, type ReaderZoom } from "@/src/lib/readerZoom";
+import { isModalOpen } from "@/src/lib/modalStack";
 import MaterialTree from "@/src/components/reader/MaterialTree";
+import ImageCanvas from "@/src/components/reader/ImageCanvas";
 import PdfCanvas from "@/src/components/reader/PdfCanvas";
 import ParsedView from "@/src/components/reader/ParsedView";
 import MarkdownReader from "@/src/components/reader/MarkdownReader";
 import AnnotationRail from "@/src/components/reader/AnnotationRail";
 import SelectionPopover from "@/src/components/reader/SelectionPopover";
+import DocumentOutline from "@/src/components/reader/DocumentOutline";
 import { useAppStore } from "@/src/store/useAppStore";
 import {
   readingCommitCard,
@@ -109,9 +115,9 @@ function ActionCard() {
       {action.error !== null ? (
         <p role="alert" className="mt-1 text-[12px] leading-5 text-accent-fail">{action.error}</p>
       ) : (
-        <p className="mt-1 max-h-[240px] overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-text-primary">
-          {action.text === "" && action.streaming ? "正在生成…" : action.text}
-        </p>
+        <div className="mt-1 max-h-[min(420px,50vh)] overflow-y-auto text-text-primary">
+          {action.text === "" && action.streaming ? <p className="text-[13px] leading-6">正在生成…</p> : <MarkdownView content={action.text} compact modelOutput streaming={action.streaming} />}
+        </div>
       )}
       {!action.streaming && action.text !== "" ? (
         <button
@@ -127,49 +133,37 @@ function ActionCard() {
   );
 }
 
-export default function ReaderView() {
+export default function ReaderView({ focus = false, onFocusChange }: { focus?: boolean; onFocusChange?: (value: boolean) => void }) {
   const reader = useAppStore((s) => s.reader);
   const courseId = useAppStore((s) => s.activeCourseId);
   const [pageCount, setPageCount] = useState(0);
-  // 三区容器宽度：<760px 时标注侧栏从常驻列改为切换浮层——三栏全开会把
-  // 阅读器挤到 ~180px，自适应缩放也无济于事（真机实测 1280 视口即触发）。
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState(false);
+  const [textView, setTextView] = useState(false);
+  const [textSource, setTextSource] = useState(reader.source);
+  if (textSource !== reader.source) { setTextSource(reader.source); setTextView(false); setPageCount(0); }
   const [railOpen, setRailOpen] = useState(false);
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (el === null || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? 0;
-      const next = width > 0 && width < 760;
-      setNarrow((current) => (current === next ? current : next));
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-  // 窄→宽切换时收起浮层态标注栏（常驻列已回归）。渲染期调态，不用 effect。
-  if (!narrow && railOpen) setRailOpen(false);
-  // 扫描件（PDF 零文本层）→ 切解析视图（MinerU OCR 产物）。
-  // 换资料时在渲染期重置判定（React 官方 prop 变化调态模式，不用 effect）。
-  const [scanned, setScanned] = useState(false);
-  const [scannedFor, setScannedFor] = useState(reader.source);
-  if (scannedFor !== reader.source) {
-    setScannedFor(reader.source);
-    setScanned(false);
-  }
-  const onScanned = useCallback((value: boolean) => setScanned(value), []);
-
+  const [treeOpen, setTreeOpen] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [zoom, setZoom] = useState<ReaderZoom>("width");
+  const [scale, setScale] = useState(1);
+  const displayScale = !textView && (reader.view === "pdf" || reader.view === "image") ? scale : typeof zoom === "number" ? zoom : 1;
+  const textZoom = typeof zoom === "number" ? zoom : 1;
+  const changeZoom = useCallback((direction: number) => setZoom(stepZoom(displayScale, direction)), [displayScale]);
   // 进入阅读活动时默认打开第一份 PDF（无则留空态由用户点选）。
   useEffect(() => {
+    let alive = true;
+    const context = useAppStore.getState();
     if (reader.source === null && courseId !== null) {
       void (async () => {
         const { api } = await import("@/src/lib/api");
         const payload = await api.courseFiles(courseId).catch(() => null);
+        const now = useAppStore.getState();
+        if (!alive || now.workspacePath !== context.workspacePath || now.courseGeneration !== context.courseGeneration || now.reader.source !== null) return;
         const firstPdf = (payload?.files ?? []).find((file) => String(file.relative).toLowerCase().endsWith(".pdf"));
         const first = firstPdf ?? (payload?.files ?? [])[0];
         if (first !== undefined) void readingOpen(String(first.relative));
       })();
     }
+    return () => { alive = false; };
     // 仅在挂载时自动打开一次；之后由用户点选驱动。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [courseId]);
@@ -186,6 +180,24 @@ export default function ReaderView() {
     useAppStore.getState().setReader({ progress: { ...useAppStore.getState().reader.progress, page } });
   }, []);
 
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isReaderEditable(event.target) || isModalOpen()) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if ((["PageDown", "PageUp", "ArrowRight", "ArrowLeft"].includes(event.key)) && (reader.view !== "pdf" || textView)) return;
+      if (["+", "=", "-", "f", "F", "Escape", "PageDown", "PageUp", "ArrowRight", "ArrowLeft"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "+" || event.key === "=") changeZoom(1);
+        else if (event.key === "-") changeZoom(-1);
+        else if (event.key === "f" || event.key === "F") onFocusChange?.(!focus);
+        else if (event.key === "Escape") { onFocusChange?.(false); if (!focus) { setRailOpen(false); setTreeOpen(false); } }
+        else gotoPage(reader.progress.page + (["PageDown", "ArrowRight"].includes(event.key) ? 1 : -1));
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [changeZoom, focus, onFocusChange, gotoPage, reader.progress.page, reader.view, textView]);
+
   if (courseId === null) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
@@ -200,11 +212,14 @@ export default function ReaderView() {
   }
 
   return (
-    <div ref={wrapRef} className="relative flex min-h-0 flex-1 overflow-hidden">
-      <MaterialTree />
+    <div className="relative flex min-h-0 flex-1 overflow-hidden" data-testid="reader-view">
+      {treeOpen && !focus ? <MaterialTree /> : null}
+      {outlineOpen && !focus && reader.source ? <DocumentOutline key={reader.source} source={reader.source} onClose={() => setOutlineOpen(false)} /> : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* 阅读器工具条：页码 + 进度 */}
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border-line px-3">
+        <div data-testid="reader-toolbar" className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-border-line px-3">
+          <button type="button" aria-label="资料列表" aria-expanded={treeOpen && !focus} onClick={() => { onFocusChange?.(false); setTreeOpen(!treeOpen); }} className="p-1 text-text-muted"><FolderOpen size={16} /></button>
+          <button type="button" aria-label="原文目录" aria-expanded={outlineOpen && !focus} disabled={!reader.source} onClick={() => { onFocusChange?.(false); setTreeOpen(false); setOutlineOpen(!outlineOpen); }} className="rounded px-2 py-1 text-xs text-text-muted hover:bg-bg-card">原文目录</button>
           <span className="min-w-0 flex-1 truncate text-[12px] text-text-muted" title={reader.source ?? ""}>
             {reader.source ?? "未选择资料"}
           </span>
@@ -235,8 +250,19 @@ export default function ReaderView() {
               </button>
             </div>
           ) : null}
-          {narrow ? (
-            <button
+          <button type="button" aria-label="切换正文视图" aria-pressed={textView} onClick={() => setTextView(!textView)} className="rounded px-2 py-1 text-xs text-text-muted">{textView ? "原文" : "正文 / OCR"}</button>
+          {reader.source ? <ConceptEditor source={reader.source} /> : null}
+          <div className="flex items-center gap-1" aria-label="阅读缩放">
+            <button type="button" aria-label="缩小" title="缩小（-）" onClick={() => changeZoom(-1)} className="p-1"><Minus size={15} /></button>
+            <select aria-label="缩放模式" value={zoom} onChange={(event) => { const value = event.target.value; setZoom(value === "width" || value === "page" ? value : Number(value)); }} className="max-w-32 rounded border border-border-line bg-bg-panel px-1 py-1 text-xs">
+              <option value="width">适合宽度 · {Math.round(displayScale * 100)}%</option>
+              <option value="page">适合整页</option>
+              {[0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, ...(typeof zoom === "number" && ![0.5,0.75,1,1.25,1.5,2,3,4].includes(zoom) ? [zoom] : [])].sort((a,b)=>a-b).map((value) => <option key={value} value={value}>{Math.round(value * 100)}%</option>)}
+            </select>
+            <button type="button" aria-label="放大" title="放大（+）" onClick={() => changeZoom(1)} className="p-1"><Plus size={15} /></button>
+            <button type="button" aria-label={focus ? "退出专注阅读" : "专注阅读"} title="专注阅读（F）；退出（Esc）" onClick={() => onFocusChange?.(!focus)} className="p-1">{focus ? <Minimize size={15} /> : <Maximize size={15} />}</button>
+          </div>
+          {(<button
               type="button"
               aria-label="标注列表"
               aria-expanded={railOpen}
@@ -247,7 +273,7 @@ export default function ReaderView() {
               <StickyNote size={13} strokeWidth={1.8} aria-hidden />
               标注 {reader.highlights.length}
             </button>
-          ) : null}
+          )}
         </div>
 
         {reader.recovered ? (
@@ -261,38 +287,36 @@ export default function ReaderView() {
           </p>
         ) : null}
 
+        <div data-testid="reader-content" className="relative flex min-h-0 flex-1 flex-col">
         {reader.source === null ? (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
             <BookOpen size={22} strokeWidth={1.8} className="text-text-faint" aria-hidden />
             <p className="text-[13px] text-text-muted">从左侧资料树选一份文件开始精读。</p>
           </div>
-        ) : reader.view === "pdf" && !scanned ? (
+        ) : textView ? (
+          <ParsedView source={reader.source} zoom={textZoom} />
+        ) : reader.view === "image" ? (
+          <ImageCanvas key={reader.source} source={reader.source} zoom={zoom} onScale={setScale} onZoom={setZoom} />
+        ) : reader.view === "pdf" ? (
           <PdfCanvas
             source={reader.source}
             page={reader.progress.page}
             highlights={reader.highlights}
             onPageCount={setPageCount}
             onPageChange={gotoPage}
-            onScanned={onScanned}
+            zoom={zoom}
+            onScale={setScale}
+            onZoom={setZoom}
           />
         ) : reader.view === "markdown" ? (
-          <MarkdownReader source={reader.source} />
+          <MarkdownReader source={reader.source} zoom={textZoom} />
         ) : (
           // 扫描件 PDF 与 docx/xlsx/html 等：解析视图（MinerU 产物）。
-          <ParsedView source={reader.source} />
+          <ParsedView source={reader.source} zoom={textZoom} />
         )}
-      </div>
-      {/* 宽容器：标注栏常驻；窄容器：退场为切换浮层（工具条「标注」钮），
-          给阅读器让出宽度——自适应缩放需要 ≥300px 才有可读性。
-          浮层必须从工具条下方起（top-9，对齐工具条高度），不能 inset-y-0：
-          否则它盖住工具条上那个「标注」切换钮，按钮被自己的浮层拦截，
-          打开后无法关闭（真机实测：Playwright 点击被 overlay subtree 挡下）。 */}
-      {!narrow ? <AnnotationRail onLocate={locate} /> : null}
-      {narrow && railOpen ? (
-        <div className="absolute right-0 bottom-0 top-9 z-20 shadow-lv3">
-          <AnnotationRail onLocate={locate} />
+        {railOpen && !focus ? <div data-testid="annotation-drawer" className="absolute right-0 bottom-0 top-0 z-20 shadow-lv3"><AnnotationRail onLocate={locate} /></div> : null}
         </div>
-      ) : null}
+      </div>
       <SelectionPopover />
       <ActionCard />
       <CardDraftPanel />

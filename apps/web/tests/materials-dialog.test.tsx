@@ -79,7 +79,7 @@ describe("MaterialsDialog 上传补充", () => {
     const onClose = vi.fn();
     render(<MaterialsDialog onClose={onClose} />);
 
-    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    const input = screen.getByLabelText("点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）");
     fireEvent.change(input, { target: { files: [file("guide.md"), file("guide.md")] } });
 
     fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
@@ -115,7 +115,7 @@ describe("MaterialsDialog 上传补充", () => {
     });
     render(<MaterialsDialog onClose={vi.fn()} />);
 
-    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    const input = screen.getByLabelText("点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）");
     fireEvent.change(input, { target: { files: [file("guide.md")] } });
     fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
 
@@ -132,7 +132,7 @@ describe("MaterialsDialog 上传补充", () => {
     );
     render(<MaterialsDialog onClose={vi.fn()} />);
 
-    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    const input = screen.getByLabelText("点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）");
     fireEvent.change(input, { target: { files: [file("x.md")] } });
     fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
 
@@ -150,7 +150,7 @@ describe("MaterialsDialog 上传补充", () => {
     const onClose = vi.fn();
     const view = render(<MaterialsDialog onClose={onClose} />);
 
-    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    const input = screen.getByLabelText("点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）");
     fireEvent.change(input, { target: { files: [file("note.md")] } });
     fireEvent.click(screen.getByRole("button", { name: /上传并构建/ }));
     await waitFor(() => expect(apiMocks.uploadSources).toHaveBeenCalledTimes(1));
@@ -174,7 +174,7 @@ describe("MaterialsDialog 上传补充", () => {
     const submit = screen.getByRole("button", { name: /上传并构建/ });
     expect(submit).toBeDisabled();
 
-    const input = screen.getByLabelText("点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）");
+    const input = screen.getByLabelText("点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）");
     fireEvent.change(input, { target: { files: [file("a.md")] } });
     expect(screen.getByRole("button", { name: /上传并构建/ })).toBeEnabled();
     expect(apiMocks.uploadSources).not.toHaveBeenCalled();

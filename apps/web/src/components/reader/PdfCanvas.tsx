@@ -1,294 +1,287 @@
 "use client";
 
-/**
- * PDF 阅读画布（PRD 需求三）：pdf.js 单页渲染 + 内置文本层（支持选区），
- * 选区归一化为 0-1 矩形（相对页面宽高）与 quote 双锚，高亮以绝对定位覆盖层
- * 绘制。pdfjs 只在客户端加载（ReaderView 经 next/dynamic ssr:false 挂载），
- * worker 用 module worker 同源打包，不走 CDN。
- *
- * 只依赖 pdfjs-dist：react-pdf-highlighter 现为 RC 且自带旧版 pdfjs-dist，
- * 与 react-pdf 的版本会打架；文本层与选区是 pdf.js 的标准能力，自研后存储
- * 契约（归一化坐标）也无需适配层。
- */
-
-import { useCallback, useEffect, useRef, useState } from "react";
+/** Continuous PDF pages with viewport-based painting, selectable text and annotations. */
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import type { TextLayerBuilder } from "pdfjs-dist/web/pdf_viewer.mjs";
 import type { AnnotationView } from "@/src/types/api";
 import { api } from "@/src/lib/api";
 import { readingSelectionChanged } from "@/src/lib/readingFlow";
-
-const PAGE_SCALE = 1.3;
-const CONTEXT_CHARS = 40;
+import { useAppStore } from "@/src/store/useAppStore";
+import { readerScale, stepZoom, type ReaderZoom } from "@/src/lib/readerZoom";
 
 interface PdfCanvasProps {
+  zoom?: ReaderZoom;
+  onScale?: (scale: number) => void;
+  onZoom?: (zoom: ReaderZoom) => void;
   source: string;
   page: number;
   highlights: AnnotationView[];
   onPageCount: (count: number) => void;
   onPageChange: (page: number) => void;
-  /** 文本层为空（扫描件）时回调，ReaderView 据此切解析视图。 */
   onScanned?: (scanned: boolean) => void;
 }
 
-/** 容器坐标 → 页面归一化坐标（0-1，相对页面宽高）。 */
-function toNormalized(clientRects: DOMRect[], pageEl: HTMLElement): Array<{ x: number; y: number; w: number; h: number }> {
-  const base = pageEl.getBoundingClientRect();
-  const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
-  for (const rect of clientRects) {
-    if (rect.width < 1 || rect.height < 1) continue;
-    rects.push({
-      x: (rect.left - base.left) / base.width,
-      y: (rect.top - base.top) / base.height,
-      w: rect.width / base.width,
-      h: rect.height / base.height,
-    });
-  }
-  return rects;
+interface LoadedPdf {
+  proxy: PDFDocumentProxy;
+  runtime: typeof import("pdfjs-dist");
+  TextLayer: typeof import("pdfjs-dist/web/pdf_viewer.mjs").TextLayerBuilder;
+  sizes: Array<{ width: number; height: number }>;
+  selectionSignal: AbortSignal;
+}
+interface PageGeometry { width: number; height: number; scale: number }
+interface ScrollAnchor { page: number; y: number; x: number }
+
+export default function PdfCanvas(props: PdfCanvasProps) {
+  return <PdfDocument key={props.source} {...props} />;
 }
 
-export default function PdfCanvas({ source, page, highlights, onPageCount, onPageChange, onScanned }: PdfCanvasProps) {
-  const pageElRef = useRef<HTMLDivElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  // 同时持有 loading task 与 document：卸载/换资料时 task.destroy() 才会
-  // 真正收掉 pdf.js worker（只 cleanup() document 会泄漏 worker，反复开
-  // 文档后 worker 累积）。
-  const taskRef = useRef<{ destroy: () => Promise<void> } | null>(null);
-  const docRef = useRef<{ numPages: number; getPage: (n: number) => Promise<import("pdfjs-dist").PDFPageProxy> } | null>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+function PdfDocument({ source, page, highlights, onPageCount, onPageChange, onScanned, zoom = "width", onScale, onZoom }: PdfCanvasProps) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [document, setDocument] = useState<LoadedPdf | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // 容器可用宽度（ResizeObserver 跟踪，≥16px 变化才触发重渲染）：侧栏折叠、
-  // 窗口缩放后已渲染的页面按新宽度重排，而不是留一张裁切/过小的旧画布。
-  const [containerWidth, setContainerWidth] = useState(0);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [initialPage] = useState(page);
+  const reportedPage = useRef<number | null>(null);
+  const requestedPage = useRef<number | null>(null);
+  const layout = useRef<PageGeometry[] | null>(null);
+  const anchor = useRef<ScrollAnchor | null>(null);
+  const frame = useRef<number | null>(null);
+  const callbacks = useRef({ onPageCount, onPageChange, onScale, onZoom });
+  useLayoutEffect(() => { callbacks.current = { onPageCount, onPageChange, onScale, onZoom }; }, [onPageCount, onPageChange, onScale, onZoom]);
+
   useEffect(() => {
-    const scroller = pageElRef.current?.parentElement ?? null;
-    if (scroller === null || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const width = Math.round(entries[0]?.contentRect.width ?? 0);
-      setContainerWidth((current) => (Math.abs(current - width) >= 16 ? width : current));
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const measure = () => setSize(current => {
+      const width = scroller.clientWidth || window.innerWidth;
+      const height = scroller.clientHeight || window.innerHeight;
+      return current.width === width && current.height === height ? current : { width, height };
     });
-    observer.observe(scroller);
-    return () => observer.disconnect();
+    const initialMeasure = requestAnimationFrame(measure);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(scroller);
+    return () => { cancelAnimationFrame(initialMeasure); observer?.disconnect(); };
   }, []);
 
-  // 文档装载（源文件变化时重载）。
   useEffect(() => {
     let cancelled = false;
+    let worker: Worker | undefined;
+    let task: ReturnType<typeof import("pdfjs-dist").getDocument> | undefined;
+    const selection = new AbortController();
     async function load() {
-      setStatus("loading");
-      setError(null);
       try {
+        // The viewer module consumes globalThis.pdfjsLib initialized by pdfjs.
         const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerPort = new Worker(
-          new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url),
-          { type: "module" },
-        );
-        // 带鉴权抓字节（pdf.js 自己发请求不会带 Bearer token）。
+        const { TextLayerBuilder } = await import("pdfjs-dist/web/pdf_viewer.mjs");
         const bytes = await api.readingFileBytes(source);
-        const task = pdfjs.getDocument({ data: bytes });
-        const doc = await task.promise;
-        if (cancelled) {
-          void doc.cleanup();
-          void task.destroy().catch(() => {
-            // 已销毁/失败的任务：忽略。
-          });
-          return;
-        }
-        taskRef.current = task;
-        docRef.current = doc as unknown as typeof docRef.current;
-        onPageCount(doc.numPages);
-        setStatus("ready");
-      } catch (exc) {
         if (cancelled) return;
-        setStatus("error");
-        setError(exc instanceof Error ? exc.message : String(exc));
+        worker = new Worker(new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url), { type: "module" });
+        pdfjs.GlobalWorkerOptions.workerPort = worker;
+        task = pdfjs.getDocument({ data: bytes });
+        const proxy = await task.promise;
+        const sizes = await Promise.all(Array.from({ length: proxy.numPages }, async (_, index) => {
+          const viewport = (await proxy.getPage(index + 1)).getViewport({ scale: 1 });
+          return { width: viewport.width, height: viewport.height };
+        }));
+        if (cancelled) return;
+        callbacks.current.onPageCount(proxy.numPages);
+        setDocument({ proxy, runtime: pdfjs, TextLayer: TextLayerBuilder, sizes, selectionSignal: selection.signal });
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       }
     }
     void load();
     return () => {
       cancelled = true;
-      const task = taskRef.current;
-      taskRef.current = null;
-      docRef.current = null;
-      if (task !== null) void task.destroy().catch(() => {
-        // 卸载即销毁；销毁中的任务报错无意义。
-      });
+      selection.abort();
+      void task?.destroy().catch(() => {});
+      worker?.terminate();
     };
-    // onPageCount 是稳定 setState 包装；source 才是重载触发项。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source]);
 
-  // 页面渲染 + 文本层。
-  useEffect(() => {
-    if (status !== "ready" || docRef.current === null) return;
-    let cancelled = false;
-    async function render() {
-      const pdfjs = await import("pdfjs-dist");
-      const doc = docRef.current;
-      if (doc === null) return;
-      const pdfPage = await doc.getPage(Math.min(Math.max(1, page), doc.numPages));
-      if (cancelled) {
-        pdfPage.cleanup();
-        return;
+  const geometry = useMemo(() => document?.sizes.map(pageSize => {
+    const scale = readerScale(zoom, size.width, size.height, pageSize.width, pageSize.height);
+    return { width: pageSize.width * scale, height: pageSize.height * scale, scale };
+  }) ?? [], [document, zoom, size]);
+
+  const rememberAnchor = useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const pages = [...scroller.querySelectorAll<HTMLElement>("[data-page-number]")];
+    const center = scroller.scrollTop + scroller.clientHeight / 2;
+    const target = pages.find(item => item.offsetTop + item.offsetHeight > center) ?? pages.at(-1);
+    if (target) anchor.current = {
+      page: Number(target.dataset.pageNumber),
+      y: (center - target.offsetTop) / target.offsetHeight,
+      x: (scroller.scrollLeft + scroller.clientWidth / 2 - target.offsetLeft) / target.offsetWidth,
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || !geometry.length) return;
+    const requested = Math.max(1, Math.min(page, geometry.length));
+    if (layout.current !== geometry) {
+      if (useAppStore.getState().reader.selection) readingSelectionChanged(null);
+      const current = anchor.current;
+      if (layout.current && current) {
+        const target = scroller.querySelector<HTMLElement>(`[data-page-number="${current.page}"]`);
+        if (target) {
+          scroller.scrollTop = target.offsetTop + target.offsetHeight * current.y - scroller.clientHeight / 2;
+          scroller.scrollLeft = target.offsetLeft + target.offsetWidth * current.x - scroller.clientWidth / 2;
+        }
       }
-      // 宽页自适应：以 1 为基准测容器可用宽，缩到放得下为止；上限仍是
-      // PAGE_SCALE（小页不放大）。旧实现固定 1.3 倍，A4 横排/宽讲义首屏
-      // 被裁掉近半（真机验证截图确认），只剩横向滚动一条路。
-      const canvas = canvasRef.current;
-      const pageEl = pageElRef.current;
-      const scroller = pageElRef.current?.parentElement ?? null;
-      if (canvas === null || pageEl === null) return;
-      const availableWidth = Math.max(
-        240,
-        (containerWidth > 0 ? containerWidth : (scroller?.clientWidth ?? window.innerWidth)) - 32,
-      );
-      const baseViewport = pdfPage.getViewport({ scale: 1 });
-      const scale = Math.min(PAGE_SCALE, availableWidth / baseViewport.width);
+      layout.current = geometry;
+    }
+    // A scroll report updates the toolbar; it must not snap the viewport back.
+    if (requestedPage.current === null || (page !== requestedPage.current && requested !== reportedPage.current)) {
+      const target = scroller.querySelector<HTMLElement>(`[data-page-number="${requested}"]`);
+      reportedPage.current = requested;
+      if (target) scroller.scrollTop = Math.max(0, target.offsetTop - 16);
+    }
+    requestedPage.current = page;
+    callbacks.current.onScale?.(geometry[(reportedPage.current ?? requested) - 1].scale);
+    rememberAnchor();
+  }, [geometry, page, rememberAnchor]);
+
+  const onScroll = useCallback(() => {
+    if (useAppStore.getState().reader.selection) readingSelectionChanged(null);
+    if (frame.current !== null) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      rememberAnchor();
+      const probe = scroller.scrollTop + Math.min(80, scroller.clientHeight / 5);
+      const pages = [...scroller.querySelectorAll<HTMLElement>("[data-page-number]")];
+      const target = pages.find(item => item.offsetTop + item.offsetHeight > probe) ?? pages.at(-1);
+      const next = target ? Number(target.dataset.pageNumber) : null;
+      if (next !== null && next !== reportedPage.current) {
+        reportedPage.current = next;
+        callbacks.current.onPageChange(next);
+      }
+    });
+  }, [rememberAnchor]);
+
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const current = geometry[(reportedPage.current ?? page) - 1]?.scale ?? 1;
+      callbacks.current.onZoom?.(stepZoom(current, event.deltaY < 0 ? 1 : -1));
+    };
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => { scroller.removeEventListener("wheel", onWheel); };
+  }, [geometry, page]);
+
+  useEffect(() => () => { if (frame.current !== null) cancelAnimationFrame(frame.current); }, []);
+
+  if (error) return <div role="alert" className="flex flex-1 items-center justify-center p-8 text-sm text-accent-fail">PDF 打开失败：{error}</div>;
+  return <div ref={scrollerRef} onScroll={onScroll} style={{ overflowAnchor: "none" }} className="relative min-h-0 flex-1 overflow-auto bg-bg-root p-4" data-testid="reader-scroller">
+    {document ? <div className="flex min-w-full w-max flex-col items-center gap-4">
+      {geometry.map((dimensions, index) => <PdfPageSlot key={index + 1} document={document} number={index + 1} dimensions={dimensions} scrollerRef={scrollerRef} initialPage={initialPage} highlights={highlights.filter(item => item.page === index + 1)} onScanned={onScanned} />)}
+    </div> : <p className="py-2 text-xs text-text-faint">正在打开 PDF…</p>}
+  </div>;
+}
+
+/** Keep every page's geometry in the scroll flow, painting only nearby pages. */
+function PdfPageSlot({ document, number, dimensions, scrollerRef, initialPage, highlights, onScanned }: {
+  document: LoadedPdf; number: number; dimensions: PageGeometry; scrollerRef: React.RefObject<HTMLDivElement | null>;
+  initialPage: number; highlights: AnnotationView[]; onScanned?: (scanned: boolean) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(Math.abs(number - initialPage) <= 1);
+  useEffect(() => {
+    const element = ref.current;
+    const root = scrollerRef.current;
+    if (!element || !root || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => setVisible(entries.some(entry => entry.isIntersecting)), { root, rootMargin: `${root.clientHeight}px 0px` });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [scrollerRef]);
+  return <div ref={ref} data-page-number={number} className="relative shrink-0 bg-white shadow-lv2" style={{ width: dimensions.width, height: dimensions.height }}>
+    {visible ? <PdfPage key={dimensions.scale} document={document} number={number} scale={dimensions.scale} highlights={highlights} onScanned={onScanned} /> : <p className="absolute inset-0 flex items-center justify-center text-xs text-text-faint">第 {number} 页</p>}
+  </div>;
+}
+
+function PdfPage({ document, number, scale, highlights, onScanned }: {
+  document: LoadedPdf; number: number; scale: number; highlights: AnnotationView[]; onScanned?: (scanned: boolean) => void;
+}) {
+  const pageRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let renderTask: RenderTask | undefined;
+    let textTask: TextLayerBuilder | undefined;
+    let pdfPage: PDFPageProxy | undefined;
+    const canvas = canvasRef.current;
+    async function paint() {
+      pdfPage = await document.proxy.getPage(number);
+      if (cancelled || !canvas) return;
       const viewport = pdfPage.getViewport({ scale });
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       canvas.width = Math.floor(viewport.width * dpr);
       canvas.height = Math.floor(viewport.height * dpr);
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
-      pageEl.style.width = `${viewport.width}px`;
-      pageEl.style.height = `${viewport.height}px`;
-      // pdf.js TextLayer 契约：span 的字号/定位按 --scale-factor 换算，缺了
-      // 它文本层会以原始尺寸叠在缩放后的 canvas 上（视觉出现大小字重叠、
-      // 选区与视线错位）。
-      pageEl.style.setProperty("--total-scale-factor", String(viewport.scale));
       const context = canvas.getContext("2d");
-      if (context !== null) {
-        await pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
+      if (context) {
+        renderTask = pdfPage.render({ canvas, canvasContext: context, viewport, transform: dpr === 1 ? undefined : [dpr, 0, 0, dpr, 0, 0] });
+        await renderTask.promise;
       }
-      // 文本层：pdf.js 内置 TextLayer 产出可选中的 span 网格。
-      const textLayer = textLayerRef.current;
-      if (textLayer !== null) {
-        textLayer.replaceChildren();
-        const textContent = await pdfPage.getTextContent();
-        // 扫描件：整页零文本项 → 上报，由 ReaderView 切到解析视图（OCR 产物）。
-        // 只对文档首页判定：混合型 PDF（前几页有文本、中间夹扫描页）不会
-        // 因为翻页在整个视图间反复横跳。
-        if (page <= 1) onScanned?.(textContent.items.length === 0);
-        const textLayerInstance = new pdfjs.TextLayer({
-          textContentSource: textContent,
-          container: textLayer,
-          viewport,
-        });
-        await textLayerInstance.render();
+      if (cancelled || !textRef.current) return;
+      if (number === 1 && onScanned) {
+        const content = await pdfPage.getTextContent();
+        if (cancelled) return;
+        onScanned(content.items.length === 0);
       }
+      // Global selection listeners share document lifetime, not a single page.
+      textTask = new document.TextLayer({ pdfPage, abortSignal: document.selectionSignal });
+      textRef.current.append(textTask.div);
+      await textTask.render({ viewport, images: new document.runtime.TextLayerImages(0, new Float64Array(), viewport, () => canvas) });
+      if (!cancelled) setReady(true);
     }
-    void render().catch((exc: unknown) => {
-      if (!cancelled) setError(exc instanceof Error ? exc.message : String(exc));
-    });
+    void paint().catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); });
     return () => {
       cancelled = true;
+      renderTask?.cancel();
+      textTask?.cancel();
+      pdfPage?.cleanup();
+      if (canvas) { canvas.width = 0; canvas.height = 0; }
     };
-  }, [page, status, onScanned, containerWidth]);
+  }, [document, number, scale, onScanned]);
 
-  // 选区 → 双锚 + 归一化 rects + 浮层锚点。
-  const captureSelection = useCallback(() => {
-    const pageEl = pageElRef.current;
-    const textLayer = textLayerRef.current;
-    if (pageEl === null || textLayer === null) return;
-    const selection = window.getSelection();
-    if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) {
-      readingSelectionChanged(null);
-      return;
-    }
+  function captureSelection() {
+    const pageEl = pageRef.current, textLayer = textRef.current, selection = window.getSelection();
+    if (!pageEl || !textLayer || !selection || selection.rangeCount === 0 || selection.isCollapsed) { readingSelectionChanged(null); return; }
     const range = selection.getRangeAt(0);
-    if (!textLayer.contains(range.commonAncestorContainer)) {
-      readingSelectionChanged(null);
-      return;
-    }
+    if (!textLayer.contains(range.commonAncestorContainer)) { readingSelectionChanged(null); return; }
     const text = selection.toString().trim();
-    if (text === "") {
-      readingSelectionChanged(null);
-      return;
-    }
-    const clientRects = Array.from(range.getClientRects());
-    const rects = toNormalized(clientRects, pageEl);
-    if (rects.length === 0) {
-      readingSelectionChanged(null);
-      return;
-    }
-    // quote 前后文：取文本层全文在选区锚点前后的片段（版面变化时重定位用）。
-    const full = textLayer.textContent ?? "";
-    const at = full.indexOf(text);
-    const first = clientRects[0];
+    const base = pageEl.getBoundingClientRect();
+    const rects = [...range.getClientRects()].filter(rect => rect.width >= 1 && rect.height >= 1);
+    if (!text || !rects.length) { readingSelectionChanged(null); return; }
+    const full = textLayer.textContent ?? "", at = full.indexOf(text), first = rects[0];
     readingSelectionChanged({
-      text,
-      prefix: at > 0 ? full.slice(Math.max(0, at - CONTEXT_CHARS), at) : "",
-      suffix: at >= 0 ? full.slice(at + text.length, at + text.length + CONTEXT_CHARS) : "",
-      page,
-      rects,
-      x: (first?.left ?? 0) + (first?.width ?? 0) / 2,
-      y: first?.top ?? 0,
+      text, page: number,
+      prefix: at > 0 ? full.slice(Math.max(0, at - 40), at) : "",
+      suffix: at >= 0 ? full.slice(at + text.length, at + text.length + 40) : "",
+      rects: rects.map(rect => ({ x: (rect.left - base.left) / base.width, y: (rect.top - base.top) / base.height, w: rect.width / base.width, h: rect.height / base.height })),
+      x: first.left + first.width / 2, y: first.top,
     });
-  }, [page]);
-
-  // 滚轮翻页：仅在滚动容器已到顶/到底时接管——否则放大后的页面应该先
-  // 正常滚动（旧实现无条件 preventDefault，高页直接滚不动）。
-  useEffect(() => {
-    const el = pageElRef.current;
-    const scroller = el?.parentElement ?? null;
-    if (el === null || scroller === null) return;
-    const onWheel = (event: WheelEvent) => {
-      if (Math.abs(event.deltaY) < 40) return;
-      const atTop = scroller.scrollTop <= 0;
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
-      const goingDown = event.deltaY > 0;
-      if (goingDown ? !atBottom : !atTop) return; // 还有可滚的量，让给原生滚动
-      event.preventDefault();
-      onPageChange(page + (goingDown ? 1 : -1));
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, [page, onPageChange]);
-
-  if (status === "error") {
-    return (
-      <div className="flex flex-1 items-center justify-center p-8 text-center text-[13px] text-accent-fail" role="alert">
-        PDF 打开失败：{error}
-      </div>
-    );
   }
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-auto p-4">
-      <div
-        ref={pageElRef}
-        className="relative shrink-0 shadow-lv2"
-        onMouseUp={captureSelection}
-        data-testid="pdf-page"
-      >
-        <canvas ref={canvasRef} className="block" />
-        {/* 文本层：pdf.js 6 不自动加类，.textLayer 样式（absolute/定位/字号换算，
-            见 globals.css 引入的 pdf_viewer.css）依赖这个类名命中。 */}
-        <div ref={textLayerRef} className="textLayer" data-testid="pdf-text-layer" />
-        {/* 高亮覆盖层：归一化 rects × 当前渲染尺寸。
-            纯装饰——必须 pointer-events-none。这些块曾是可点 button，且在 DOM 里
-            位于 textLayer 之后（层级更高），于是「已经划过的原文」再也选不中：
-            拖拽落在高亮块上时 mouseup 仍冒泡，但选区被按钮吃掉，浮层不出现，
-            用户无法二次标注同一段。跳转定位由标注栏承担，不需要这里可点。 */}
-        <div className="pointer-events-none absolute inset-0" aria-hidden data-testid="pdf-highlight-layer">
-          {highlights
-            .filter((item) => item.page === page)
-            .flatMap((item) =>
-              item.rects.map((rect, index) => (
-                <div
-                  key={`${item.id}-${index}`}
-                  className={`absolute rounded-sm ${item.color === "yellow" ? "bg-yellow-300/45" : item.color === "green" ? "bg-green-300/45" : item.color === "blue" ? "bg-blue-300/45" : "bg-red-300/45"}`}
-                  style={{
-                    left: `${rect.x * 100}%`,
-                    top: `${rect.y * 100}%`,
-                    width: `${rect.w * 100}%`,
-                    height: `${rect.h * 100}%`,
-                  }}
-                />
-              )),
-            )}
-        </div>
-      </div>
-      {status === "loading" ? <p className="py-2 text-[12px] text-text-faint">正在渲染第 {page} 页…</p> : null}
+  return <div ref={pageRef} onMouseUp={captureSelection} data-testid="pdf-page" data-pdf-page={number} data-rendered-scale={ready ? scale : undefined} aria-busy={!ready} className="relative h-full w-full" style={{ "--total-scale-factor": scale } as CSSProperties}>
+    <canvas ref={canvasRef} className="block" />
+    <div ref={textRef} data-testid="pdf-text-layer" />
+    <div className="pointer-events-none absolute inset-0" aria-hidden data-testid="pdf-highlight-layer">
+      {highlights.flatMap(item => item.rects.map((rect, index) => <div key={`${item.id}-${index}`} className={`absolute rounded-sm ${item.color === "yellow" ? "bg-yellow-300/45" : item.color === "green" ? "bg-green-300/45" : item.color === "blue" ? "bg-blue-300/45" : "bg-red-300/45"}`} style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%` }} />))}
     </div>
-  );
+    {error ? <p role="alert" className="absolute inset-x-0 top-2 p-2 text-xs text-accent-fail">{error}</p> : null}
+  </div>;
 }

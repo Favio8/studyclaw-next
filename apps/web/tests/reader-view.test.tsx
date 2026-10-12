@@ -23,6 +23,11 @@ const { apiMocks } = vi.hoisted(() => ({
     readingParsed: vi.fn(),
     cardDraft: vi.fn(),
     cardCommit: vi.fn(),
+    progress: vi.fn(),
+    mastery: vi.fn(),
+    heatmap: vi.fn(),
+    readingTraces: vi.fn(),
+    digest: vi.fn(),
   },
 }));
 
@@ -79,11 +84,25 @@ beforeEach(() => {
   apiMocks.readingParsed.mockReset();
   apiMocks.cardDraft.mockReset();
   apiMocks.cardCommit.mockReset();
+  apiMocks.readingTraces.mockReset().mockResolvedValue({ traces: [] });
+  apiMocks.digest.mockReset().mockResolvedValue({ dueCount: 0, concepts: [], recentHighlights: 1 });
 });
 
 afterEach(() => {
   cleanup();
   useAppStore.getState().readerReset();
+});
+
+it("默认资料列表晚到时保留用户已经打开的文件", async () => {
+  let resolveFiles!: (value: { files: Array<{relative: string; supported: boolean}>; missing: boolean }) => void;
+  apiMocks.courseFiles.mockReturnValue(new Promise(resolve => { resolveFiles = resolve; }));
+  apiMocks.readingLoad.mockImplementation(async (source: string) => ({ source, view: "pdf", exists: true, progress: { page: 1, percent: 0, updatedAt: "" }, highlights: [], recovered: false }));
+  render(<ReaderView />);
+  await waitFor(() => expect(apiMocks.courseFiles).toHaveBeenCalled());
+  await readingOpen("chosen.pdf");
+  resolveFiles({files:[{relative:"first.pdf",supported:true}],missing:false});
+  await waitFor(() => expect(useAppStore.getState().reader.source).toBe("chosen.pdf"));
+  expect(apiMocks.readingLoad.mock.calls.map(call => call[0])).toEqual(["chosen.pdf"]);
 });
 
 describe("ReaderView", () => {
@@ -164,8 +183,8 @@ describe("ReaderView", () => {
       recovered: false,
     });
     apiMocks.readingExplain.mockImplementation(async function* () {
-      yield { event: "token", data: { delta: "这段讲的是" } };
-      yield { event: "token", data: { delta: "SM-2 的难度因子。" } };
+      yield { event: "token", data: { delta: "这段讲的是**" } };
+      yield { event: "token", data: { delta: "SM-2 **的难度因子。" } };
       yield { event: "done", data: { kind: "explain" } };
     });
     render(<ReaderView />);
@@ -176,10 +195,16 @@ describe("ReaderView", () => {
     await waitFor(() => expect(screen.getByTestId("selection-popover")).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: /解释/ }));
 
-    await waitFor(() => expect(screen.getByTestId("reading-action-card").textContent).toContain("SM-2 的难度因子。"));
+    await waitFor(() => expect(screen.getByTestId("reading-action-card").textContent).toContain("SM-2的难度因子。"));
+    expect(screen.getByTestId("reading-action-card").querySelector("strong")).toHaveTextContent("SM-2");
     expect(apiMocks.readingExplain).toHaveBeenCalledWith("sources/a.pdf", SELECTION.text, expect.anything());
     // 流结束出现“就这段继续对话”
     await waitFor(() => expect(screen.getByRole("button", { name: /就这段继续对话/ })).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: /就这段继续对话/ }));
+    const state = useAppStore.getState();
+    const key = `${state.workspacePath ?? ""}\0course-1\0${state.activeSessionId ?? "new"}`;
+    expect(state.composerReferences[key]).toMatchObject({ source: "sources/a.pdf", page: 3, quote: SELECTION.text, result: "这段讲的是**SM-2 **的难度因子。" });
+    expect(state.centerView).toBe("chat");
   });
 
   it("翻页触发进度保存（percent 由页码推导）", async () => {
@@ -227,7 +252,7 @@ describe("ReaderView 解析视图（P2.5）", () => {
     expect(screen.getByText(/mineru \/ standard/)).toBeDefined();
   });
 
-  it("扫描件 PDF：文本层为空 → 切解析视图并给出构建引导", async () => {
+  it("扫描件 PDF：原图仍可阅读，主动切换正文视图读取 OCR", async () => {
     apiMocks.readingLoad.mockResolvedValue({
       source: "sources/scan.pdf",
       view: "pdf",
@@ -248,7 +273,7 @@ describe("ReaderView 解析视图（P2.5）", () => {
     await readingOpen("sources/scan.pdf");
     await waitFor(() => expect(screen.getByTestId("pdf-canvas")).toBeDefined());
     // PdfCanvas 桩模拟 pdf.js 上报“整页零文本层”（扫描件）。
-    fireEvent.click(screen.getByRole("button", { name: "stub-scanned" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换正文视图" }));
     await waitFor(() => expect(screen.getByText(/在设置里启用 MinerU/)).toBeDefined());
     expect(apiMocks.readingParsed).toHaveBeenCalledWith("sources/scan.pdf");
     expect(screen.queryByTestId("pdf-canvas")).toBeNull();
@@ -329,7 +354,7 @@ describe("ReaderView 划词建卡（P3）", () => {
         overallMastery: 0.4,
         dueCount: 1,
         lastUpdatedAt: null,
-        concepts: [{ id: "c_ef", name: "难度因子", chapter: "SM-2", mastery: 0.4, evals: 3, passRate: 0.3, ef: 2.5, nextReviewAt: null, misattribution: "无" }],
+        concepts: [{ id: "c_ef", name: "难度因子", chapter: "SM-2", mastery: 0.4, evals: 3, passRate: 0.3, ef: 2.5, nextReviewAt: null, misattribution: "无", exposure: 0 }],
       },
     });
     render(<ReaderView />);
@@ -341,7 +366,8 @@ describe("ReaderView 划词建卡（P3）", () => {
     fireEvent.click(screen.getByRole("button", { name: "高亮（黄）" }));
     await waitFor(() => expect(apiMocks.readingAddHighlight).toHaveBeenCalledTimes(1));
     expect(apiMocks.readingAddHighlight.mock.calls[0]?.[1]).toMatchObject({ conceptId: "c_ef" });
-    // 标注栏展示概念标签
+    // 用户展开标注栏后展示概念标签
+    fireEvent.click(screen.getByRole("button", { name: "标注列表" }));
     await waitFor(() => expect(screen.getByText(/概念 c_ef/)).toBeDefined());
   });
 });

@@ -17,7 +17,8 @@ import { api } from "@/src/lib/api";
 import { readingSelectionChanged } from "@/src/lib/readingFlow";
 import type { ReaderSelection } from "@/src/store/useAppStore";
 
-export default function ParsedView({ source }: { source: string }) {
+export default function ParsedView({ source, zoom = 1 }: { source: string; zoom?: number }) {
+  const [blocks, setBlocks] = useState<Array<{ id: string; page: number; text: string }>>([]);
   const [markdown, setMarkdown] = useState<string>("");
   const [meta, setMeta] = useState<{ engine: string | null; tier: string | null }>({ engine: null, tier: null });
   const [notice, setNotice] = useState<string | null>(null);
@@ -30,6 +31,7 @@ export default function ParsedView({ source }: { source: string }) {
       if (!alive) return;
       if (payload.available) {
         setMarkdown(payload.markdown);
+        setBlocks(payload.blocks ?? []);
         setMeta({ engine: payload.engine, tier: payload.tier });
         setNotice(null);
         setError(null);
@@ -68,7 +70,7 @@ export default function ParsedView({ source }: { source: string }) {
       text,
       prefix: at > 0 ? full.slice(Math.max(0, at - 40), at) : "",
       suffix: at >= 0 ? full.slice(at + text.length, at + text.length + 40) : "",
-      page: 1,
+      page: Number((range.startContainer.parentElement?.closest("[data-source-page]") as HTMLElement | null)?.dataset.sourcePage ?? 1),
       rects: [],
       x: (rect?.left ?? 0) + (rect?.width ?? 0) / 2,
       y: rect?.top ?? 0,
@@ -95,7 +97,9 @@ export default function ParsedView({ source }: { source: string }) {
         </div>
       ) : (
         <div ref={bodyRef} onMouseUp={captureSelection} className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-          <MarkdownView content={markdown} />
+          <div style={{ zoom }}>
+          {blocks.length ? blocks.map(block => <section key={block.id} data-source-page={block.page} className="mb-4"><span className="text-[10px] text-text-faint">第 {block.page} 页</span><p className="whitespace-pre-wrap text-sm leading-7">{block.text}</p></section>) : <MarkdownView content={markdown} />}
+          </div>
         </div>
       )}
     </div>

@@ -366,7 +366,11 @@ describe('ReadingService 解析视图（P2.5）', () => {
     const root = await workspace()
     const source = 'sources/a.docx'
     await writeFile(join(root, source), 'docx', 'utf8')
-    await expect(new ReadingService().parsed(root, source)).rejects.toThrow(/解析失败/)
+    // 本用例保护的不变量是「必须抛错，不得伪造可读结果」，而不是某一句文案。
+    // 装了 LibreOffice 时报「文档解析失败（可能损坏或加密）」；CI runner 上没有
+    // LibreOffice 时先在 officePreview 就报「Office 预览失败…」。两种都是正确
+    // 失败路径，锁死其中一句会让用例随环境红绿。
+    await expect(new ReadingService().parsed(root, source)).rejects.toThrow(/解析失败|Office 预览失败/)
   })
 
 })

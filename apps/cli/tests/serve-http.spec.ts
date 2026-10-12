@@ -604,21 +604,24 @@ describe("reading.parsed 解析视图（集成）", () => {
       });
       expect(opened.status).toBe(200);
       mkdirSync(join(project, "sources"), { recursive: true });
-      const bytes = "fake-docx-bytes";
-      writeFileSync(join(project, "sources", "handout.docx"), bytes, "utf8");
+      // .html 而不是 .docx：本用例要验的是 manifest 命中与源变更失效，与 Office
+      // 无关。走 .docx 会经 officePreview 依赖 LibreOffice，而 CI runner 上没有，
+      // 于是 RPC 变成错误响应，用例在 CI 上恒红。
+      const bytes = "<h1>讲义</h1><p>表格保真。</p>";
+      writeFileSync(join(project, "sources", "handout.html"), bytes, "utf8");
       const sha = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
       const fileName = `${sha.slice("sha256:".length, "sha256:".length + 12)}-standard.md`;
       mkdirSync(join(project, ".studyclaw", "parsed"), { recursive: true });
       writeFileSync(join(project, ".studyclaw", "parsed", fileName), "# 解析产物\n\n表格保真。\n", "utf8");
       writeFileSync(join(project, ".studyclaw", "parsed", "manifest.json"), JSON.stringify({
-        "sources/handout.docx": { sha256: sha, engine: "mineru", tier: "standard", out: fileName },
+        "sources/handout.html": { sha256: sha, engine: "mineru", tier: "standard", out: fileName },
       }), "utf8");
 
       const call = async () => {
         const res = await fetch(`${base()}/api/reading.parsed`, {
           method: "POST",
           headers: auth(),
-          body: JSON.stringify({ payload: { source: "sources/handout.docx" } }),
+          body: JSON.stringify({ payload: { source: "sources/handout.html" } }),
           signal: AbortSignal.timeout(15_000),
         });
         return res.json() as Promise<{ result: { available: boolean; engine: string | null; markdown: string; reason: string | null } }>;
@@ -629,7 +632,7 @@ describe("reading.parsed 解析视图（集成）", () => {
       expect(ok.result.markdown).toContain("表格保真");
 
       // 源文件变化 → 不可用并提示重新构建
-      writeFileSync(join(project, "sources", "handout.docx"), "fake-docx-bytes-v2", "utf8");
+      writeFileSync(join(project, "sources", "handout.html"), "<h1>讲义 v2</h1>", "utf8");
       const stale = await call();
       expect(stale.result.available).toBe(false);
       expect(stale.result.reason).toContain("重新构建");

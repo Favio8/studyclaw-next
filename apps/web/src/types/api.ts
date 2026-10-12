@@ -250,13 +250,38 @@ export interface ProgressConceptView {
   ef: number;
   nextReviewAt: string | null;
   misattribution: string;
+  /** 阅读接触次数（M1）：关联到该概念的标注累计条数，纯观测维度。 */
+  exposure: number;
 }
 
 export interface ProgressPayload {
+  conceptOrigin?: "headings" | "semantic";
   overallMastery: number;
   dueCount: number;
   lastUpdatedAt: string | null;
   concepts: ProgressConceptView[];
+}
+
+/** M4/M5：一次聚合的概念级摘要（courses.digest）。避免按概念逐个请求。 */
+export interface DigestConcept {
+  id: string;
+  name: string;
+  chapter: string;
+  mastery: number;
+  evals: number;
+  passRate: number;
+  nextReviewAt: string | null;
+  exposure: number;
+  taskCount: number;
+  annotationCount: number;
+  lastAnnotatedAt: string | null;
+}
+
+export interface CourseDigest {
+  dueCount: number;
+  concepts: DigestConcept[];
+  /** 近 24 小时内新建的标注条数。 */
+  recentHighlights: number;
 }
 
 export interface MasteryConceptView {
@@ -285,6 +310,16 @@ export interface QuizTaskView {
   /** MCQ 答案键（0 起始）；旧卡为 null → 服务端 rubric 判分。 */
   answerIndex: number | null;
   answerRationale: string | null;
+  /** M2：复习时随题回带的原文划线线索。无标注时整个字段缺省，不会有空占位。 */
+  hints?: ReviewHintView[];
+}
+
+export interface ReviewHintView {
+  text: string;
+  prefix: string;
+  suffix: string;
+  source: string;
+  page: number;
 }
 
 /** L1：courses.evalTrend 返回（某概念最近评测，时间升序）。 */
@@ -327,7 +362,7 @@ export interface ReadingProgressView {
 
 export interface ReadingLoadPayload {
   source: string;
-  view: "pdf" | "markdown" | "unsupported";
+  view: "pdf" | "image" | "markdown" | "unsupported";
   exists: boolean;
   progress: ReadingProgressView;
   highlights: AnnotationView[];
@@ -349,6 +384,7 @@ export interface ReadingActionEvent {
 
 /** P2.5：reading.parsed 返回（解析视图产物）。 */
 export interface ReadingParsedPayload {
+  blocks?: Array<{ id: string; page: number; text: string; bbox?: [number, number, number, number] | null }>;
   source: string;
   available: boolean;
   engine: "mineru" | "builtin" | null;
@@ -448,3 +484,9 @@ export type EvalEvent =
   /** FL-09：服务端非阻断告警帧（如 AUDIT_WRITE_FAILED），评分流程继续。 */
   | { event: "warning"; data: { code: string; message: string } }
   | { event: "error"; data: { code: string; message: string } };
+
+export interface SemanticConcept {
+  id: string; name: string; definition: string; learning_objective: string; area: string;
+  evidence: Array<{source: string; page: number; block_id: string; quote: string}>;
+}
+export interface SemanticDraft { id: string; createdAt: string; concepts: SemanticConcept[]; bindings: Array<{task_id: string; concept_id: string | null}>; rejected: number }

@@ -28,6 +28,20 @@ async function setup(): Promise<{ root: string; sessionId: string }> {
 }
 
 describe('session model directory', () => {
+  it('restores the selected caption without probing provider model catalogs', async () => {
+    const { root, sessionId } = await setup()
+    await selectSessionModel(root, basename(root), sessionId, { provider: 'acme', model: 'acme-large', effort: 'high' })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    try {
+      const current = await sessionModels(root, basename(root), sessionId, true)
+      expect(current.current).toEqual({ provider: 'acme', model: 'acme-large', effort: 'high' })
+      expect(current.groups).toEqual([])
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+      await rm(root, { recursive: true, force: true })
+    }
+  });
   it('lists configured models and persists a session-level selection', async () => {
     const { root, sessionId } = await setup()
     const first = await sessionModels(root, basename(root), sessionId)

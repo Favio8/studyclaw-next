@@ -699,9 +699,10 @@ function ProviderEditorCard({
 export default function ModelsSection({ initial }: ModelsSectionProps) {
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const [payload, setPayload] = useState<SettingsPayload | null>(initial);
+  const [observedInitial, setObservedInitial] = useState(initial);
   const [catalog, setCatalog] = useState<ProviderCatalogEntry[] | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  const [explicitAdding, setAdding] = useState(false);
   const [addEntryId, setAddEntryId] = useState("");
   const [declaring, setDeclaring] = useState(false);
   const [dismissedSetup, setDismissedSetup] = useState<ReadonlySet<string>>(new Set());
@@ -713,7 +714,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   const [catalogFailed, setCatalogFailed] = useState(false);
   const [catalogRetry, setCatalogRetry] = useState(0);
   // X4：添加卡按目录条目缓存整卡草稿（切换条目不丢输入）。
-  const addDraftsRef = useRef(new Map<string, AddCardDraft>());
+  const [addDrafts] = useState(() => new Map<string, AddCardDraft>());
   // P2：空目录的添加卡被用户手动收起后，不因 SettingsDialog 的 loaded 刷新
   // （如去通用页签保存）而反复重开。
   const [dismissedEmptyAdd, setDismissedEmptyAdd] = useState(false);
@@ -726,23 +727,18 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   // SettingsDialog loads its payload asynchronously. Keep the section in
   // sync when it becomes available after the models tab has mounted, while
   // preserving any in-progress editor state in the card itself.
-  useEffect(() => {
-    if (initial !== null) {
-      setPayload(initial);
-      // An empty provider directory needs an editor to get started. A
-      // provider that exists but lacks a key uses the dsh setup-row posture
-      // and must not open a second add card beside it.
-      if (initial.providers.length === 0 && !dismissedEmptyAdd) setAdding(true);
-    }
-  }, [initial, dismissedEmptyAdd]);
+  if (observedInitial !== initial) {
+    setObservedInitial(initial);
+    if (initial !== null) setPayload(initial);
+  }
+  const adding = explicitAdding || (payload?.providers.length === 0 && !dismissedEmptyAdd && !declaring);
 
   useEffect(() => {
     let alive = true;
     // 目录加载失败不阻塞页面：手填与编辑既有 provider 的路径完全可用，
     // 但必须显式提示——否则「＋ 添加供应商」会被静默禁用成死按钮。
-    setCatalogFailed(false);
     void api.providerCatalog().then(
-      (result) => { if (alive) setCatalog(result.catalog); },
+      (result) => { if (alive) { setCatalog(result.catalog); setCatalogFailed(false); } },
       () => { if (alive) { setCatalog([]); setCatalogFailed(true); } },
     );
     return () => { alive = false; };
@@ -756,12 +752,6 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     if (!catalog) return [];
     return catalog.filter((entry) => entry.id !== "custom" && !providers.some((p) => p.id === entry.id));
   }, [catalog, providers]);
-
-  useEffect(() => {
-    if ((adding || !anyUsable) && !addEntryId && addableCatalog.length > 0) {
-      setAddEntryId(addableCatalog[0].id);
-    }
-  }, [adding, anyUsable, addEntryId, addableCatalog]);
 
   // 首次运行姿态：没有任何可用 provider 时，第一张缺 Key 的行自动展开 setup 卡。
   const setupId = anyUsable
@@ -873,7 +863,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     }
   }
 
-  const selectedEntry = addableCatalog.find((entry) => entry.id === addEntryId) ?? null;
+  const selectedEntry = addableCatalog.find((entry) => entry.id === addEntryId) ?? addableCatalog[0] ?? null;
 
   return (
     <section className="flex max-w-[720px] flex-col gap-3">
@@ -969,7 +959,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           <span>内置供应商目录加载失败，「＋ 添加供应商」暂不可用；仍可使用自定义 OpenAI 兼容。</span>
           <button
             type="button"
-            onClick={() => setCatalogRetry((n) => n + 1)}
+            onClick={() => { setCatalogFailed(false); setCatalogRetry((n) => n + 1); }}
             className="shrink-0 rounded-lg border border-accent-warn/40 px-2.5 py-1 text-accent-warn hover:bg-accent-warn/10"
           >
             重试
@@ -982,7 +972,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           <label className="mb-3 flex flex-col gap-1.5 text-xs text-text-secondary">
             选择供应商
             <select
-              value={addEntryId}
+              value={selectedEntry?.id ?? ""}
               onChange={(e) => setAddEntryId(e.target.value)}
               className="h-9 w-full rounded-lg border border-border-line bg-bg-root px-3 text-[13px] text-text-primary outline-none focus:border-accent-focus"
             >
@@ -1004,7 +994,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
                 // P2：空目录下手动收起添加卡后记住选择，不随 loaded 刷新重开。
                 if (providers.length === 0) setDismissedEmptyAdd(true);
               }}
-              draftCache={addDraftsRef.current}
+              draftCache={addDrafts}
             />
           ) : (
             <p className="text-xs text-text-faint">正在加载内置供应商目录...</p>

@@ -5,7 +5,7 @@
  * @module @studyclaw/chat-service/src/service
  */
 
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { AgentLoop, ApprovalQueue, type Agent, type AgentCapability, type AgentEvent, type AgentModelSelection, type AgentPreset, type AgentRegistry, type ApprovalDecision, type ApprovalRequest, type AgentTurnHandle } from '@studyclaw/agent'
 import {
@@ -23,7 +23,7 @@ import { createDeepSeekToolClient, reasoningEffortsForConfig } from './adapter.t
 import { configProblem, createCourseService, type CourseService } from './course.ts'
 import { loadChatConfig } from './config.ts'
 import { discoverModels, settingsPayload, saveProvider } from './settings.ts'
-import { stateDirOf } from '@studyclaw/course-builder'
+import { stateDirOf, extractTextToMarkdown, MAX_SOURCE_FILE_BYTES } from '@studyclaw/course-builder'
 
 export interface SessionSummaryView {
   readonly sessionId: string
@@ -176,8 +176,9 @@ async function ensureSessionModel(workspaceRoot: string, courseId: string, sessi
   return { provider: config.providerId, model: config.model }
 }
 
-export async function sessionModels(workspaceRoot: string, courseId: string, sessionId: string): Promise<SessionModelDirectory> {
+export async function sessionModels(workspaceRoot: string, courseId: string, sessionId: string, currentOnly = false): Promise<SessionModelDirectory> {
   const current = await ensureSessionModel(workspaceRoot, courseId, sessionId)
+  if (currentOnly) return { current, routable: current !== null, groups: [], failures: [] }
   const payload = await settingsPayload(workspaceRoot)
   const groups: SessionModelGroup[] = []
   const failures: Array<{ id: string; name: string; message: string }> = []
@@ -1187,6 +1188,10 @@ function numberArg(args: Record<string, unknown>, key: string, fallback: number)
 /** Bind the tools package to the existing course/learning service. */
 export function createToolActions(courseService: CourseService): ToolActions {
   return {
+    async extractSourceText(path) {
+      if ((await stat(path)).size > MAX_SOURCE_FILE_BYTES) throw new Error('课程文档超过构建支持的大小上限')
+      return extractTextToMarkdown(path)
+    },
     async getTaskPool(ctx, args): Promise<ToolHandlerResult> {
       const conceptId = typeof args['conceptId'] === 'string' ? args['conceptId'] : null
       const tasks = await courseService.taskPool(ctx.workspaceRoot, courseIdOfAction(ctx), conceptId, numberArg(args, 'limit', 100))

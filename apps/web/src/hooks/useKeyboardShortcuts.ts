@@ -44,7 +44,7 @@ function focusZone(zone: Zone) {
   target.focus();
 }
 
-export function useKeyboardShortcuts() {
+export function useKeyboardShortcuts(onTogglePanel?: () => void) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -84,7 +84,8 @@ export function useKeyboardShortcuts() {
         // 右栏折叠：收进去把宽度让给中栏对话（右栏头部按钮同效）。
         if (key === "b") {
           event.preventDefault();
-          state.setRightPanelCollapsed(!state.rightPanelCollapsed);
+          if (inEditable) return;
+          if (onTogglePanel) onTogglePanel(); else state.setRightPanelCollapsed(!state.rightPanelCollapsed);
           return;
         }
         const n = Number(event.key);
@@ -165,5 +166,5 @@ export function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [onTogglePanel]);
 }

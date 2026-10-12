@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, flashBanner, apiMocks, wsActions, suppressAutoSelect, materialsProps } = vi.hoisted(() => ({
+const { storeState, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession, apiMocks, wsActions, suppressAutoSelect, materialsProps } = vi.hoisted(() => ({
   storeState: {
     courses: [
       {
@@ -43,7 +43,6 @@ const { storeState, selectSession, createSession, renameSession, forkSession, ar
   forkSession: vi.fn(),
   archiveSession: vi.fn(),
   reorderSession: vi.fn(),
-  flashBanner: vi.fn(),
   apiMocks: {
     workspaces: vi.fn(),
     workspaceCourses: vi.fn(),

@@ -457,12 +457,12 @@ export default function MaterialsDialog({
               </p>
               <label className="flex h-24 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-border-line bg-bg-card text-text-muted transition-colors hover:border-accent-focus hover:text-text-primary">
                 <Upload size={20} strokeWidth={1.8} aria-hidden />
-                <span className="text-[13px]">点击选择本地资料（可多选，md/txt/pdf/docx/xlsx/html）</span>
+                <span className="text-[13px]">点击选择本地资料（PDF、Word、PPT、图片或文本，可多选）</span>
                 <input
                   ref={fileRef}
                   type="file"
                   multiple
-                  accept=".md,.txt,.pdf,.docx,.xlsx,.html,.htm"
+                  accept=".md,.txt,.pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.webp,.xlsx,.html,.htm"
                   className="hidden"
                   onChange={onFilesSelected}
                 />

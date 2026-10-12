@@ -1,4 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Clawzy, resolveTier } from "../../src/components/mascot";
 import { tickSubscriberCount } from "../../src/components/mascot/ticker";
@@ -27,9 +28,16 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("Clawzy 渲染契约", () => {
+  it("服务端渲染不初始化随机动效状态", () => {
+    const random = vi.spyOn(Math, "random");
+    const html = renderToString(<Clawzy size={64} state="thinking" />);
+    expect(html).toContain('data-mascot-state="thinking"');
+    expect(random).not.toHaveBeenCalled();
+  });
   it("渲染 svg role=img + aria-label（自动派生默认 idle）", () => {
     render(<Clawzy size={64} />);
     expect(screen.getByRole("img", { name: "爪爪：idle" })).toBeInTheDocument();
@@ -85,6 +93,20 @@ describe("Clawzy 渲染契约", () => {
 });
 
 describe("Clawzy 引擎生命周期", () => {
+  it("状态与尺寸更新保留同一份观察器和 ticker 订阅", () => {
+    const disconnect = vi.fn();
+    const observer = vi.fn(function () { return { observe: vi.fn(), disconnect }; });
+    vi.stubGlobal("IntersectionObserver", observer);
+    const { rerender, unmount } = render(<Clawzy size={64} state="idle" />);
+    rerender(<Clawzy size={80} state="thinking" />);
+    rerender(<Clawzy size={20} state="writing" />);
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(tickSubscriberCount()).toBe(1);
+    expect(disconnect).not.toHaveBeenCalled();
+    unmount();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(tickSubscriberCount()).toBe(0);
+  });
   it("挂载订阅共享 ticker，卸载后订阅数归零", () => {
     const { unmount } = render(<Clawzy size={64} />);
     expect(tickSubscriberCount()).toBe(1);

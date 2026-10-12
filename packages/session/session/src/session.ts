@@ -15,7 +15,8 @@ import { ToolStreamSplitter, extractSync, type StreamEvent } from './splitter.ts
 import { chatLine, askLine, toolLine, type ChatLine, type HistoryLine, type LearningMode } from './models.ts'
 import { LOOP_LIMIT_NAME, ToolResult, type ToolActions, type ToolContext, type ToolRegistry } from '@studyclaw/tools'
 
-export const DEFAULT_TOOL_LOOP_LIMIT = 8
+/** Normal conversations finish when the model answers or the user stops. */
+export const DEFAULT_TOOL_LOOP_LIMIT: number | null = null
 
 function sessionIdFor(date: Date): string {
   const compact = date.toISOString().replace(/[-:T]/g, '').slice(0, 14)
@@ -137,7 +138,7 @@ export class TutorSession {
   private readonly toolActions: ToolActions | undefined
   private readonly approval: ((request: { name: string; policy: string; args: Record<string, unknown> }) => Promise<'allow' | 'deny'>) | undefined
   private readonly toolClientFactory: (() => ToolLlmClient) | null
-  private readonly toolLoopLimit: number
+  private readonly toolLoopLimit: number | null
   private readonly persistLegacy: boolean
   private readonly eventStore: SessionEventStore | null
   private readonly providers: ToolContext['providers'] | undefined
@@ -168,7 +169,7 @@ export class TutorSession {
       toolActions?: ToolActions
       approval?: (request: { name: string; policy: string; args: Record<string, unknown> }) => Promise<'allow' | 'deny'>
       toolClientFactory?: (() => ToolLlmClient) | null
-      toolLoopLimit?: number
+      toolLoopLimit?: number | null
       persistLegacy?: boolean
       eventStore?: SessionEventStore
       providers?: ToolContext['providers']
@@ -193,7 +194,7 @@ export class TutorSession {
     this.toolActions = options.toolActions
     this.approval = options.approval
     this.toolClientFactory = options.toolClientFactory ?? null
-    this.toolLoopLimit = Math.max(1, options.toolLoopLimit ?? DEFAULT_TOOL_LOOP_LIMIT)
+    this.toolLoopLimit = options.toolLoopLimit == null ? DEFAULT_TOOL_LOOP_LIMIT : Math.max(1, options.toolLoopLimit)
     this.persistLegacy = options.persistLegacy !== false
     this.eventStore = options.eventStore ?? null
     this.providers = options.providers
@@ -352,7 +353,6 @@ export class TutorSession {
           systemPrompt,
           messages,
           userPrompt,
-          collected,
           rawParts,
           toolLines,
           askQuestions,
@@ -422,7 +422,6 @@ export class TutorSession {
     system: string,
     messages: Array<Record<string, unknown>>,
     userPrompt: string,
-    collected: string[],
     rawParts: string[],
     toolLines: Array<{ type: 'tool'; ts: string; name: string; status: string; args: Record<string, unknown>; summary: string; error: string | null; duration_ms: number }>,
     askQuestions: string[],
@@ -435,27 +434,27 @@ export class TutorSession {
     let steps = 0
     while (true) {
       if (signal?.aborted) return
-      if (steps >= this.toolLoopLimit) {
-        const note = `\n\n（工具调用步数已达上限 ${this.toolLoopLimit}，已停止工具循环）`
-        collected.push(note)
-        yield { kind: 'token', delta: note }
+      const finalizing = this.toolLoopLimit !== null && steps >= this.toolLoopLimit
+      if (finalizing) {
         yield {
           kind: 'tool',
           payload: {
             name: LOOP_LIMIT_NAME,
-            status: 'rejected',
+            status: 'degraded',
             args: {},
-            summary: `工具调用步数超过上限 ${this.toolLoopLimit}，已终止本轮工具循环`,
-            error: 'TOOL_LOOP_LIMIT',
+            summary: '正在根据已获取的资料整理回答',
+            error: null,
             durationMs: 0,
           },
         }
-        return
       }
       steps += 1
-      const schemas = this.toolRegistry!.schemasForMode(this.toolMode ?? this.mode)
+      const schemas = finalizing ? null : this.toolRegistry!.schemasForMode(this.toolMode ?? this.mode)
+      const requestSystem = finalizing
+        ? `${system}\n\n本轮不再调用工具。请根据已经获得的工具结果回答学生，说明尚缺的证据，不要声称读取了未返回的内容。`
+        : system
       let calls: ToolCall[] = []
-      for await (const event of client.request(system, roundMessages, schemas, signal)) {
+      for await (const event of client.request(requestSystem, roundMessages, schemas, signal)) {
         if (signal?.aborted) return
         if (event.kind === 'text') {
           rawParts.push(event.delta)
@@ -465,7 +464,7 @@ export class TutorSession {
         }
       }
       yield* emitSplit(splitter.flush())
-      if (calls.length === 0) return
+      if (finalizing || calls.length === 0) return
 
       const assistantToolMsg: Record<string, unknown> = { role: 'assistant', content: null, tool_calls: [] as unknown[] }
       const toolMessages: Array<Record<string, unknown>> = []

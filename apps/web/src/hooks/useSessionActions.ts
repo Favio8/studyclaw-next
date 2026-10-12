@@ -12,11 +12,10 @@
  * 选择（手动连点/自动选会话），晚到的响应直接放弃落地，杜绝"点了 B 却
  * 进了 A"的乱序覆盖。
  *
- * 注：函数不手动 memoize——React Compiler（Next 16 默认）自动接管，
- * 避免 useCallback 闭包与 effect 前向引用的编译器冲突（T3.2 修正）。
+ * 自动加载依赖的动作显式保持引用稳定，避免补全 effect 依赖后重复恢复会话。
  */
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { abortActiveChat } from "@/src/lib/chatStream";
 import { dateOnly } from "@/src/lib/format";
 import { modeLabel } from "@/src/lib/modes";
@@ -29,6 +28,7 @@ import {
   suppressAutoSelectOnce,
 } from "@/src/lib/selectEpoch";
 import { nextMessageId, useAppStore } from "@/src/store/useAppStore";
+import { captureCourseScope } from "@/src/lib/courseScope";
 
 // A7：纪元状态下沉到 lib/selectEpoch（打破 sessionActions 的循环导入）；
 // 这里 re-export 保持 LeftNav 及其测试的既有导入路径不变。
@@ -38,6 +38,7 @@ const autoSelectRuns = new Map<string, Promise<void>>();
 
 export function useSessionActions() {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
+  const generation = useAppStore((s) => s.courseGeneration);
   const setSessions = useAppStore((s) => s.setSessions);
   const setCourseSessions = useAppStore((s) => s.setCourseSessions);
   const setActiveSession = useAppStore((s) => s.setActiveSession);
@@ -46,21 +47,24 @@ export function useSessionActions() {
   const setSuggestedEntry = useAppStore((s) => s.setSuggestedEntry);
   const setActiveCourse = useAppStore((s) => s.setActiveCourse);
 
-  async function loadSessions(courseId: string) {
+  const loadSessions = useCallback(async (courseId: string) => {
+    const scope = captureCourseScope();
     try {
       const { sessions } = await api.sessions(courseId);
+      if (!scope.isCurrent()) return [];
       setCourseSessions(courseId, sessions);
       if (courseId === useAppStore.getState().activeCourseId) setSessions(sessions);
       return sessions;
     } catch {
-      if (courseId === useAppStore.getState().activeCourseId) setSessions([]);
+      if (scope.isCurrent() && courseId === useAppStore.getState().activeCourseId) setSessions([]);
       return [];
     }
-  }
+  }, [setCourseSessions, setSessions]);
 
-  async function selectSession(sessionId: string, courseId = activeCourseId) {
+  const selectSession = useCallback(async (sessionId: string, courseId = activeCourseId, activateChat = true) => {
     if (!courseId) return;
     if (courseId !== useAppStore.getState().activeCourseId) setActiveCourse(courseId);
+    const scope = captureCourseScope();
     abortActiveChat(); // 中止旧流（若在流式）
     useAppStore.getState().setStreaming(false);
     // UI-9：记录本次选择占据的纪元；restore 在途期间若出现更新的选择
@@ -68,11 +72,13 @@ export function useSessionActions() {
     const myEpoch = bumpSelectEpoch();
     try {
       const restored = await api.restoreSession(courseId, sessionId);
+      if (!scope.isCurrent() || peekSelectEpoch() !== myEpoch) return;
       // Resume the shared Host Agent so subsequent chat turns use one live
       // lifecycle owner instead of rebuilding a Web-only runner.
       await api.resumeAgent(courseId, sessionId).catch(() => undefined);
-      if (peekSelectEpoch() !== myEpoch) return; // 更新的选择已发生，本次晚到响应作废
-      setActiveSession(sessionId, restored.title);
+      if (!scope.isCurrent() || peekSelectEpoch() !== myEpoch) return; // 更新的选择已发生，本次晚到响应作废
+      if (activateChat) setActiveSession(sessionId, restored.title);
+      else setActiveSession(sessionId, restored.title, false);
       setMessages(
         restored.turns.map((turn) => ({
           id: nextMessageId(),
@@ -96,8 +102,9 @@ export function useSessionActions() {
           : `── 已恢复上次对话 ──`,
       );
     } catch {
-      if (peekSelectEpoch() !== myEpoch) return; // 同上：过期响应不落地失败态
-      setActiveSession(sessionId, "");
+      if (!scope.isCurrent() || peekSelectEpoch() !== myEpoch) return; // 同上：过期响应不落地失败态
+      if (activateChat) setActiveSession(sessionId, "");
+      else setActiveSession(sessionId, "", false);
       setMessages([]);
       setSuggestedEntry(null);
       useAppStore.getState().setWakeupCard(null);
@@ -106,7 +113,7 @@ export function useSessionActions() {
       // UI-3：恢复失败时 activeSessionId 仍指向旧会话，横幅不能谎称"新对话"。
       setSessionBanner(`── 恢复失败 · 请重试或新建对话 ──`);
     }
-  }
+  }, [activeCourseId, setActiveCourse, setActiveSession, setMessages, setSessionBanner, setSuggestedEntry]);
 
   async function createSession(title?: string, courseId?: string) {
     // 统一走 lib/sessionActions（Ctrl+N / Palette 共用同一实现）
@@ -168,6 +175,7 @@ export function useSessionActions() {
     if (!activeCourseId) return;
     abortActiveChat();
     const courseId = activeCourseId;
+    const scope = captureCourseScope();
     if (consumeSuppress(courseId)) {
       // UI-9：suppress 跳过的是"自动选第一条会话"，不是列表刷新本身——
       // 触发场景（全局搜索跨项目打开会话/新建后切换）用户已显式选定目标，
@@ -176,16 +184,16 @@ export function useSessionActions() {
       return;
     }
     const epochAtStart = peekSelectEpoch();
-    let run = autoSelectRuns.get(courseId);
+    let run = autoSelectRuns.get(scope.key);
     if (run === undefined) {
       run = (async () => {
         const sessions = await loadSessions(courseId);
-        if (useAppStore.getState().activeCourseId !== courseId || peekSelectEpoch() !== epochAtStart) return;
+        if (!scope.isCurrent() || peekSelectEpoch() !== epochAtStart) return;
         if (sessions.length > 0) {
-          void selectSession(sessions[0].sessionId, courseId);
+          void selectSession(sessions[0].sessionId, courseId, false);
         } else {
-          if (useAppStore.getState().activeCourseId !== courseId || peekSelectEpoch() !== epochAtStart) return;
-          setActiveSession(null);
+          if (!scope.isCurrent() || peekSelectEpoch() !== epochAtStart) return;
+          setActiveSession(null, "", false);
           setMessages([]);
           setSuggestedEntry(null);
           setSessionBanner(
@@ -193,12 +201,12 @@ export function useSessionActions() {
           );
         }
       })();
-      autoSelectRuns.set(courseId, run);
+      autoSelectRuns.set(scope.key, run);
       void run.finally(() => {
-        if (autoSelectRuns.get(courseId) === run) autoSelectRuns.delete(courseId);
+        if (autoSelectRuns.get(scope.key) === run) autoSelectRuns.delete(scope.key);
       });
     }
-  }, [activeCourseId]);
+  }, [activeCourseId, generation, loadSessions, selectSession, setActiveSession, setMessages, setSessionBanner, setSuggestedEntry]);
 
   return { loadSessions, selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession };
 }

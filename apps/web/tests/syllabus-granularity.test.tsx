@@ -64,13 +64,7 @@ import SyllabusTab from "../src/components/panel/SyllabusTab";
 
 beforeEach(() => {
   apiMocks.syllabus.mockResolvedValue(syllabusFine);
-  apiMocks.setSyllabusGranularity.mockResolvedValue({
-    courseId: "course-1",
-    granularity: "coarse",
-    syllabus: syllabusCoarse,
-    conceptsSeeded: 2,
-    degraded: [],
-  });
+  apiMocks.setSyllabusGranularity.mockResolvedValue(syllabusCoarse);
 });
 
 afterEach(() => {

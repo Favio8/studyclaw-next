@@ -8,7 +8,13 @@ const { storeState, setActiveTab, setRightPanelCollapsed } = vi.hoisted(() => {
     setActiveTab,
     setRightPanelCollapsed,
     storeState: {
-      activeTab: "progress" as const,
+      activeTab: "progress" as "progress" | "syllabus" | "heatmap" | "quiz",
+      reader: { action: null },
+      streaming: false,
+      pendingAsk: null,
+      queuedMessages: [],
+      messages: [],
+      activeSessionId: "session-1",
       setActiveTab,
       rightPanelCollapsed: false as boolean,
       setRightPanelCollapsed,
@@ -30,9 +36,20 @@ import RightPanel from "../src/components/panel/RightPanel";
 afterEach(() => {
   cleanup();
   setActiveTab.mockClear();
+  storeState.activeTab = "progress";
 });
 
 describe("RightPanel", () => {
+  it("四个 Tab 默认直接显示学习内容，运行详情不常驻", () => {
+    const { container, rerender } = render(<RightPanel />);
+    for (const tab of ["progress", "syllabus", "heatmap", "quiz"] as const) {
+      storeState.activeTab = tab;
+      rerender(<RightPanel />);
+      expect(container.querySelector("[data-agent-runtime-panel]")).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "助手详情" })).toBeNull();
+      expect(screen.getByRole("button", { name: "助手详情" })).toHaveAttribute("aria-expanded", "false");
+    }
+  });
   it("exposes a labelled tablist and connects every tab to its panel", () => {
     render(<RightPanel />);
 

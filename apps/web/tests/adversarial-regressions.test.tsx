@@ -66,6 +66,25 @@ beforeEach(() => {
 });
 
 describe("UI-9 会话管理：乱序恢复守卫", () => {
+  it("同名课程切项目后，旧恢复响应不得重新选中旧会话", async () => {
+    let resolve!: (value: unknown) => void;
+    restoreSessionMock.mockReturnValue(new Promise(yes => { resolve = yes; }));
+    useAppStore.getState().setWorkspacePath("/first/course-1");
+    const { result } = renderHook(() => useSessionActions());
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.selectSession("old", "course-1"); });
+    act(() => {
+      useAppStore.getState().setWorkspacePath("/another/course-1");
+      useAppStore.getState().setActiveCourse("course-1");
+    });
+    await act(async () => {
+      resolve({ title: "旧会话", turns: [], suggestedEntry: null });
+      await pending;
+    });
+    expect(useAppStore.getState().activeSessionId).toBeNull();
+    expect(useAppStore.getState().activeSessionTitle).toBe("");
+  });
+
   it("快速连点两个会话：后点的会话必须胜出（乱序恢复不得覆盖用户选择）", async () => {
     // S1 慢（50ms）、S2 快（0ms）——模拟用户先点 S1 再立刻点 S2，
     // 两个 restore 并发在途，先发起的 S1 响应后到。
@@ -224,7 +243,7 @@ describe("UI-19 建议入口：一次有效", () => {
 describe("A1 answer 幂等键：绑定 (question, answer) 二元组", () => {
   async function answerOnce(result: { current: { answer: (text: string) => Promise<boolean> } }, text: string, mode: "ok" | "fail") {
     const { streamAgentAnswer } = await import("../src/lib/chatStream");
-    (streamAgentAnswer as ReturnType<typeof vi.fn>).mockImplementation(async function* (_agentId: string, _answer: string, _signal?: AbortSignal, _requestId?: string) {
+    (streamAgentAnswer as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
       if (mode === "fail") throw new TypeError("failed to fetch");
       yield { event: "meta", data: { sessionId: "s-1" } };
       yield { event: "token", data: { delta: "回复" } };

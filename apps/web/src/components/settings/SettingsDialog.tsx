@@ -3,15 +3,16 @@
 /** DSH 风格设置面板：左侧分区导航，右侧配置内容，覆盖当前控制台。 */
 
 import { useEffect, useRef, useState } from "react";
-import { Bot, Database, FileScan, Settings2, ShieldCheck, X } from "lucide-react";
+import { Bot, Database, FileScan, HardDriveDownload, Settings2, ShieldCheck, X } from "lucide-react";
 import ModelsSection from "@/src/components/settings/ModelsSection";
+import DataSection from "@/src/components/settings/DataSection";
 import { MODES } from "@/src/lib/modes";
 import { api, ApiError } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
 import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import type { SettingsPayload } from "@/src/types/api";
 
-type Section = "general" | "models" | "agent" | "parsing";
+type Section = "general" | "models" | "agent" | "parsing" | "data";
 /** 通用设置只管 ui 段（api_spec §2.6 v2.6 部分更新语义）；LLM 配置全部走模型配置 Tab。 */
 type Draft = {
   defaultMode: SettingsPayload["ui"]["defaultMode"];
@@ -47,6 +48,10 @@ function errorMessage(error: unknown): string {
 
 export default function SettingsDialog() {
   const open = useAppStore((state) => state.settingsOpen);
+  return open ? <SettingsDialogContent /> : null;
+}
+
+function SettingsDialogContent() {
   const setOpen = useAppStore((state) => state.setSettingsOpen);
   const setMode = useAppStore((state) => state.setMode);
   const flashStatusBanner = useAppStore((state) => state.flashStatusBanner);
@@ -63,12 +68,7 @@ export default function SettingsDialog() {
   });
 
   useEffect(() => {
-    if (!open) return;
     let alive = true;
-    setSection("general");
-    setError(null);
-    setLoaded(null);
-    setDraft(null);
     void api.settings().then((payload) => {
       if (!alive) return;
       setLoaded(payload);
@@ -77,9 +77,7 @@ export default function SettingsDialog() {
       if (alive) setError(errorMessage(cause));
     });
     return () => { alive = false; };
-  }, [open]);
-
-  if (!open) return null;
+  }, []);
 
   function update<K extends keyof Draft>(key: K, value: Draft[K]) {
     setDraft((current) => current ? { ...current, [key]: value } : current);
@@ -164,12 +162,21 @@ export default function SettingsDialog() {
               <FileScan size={15} strokeWidth={1.8} aria-hidden />
               <span>资料解析</span>
             </button>
+            <button
+              type="button"
+              aria-current={section === "data" ? "true" : undefined}
+              onClick={() => setSection("data")}
+              className={`flex h-10 items-center gap-2 rounded-xl px-3 text-left text-[14px] transition-colors ${section === "data" ? "bg-bg-card text-text-primary" : "text-text-muted hover:bg-bg-card/70 hover:text-text-primary"}`}
+            >
+              <HardDriveDownload size={15} strokeWidth={1.8} aria-hidden />
+              <span>数据导出导入</span>
+            </button>
           </div>
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-[54px] shrink-0 items-start justify-between gap-2 px-[14px] pb-2 pl-2.5 pt-5">
-            <span className="text-[14px] font-medium text-text-primary">{section === "general" ? "通用设置" : section === "models" ? "模型配置" : section === "parsing" ? "资料解析" : "Agent 运行时"}</span>
+            <span className="text-[14px] font-medium text-text-primary">{section === "general" ? "通用设置" : section === "models" ? "模型配置" : section === "parsing" ? "资料解析" : section === "data" ? "数据导出导入" : "Agent 运行时"}</span>
             <button
               type="button"
               aria-label="关闭设置"
@@ -196,19 +203,24 @@ export default function SettingsDialog() {
               <ParseSettings payload={loaded} draft={draft} update={update} />
             ) : section === "models" ? (
               <ModelsSection initial={loaded} />
+            ) : section === "data" ? (
+              /* 数据分区自有保存语义（下载/上传），不参与底部「保存设置」 */
+              <DataSection />
             ) : (
               <RuntimeSettings payload={loaded} draft={draft} update={update} />
             )}
           </div>
 
-          {section !== "models" ? (
+          {section !== "models" && section !== "data" ? (
             <div className="flex shrink-0 items-center justify-end gap-2 px-5 py-3">
               <button type="button" disabled={busy} onClick={() => setOpen(false)} className="h-9 rounded-lg px-4 text-[13px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary disabled:opacity-40">取消</button>
               <button type="button" disabled={busy || draft === null} onClick={() => void save()} className="h-9 rounded-lg bg-accent-focus px-4 text-[13px] font-medium text-white transition-colors hover:bg-accent-focus-hover disabled:opacity-40">{busy ? "保存中..." : "保存设置"}</button>
             </div>
           ) : (
             <div className="flex shrink-0 items-center justify-end gap-2 px-5 py-3">
-              <span className="text-xs text-text-faint">模型配置在对应卡片内保存</span>
+              <span className="text-xs text-text-faint">
+                {section === "data" ? "导出直接下载，导入即时生效" : "模型配置在对应卡片内保存"}
+              </span>
             </div>
           )}
         </div>

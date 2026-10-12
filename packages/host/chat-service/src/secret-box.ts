@@ -8,12 +8,7 @@
  * require stealing a file from the user's home directory as well.
  * Plaintext files written by older builds are detected on read and migrated
  * to sealed form by the settings layer.
- */
-
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
-import { homedir } from 'node:os'
-import { join, dirname, resolve } from 'node:path'
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+ */import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'import { homedir } from 'node:os'import { join, dirname, resolve } from 'node:path'import { link, mkdir, open, readFile, rm } from 'node:fs/promises'import { renameWithRetry } from '@studyclaw/fs-atomic'
 const KEY_BYTES = 32
 
 export function masterKeyPath(): string {
@@ -27,7 +22,10 @@ export function masterKeyPath(): string {
 /** Load or lazily create the per-user master key (hex-encoded 256-bit). */
 export async function ensureMasterKey(): Promise<Buffer> {
   const path = masterKeyPath()
-  const existing = await readFile(path, 'utf8').catch(() => null)
+  const existing = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
   if (existing !== null) {
     const hex = existing.trim()
     if (/^[0-9a-f]{64}$/i.test(hex)) return Buffer.from(hex, 'hex')
@@ -36,11 +34,25 @@ export async function ensureMasterKey(): Promise<Buffer> {
   }
   await mkdir(dirname(path), { recursive: true })
   const fresh = randomBytes(KEY_BYTES)
-  await writeFileAtomicRestricted(path, fresh.toString('hex') + '\n')
-  return fresh
+  const tmp = join(dirname(path), `.${randomBytes(8).toString('hex')}.key.tmp`)
+  const handle = await open(tmp, 'wx', 0o600)
+  try {
+    try {
+      await handle.writeFile(fresh.toString('hex') + '\n', 'utf8')
+      await handle.sync()
+    } finally { await handle.close() }
+    // Publish fully written bytes without replacing another caller's key.
+    // Hard-link creation is atomic and fails with EEXIST if another process wins.
+    await link(tmp, path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') throw error
+    })
+  } finally { await rm(tmp, { force: true }) }
+  const winner = (await readFile(path, 'utf8')).trim()
+  if (!/^[0-9a-f]{64}$/i.test(winner)) throw new Error(`master.key 内容无效: ${path}`)
+  return Buffer.from(winner, 'hex')
 }
 
-/** The only writer for master.key and credentials.json: random tmp name,
+/** Atomic replacement writer for credentials.json: random tmp name,
  * exclusive-create with owner-only mode, fsync, then rename over target. */
 async function writeFileAtomicRestricted(path: string, data: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
@@ -57,7 +69,7 @@ async function writeFileAtomicRestricted(path: string, data: string): Promise<vo
     throw error
   }
   try {
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error

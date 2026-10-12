@@ -382,6 +382,42 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Shared Markdown typography for reading cards and narrow panels. */
+.sc-markdown-compact :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 1.08em;
+  line-height: 1.6;
+}
+.sc-markdown-compact pre {
+  padding: 10px 12px;
+  font-size: 0.92em;
+  line-height: 1.6;
+}
+.sc-markdown-compact table {
+  font-size: 0.92em;
+  line-height: 1.6;
+}
+.sc-markdown-compact :is(th, td) {
+  padding: 6px 8px;
+}
+.sc-markdown-compact blockquote {
+  padding-left: 10px;
+}
+
+/* Export uses a fresh, expanded layout so labels and bounds are complete. */
+.sc-mm-export .map-container me-tpc {
+  max-width: 420px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.sc-mm-export .map-container .sc-mm-node {
+  max-width: 320px;
+  white-space: normal;
+}
+.sc-mm-export .map-container .sc-mm-text {
+  overflow: visible;
+  text-overflow: clip;
+}
 .studyclaw-mindmap .map-container .sc-mm-badge {
   flex: 0 0 auto;
   font-size: 10px;

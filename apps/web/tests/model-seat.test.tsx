@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { storeState, apiMocks } = vi.hoisted(() => ({
@@ -30,10 +30,35 @@ const directory = {
   failures: [],
 };
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); storeState.activeModel = null; });
+afterEach(() => { cleanup(); vi.clearAllMocks(); storeState.activeModel = null; storeState.activeSessionId = "session-1"; });
 storeState.setActiveModel.mockImplementation((value: { providerId: string; model: string; effort?: string | null } | null) => { storeState.activeModel = value; });
 
 describe("ModelSeat 输入栏模型座位", () => {
+  it("无需打开菜单即恢复当前会话模型，切换会话后重新恢复", async () => {
+    apiMocks.sessionModels.mockResolvedValue(directory);
+    const { rerender } = render(<ModelSeat />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /acme-small/ })).toBeInTheDocument());
+    expect(apiMocks.sessionModels).toHaveBeenCalledWith("course-1", "session-1", true);
+    storeState.activeSessionId = "session-2";
+    storeState.activeModel = null;
+    apiMocks.sessionModels.mockResolvedValue({ ...directory, current: { provider: "other", model: "other-1" } });
+    rerender(<ModelSeat />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /other-1/ })).toBeInTheDocument());
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+  it("旧会话的模型目录晚到时不能覆盖新会话模型", async () => {
+    let resolve!: (value: typeof directory) => void;
+    const pending = new Promise<typeof directory>((yes) => { resolve = yes; });
+    apiMocks.sessionModels.mockImplementation((_course: string, session: string) => session === "session-1" ? pending : Promise.resolve({ ...directory, current: { provider: "other", model: "other-1" } }));
+    const { rerender } = render(<ModelSeat />);
+    fireEvent.click(screen.getByRole("button", { name: /选择模型/ }));
+    storeState.activeSessionId = "session-2";
+    rerender(<ModelSeat />);
+    await act(async () => { resolve(directory); await pending; });
+    expect(storeState.setActiveModel).not.toHaveBeenCalledWith({ providerId: "acme", model: "acme-small" });
+    expect(storeState.setActiveModel).toHaveBeenCalledWith({ providerId: "other", model: "other-1" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
   it("打开后按 DSH 两级菜单展示 provider 分组并播种当前模型", async () => {
     apiMocks.sessionModels.mockResolvedValue(directory);
     render(<ModelSeat />);

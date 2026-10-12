@@ -23,6 +23,7 @@ import { useKeyboardShortcuts } from "@/src/hooks/useKeyboardShortcuts";
 import { usePanelData } from "@/src/hooks/usePanelData";
 import { api } from "@/src/lib/api";
 import { useAppStore } from "@/src/store/useAppStore";
+import TodayView from "@/src/components/center/TodayView";
 
 // 阅读器按路由级动态加载：pdfjs-dist 体积大，首屏不承担（PRD 需求三）。
 const ReaderView = dynamic(() => import("@/src/components/reader/ReaderView"), { ssr: false });
@@ -49,18 +50,27 @@ export default function Console() {
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   usePanelData(); // 右栏：progress/mastery/heatmap 随激活项目刷新（T3.2）
-  useKeyboardShortcuts(); // 全局快捷键（T3.4+T3.5）
+
 
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => typeof window !== "undefined" && window.innerWidth < 1024,
   );
   const [detailsWidth, setDetailsWidth] = useState(DETAILS_DEFAULT);
-  const effectiveSidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
+  const [readingFocus, setReadingFocus] = useState(false);
+  const [readingSidebar, setReadingSidebar] = useState(false);
+  const [readingDetails, setReadingDetails] = useState(false);
+  const reading = centerView === "reading";
+  const sidebarHidden = reading && readingFocus;
+  const sidebarFolded = reading ? !readingSidebar : sidebarCollapsed;
+  const effectiveSidebarWidth = sidebarHidden ? 0 : sidebarFolded ? SIDEBAR_COLLAPSED : sidebarWidth;
   // 右栏折叠：第三列归零、section display:none（不卸载，Tab/进行中状态保留）。
   const rightPanelCollapsed = useAppStore((s) => s.rightPanelCollapsed);
   const setRightPanelCollapsed = useAppStore((s) => s.setRightPanelCollapsed);
-  const effectiveDetailsWidth = rightPanelCollapsed ? 0 : detailsWidth;
+  const detailsFolded = rightPanelCollapsed || (reading && (!readingDetails || readingFocus));
+  const effectiveDetailsWidth = detailsFolded ? 0 : detailsWidth;
+  const toggleReadingPanel = useCallback(() => { setReadingDetails(detailsFolded); setRightPanelCollapsed(false); }, [detailsFolded, setRightPanelCollapsed]);
+  useKeyboardShortcuts(reading ? toggleReadingPanel : undefined);
   const [dragging, setDragging] = useState<null | "sidebar" | "details">(null);
   // FL-22：宿主心跳。旧版 api.workspaces() 失败被静默吞掉且"左栏错误横幅"
   // 根本不存在——用户只起了 next dev 忘了起 studyclaw serve 时，三栏空壳、
@@ -125,7 +135,6 @@ export default function Console() {
     }).catch(() => {
       /* 后端不可达：保持空态，左栏错误横幅自会提示 */
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setMode]);
 
   // 项目指针就绪/切换后重拉课程（M1 起课程列表按项目读取，存在异步竞态：
@@ -204,18 +213,18 @@ export default function Console() {
     >
       {/* 左栏：sidebar-fill 底 + l1 hairline 右边线（DSH sidebarCol） */}
       <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-border-faint bg-bg-root">
-        <LeftNav collapsed={sidebarCollapsed} onExpand={() => setSidebarCollapsed(false)} onCollapse={() => setSidebarCollapsed(true)} />
+        <LeftNav collapsed={sidebarFolded} onExpand={() => reading ? setReadingSidebar(true) : setSidebarCollapsed(false)} onCollapse={() => reading ? setReadingSidebar(false) : setSidebarCollapsed(true)} />
       </aside>
 
       {/* 中栏：白底，无右边线（右栏自带 border-l，DSH 同）。顶部一级学习活动栏；
           对话/测验/复习共用 ChatArea（测验/复习聚焦右栏面板），阅读为独立视图。 */}
       <main className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-bg-panel">
         <CenterSwitcher />
-        {centerView === "reading" ? <ReaderView /> : <ChatArea />}
+        {centerView === "reading" ? <ReaderView focus={readingFocus} onFocusChange={setReadingFocus} /> : centerView === "today" ? <TodayView /> : <ChatArea />}
       </main>
 
       {/* 右栏：l2 hairline 左边线（DSH detailsCol）；折叠时整体隐藏（不卸载） */}
-      <section className={`min-h-0 min-w-0 flex-col overflow-hidden border-l border-border-line ${rightPanelCollapsed ? "hidden" : "flex"}`}>
+      <section className={`min-h-0 min-w-0 flex-col overflow-hidden border-l border-border-line ${detailsFolded ? "hidden" : "flex"}`}>
         <RightPanel />
       </section>
 
@@ -224,16 +233,16 @@ export default function Console() {
         role="separator"
         aria-orientation="vertical"
         aria-label="调整左栏宽度"
-        onPointerDown={sidebarCollapsed ? undefined : startDrag("sidebar")}
-        className={`group absolute bottom-0 top-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none ${sidebarCollapsed ? "hidden" : ""}`}
+        onPointerDown={sidebarFolded ? undefined : startDrag("sidebar")}
+        className={`group absolute bottom-0 top-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none ${sidebarFolded ? "hidden" : ""}`}
         style={{ left: effectiveSidebarWidth }}
       />
       <div
         role="separator"
         aria-orientation="vertical"
         aria-label="调整右栏宽度"
-        onPointerDown={rightPanelCollapsed ? undefined : startDrag("details")}
-        className={`group absolute bottom-0 top-0 z-10 w-2 translate-x-1/2 cursor-col-resize touch-none ${rightPanelCollapsed ? "hidden" : ""}`}
+        onPointerDown={detailsFolded ? undefined : startDrag("details")}
+        className={`group absolute bottom-0 top-0 z-10 w-2 translate-x-1/2 cursor-col-resize touch-none ${detailsFolded ? "hidden" : ""}`}
         style={{ left: `calc(100% - ${effectiveDetailsWidth}px)` }}
       >
         {/* hover 胶囊（DSH：12×32 圆条，白底 l2 边） */}
@@ -241,12 +250,12 @@ export default function Console() {
       </div>
 
       {/* 右栏收起态的浮动展开钮：右边缘垂直居中（与右栏头部折叠钮 / Ctrl+B 同效） */}
-      {rightPanelCollapsed ? (
+      {detailsFolded && !readingFocus ? (
         <button
           type="button"
           aria-label="展开右栏"
           title="展开右栏（Ctrl+B）"
-          onClick={() => setRightPanelCollapsed(false)}
+          onClick={() => { setRightPanelCollapsed(false); if (reading) setReadingDetails(true); }}
           className="absolute top-1/2 right-2 z-10 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-border-line bg-bg-panel text-text-muted shadow-lv2 transition-colors hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
         >
           <PanelRightOpen size={15} strokeWidth={1.8} aria-hidden />

@@ -13,6 +13,7 @@
 import { api } from "@/src/lib/api";
 import { refreshCourseList, refreshPanelData } from "@/src/lib/panelData";
 import { useAppStore } from "@/src/store/useAppStore";
+import { captureCourseScope } from "@/src/lib/courseScope";
 
 export interface WakeupEvalResult {
   passed: boolean;
@@ -59,11 +60,13 @@ export async function submitWakeupAnswer(
     masteryDelta: 0,
   };
   const sessionId = useAppStore.getState().activeSessionId;
+  const scope = captureCourseScope();
   const abort = new AbortController();
   activeAbort = abort;
   try {
     const evalId = evalFingerprint(courseId, taskId, sessionId, answer);
     for await (const event of api.evalSubmit(courseId, taskId, answer, sessionId, abort.signal, evalId)) {
+      if (abort.signal.aborted || !scope.isCurrent()) throw new DOMException("项目上下文已切换", "AbortError");
       if (event.event === "result") {
         result.passed = Boolean(event.data.passed);
         result.score = event.data.score ?? 0;
@@ -80,6 +83,7 @@ export async function submitWakeupAnswer(
     // 中止/结束都清句柄；AbortError 原样上抛由组件识别（切项目不报错）。
     if (activeAbort === abort) activeAbort = null;
   }
+  if (abort.signal.aborted || !scope.isCurrent()) throw new DOMException("项目上下文已切换", "AbortError");
   await Promise.all([refreshPanelData(), refreshCourseList()]);
   return result;
 }

@@ -41,6 +41,7 @@ import type {
   ApprovalRequestView,
   AgentProjectionView,
   SessionEventView,
+  CourseDigest,
 } from "@/src/types/api";
 import type { HarnessTask, Syllabus } from "@/src/types";
 
@@ -97,34 +98,49 @@ async function rpc<T>(method: string, payload?: unknown, signal?: AbortSignal): 
   return envelope.result as T;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * M3 二进制通道：课程导出/导入不能走 JSON+base64 —— 请求体上限 2 MiB，
+ * 而 base64 还要再膨胀三分之一，几 MB 的会话历史就会被 413 拒掉。
+ *
+ * 服务端错误仍以 JSON 信封 `{ok:false,error}` 返回，所以要按 content-type
+ * 分流：拿到 JSON 说明是错误，拿到二进制说明是成功。
+ */
+async function binaryFetch(
+  path: string,
+  init: { method: "GET" | "POST"; body?: ArrayBuffer },
+): Promise<{ blob: Blob; filename: string }> {
   const response = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
+    method: init.method,
+    headers: { ...(init.body === undefined ? {} : { "Content-Type": "application/zip" }), ...authHeaders() },
+    ...(init.body === undefined ? {} : { body: init.body }),
   });
-  const text = await response.text();
-  // UI-25：非 JSON 响应（反向代理错误页等）此前直接抛裸 SyntaxError，
-  // 错误信息不可读；统一转 ApiError。
-  let body: unknown = {};
-  if (text) {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    let envelope: { ok: boolean; error?: { code: string; message: string } } = { ok: false };
     try {
-      body = JSON.parse(text);
+      envelope = (await response.json()) as typeof envelope;
     } catch {
-      throw new ApiError("INTERNAL_ERROR", `非 JSON 响应（HTTP ${response.status}）`, response.status);
+      throw new ApiError("INTERNAL_ERROR", `HTTP ${response.status}`, response.status);
     }
-  }
-  if (!response.ok) {
-    const payload = body as ApiErrorPayload;
     throw new ApiError(
-      payload?.error?.code ?? "INTERNAL_ERROR",
-      payload?.error?.message ?? response.statusText,
+      envelope.error?.code ?? "INTERNAL_ERROR",
+      envelope.error?.message ?? response.statusText,
       response.status,
     );
   }
-  return body as T;
+  if (!response.ok) {
+    throw new ApiError("INTERNAL_ERROR", response.statusText, response.status);
+  }
+  // Content-Disposition 里的 filename 可能是 RFC 5987 的 UTF-8 形式，中文课程名
+  // 直接读 filename= 会拿到乱码，这里只取可用的 ASCII 回退名。
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const ascii = /filename="?([^";\r\n]+)"?/.exec(disposition)?.[1] ?? "";
+  const utf8 = /filename\*=UTF-8''([^;\r\n]+)/i.exec(disposition)?.[1] ?? "";
+  const filename = ascii !== "" ? ascii : decodeURIComponent(utf8) !== "" ? decodeURIComponent(utf8) : "studyclaw-export";
+  return { blob: await response.blob(), filename };
 }
 
-/** 本地资料上传不能复用 JSON request：浏览器须自行生成 multipart boundary。
+/** 本地资料上传不能复用 JSON RPC：浏览器须自行生成 multipart boundary。
  *  W-12：signal 让调用方可取消——大文件上传网络挂起时旧实现 busy 永久 true，
  *  只能刷新页面（无超时/取消的任何入口）。 */
 async function uploadFiles<T>(path: string, files: File[], signal?: AbortSignal): Promise<T> {
@@ -135,7 +151,7 @@ async function uploadFiles<T>(path: string, files: File[], signal?: AbortSignal)
   }
   const response = await fetch(path, { method: "POST", headers: { ...authHeaders() }, body: form, signal });
   const text = await response.text();
-  // UI-25：同 request——非 JSON 响应转可读的 ApiError。
+  // UI-25：非 JSON 响应转可读的 ApiError。
   let body: unknown = {};
   if (text) {
     try {
@@ -273,6 +289,9 @@ export const api = {
   /** 指定项目的课程列表（M1 起经 RPC workspaces.courses 读取）。 */
   courseList: (path: string) => rpc<{ courses: CourseSummary[]; missing: boolean }>("workspaces.courses", { path }),
 
+  conceptCards: (courseId: string) => rpc<{generated: number; conceptsFilled: number}>("courses.concepts.cards", {courseId}),
+  conceptDraft: (courseId: string, sources: string[]) => rpc<import("@/src/types/api").SemanticDraft>("courses.concepts.draft", { courseId, sources }),
+  conceptApply: (courseId: string, draftId: string, edits: Array<{ id: string; name: string }>) => rpc<{ concepts: number; rebound: number; archived: number; backup: string }>("courses.concepts.apply", { courseId, draftId, edits }),
   syllabus: (courseId: string) =>
     rpc<Syllabus>("courses.syllabus", { courseId }),
 
@@ -305,8 +324,8 @@ export const api = {
   restoreSession: (courseId: string, sessionId: string) =>
     rpc<RestoredSession>("sessions.restore", { courseId, sessionId }),
 
-  sessionModels: (courseId: string, sessionId: string) =>
-    rpc<SessionModelDirectory>("sessions.models", { courseId, sessionId }),
+  sessionModels: (courseId: string, sessionId: string, currentOnly = false) =>
+    rpc<SessionModelDirectory>("sessions.models", { courseId, sessionId, currentOnly }),
 
   selectSessionModel: (courseId: string, sessionId: string, selection: SessionModelSelection) =>
     rpc<{ selected: SessionModelSelection }>("sessions.selectModel", { courseId, sessionId, ...selection }),
@@ -393,6 +412,42 @@ export const api = {
   /** P3「我的痕迹」：全课程标注按概念聚合。 */
   readingTraces: () =>
     rpc<{ traces: Array<{ conceptId: string; count: number; lastAt: string }> }>("reading.traces"),
+  /** M4/M5：一次聚合全课概念级摘要（「今天」视图与大纲 Tab 共用，无 N+1）。 */
+  digest: (courseId: string) => rpc<CourseDigest>("courses.digest", { courseId }),
+  /** M3：导出课程到浏览器下载（二进制通道，非 JSON）。 */
+  exportCourse: async (courseId: string, format: "markdown" | "backup") => {
+    const { blob, filename } = await binaryFetch(
+      `/api/courses.export?courseId=${encodeURIComponent(courseId)}&format=${format}`,
+      { method: "GET" },
+    );
+    return { blob, filename };
+  },
+  /** M3：从备份归档还原（二进制 POST）。`force` 对应服务端的"覆盖同名"语义。 */
+  importCourse: async (file: ArrayBuffer, opts: { courseId?: string; force?: boolean }) => {
+    const query = new URLSearchParams();
+    if (opts.courseId !== undefined && opts.courseId !== "") query.set("courseId", opts.courseId);
+    if (opts.force === true) query.set("force", "1");
+    const suffix = query.toString();
+    const response = await fetch(`/api/courses.import${suffix === "" ? "" : `?${suffix}`}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/zip", ...authHeaders() },
+      body: file,
+    });
+    let envelope: { ok: boolean; result?: { courseId: string; files: number }; error?: { code: string; message: string } };
+    try {
+      envelope = (await response.json()) as typeof envelope;
+    } catch {
+      throw new ApiError("INTERNAL_ERROR", `HTTP ${response.status}`, response.status);
+    }
+    if (!response.ok || !envelope.ok) {
+      throw new ApiError(
+        envelope.error?.code ?? "INTERNAL_ERROR",
+        envelope.error?.message ?? "导入失败",
+        response.status,
+      );
+    }
+    return envelope.result as { courseId: string; files: number };
+  },
   /** P3：导出标注追加到课程 notes.md（用户主动动作）。 */
   readingAppendNotes: (source: string) =>
     rpc<{ appended: boolean; count: number }>("reading.appendNotes", { source }),

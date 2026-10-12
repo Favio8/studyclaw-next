@@ -13,6 +13,7 @@ import type {
   HeatmapPayload,
   MasteryPayload,
   ProgressPayload,
+  CourseDigest,
   QuizTaskView,
   SessionSummary,
     ToolCallView,
@@ -23,10 +24,8 @@ import type { LearningMode } from "@/src/types";
 
 export type PanelTab = "progress" | "syllabus" | "heatmap" | "quiz";
 
-/** 中栏一级学习活动。对话是中栏默认视图；测验/复习经右栏面板承载
- * （quizFlow 的活跃流句柄是模块级单例，中栏不再挂第二实例互相中止）；
- * 阅读为独立中栏视图。 */
-export type CenterView = "chat" | "quiz" | "review" | "reading";
+/** 中栏默认进入今天；对话和阅读独立显示，题卡由右栏承载。 */
+export type CenterView = "today" | "chat" | "reading";
 
 /** 大纲 Tab 内的视图（列表 / 思维导图 / 关系图），入 store 跨 Tab/重挂保持。 */
 export type SyllabusView = "tree" | "mindmap" | "graph";
@@ -119,6 +118,15 @@ export interface ReaderActionState {
   streaming: boolean;
   text: string;
   error: string | null;
+  reference?: ReadingReference;
+}
+
+export interface ReadingReference {
+  source: string;
+  page: number;
+  quote: string;
+  result?: string;
+  kind?: "explain" | "translate";
 }
 
 /** P3：划词建卡的草稿（生成后待用户确认，可编辑题干）。 */
@@ -131,7 +139,7 @@ export interface ReaderCardDraft {
 
 export interface ReaderState {
   source: string | null;
-  view: "pdf" | "markdown" | "unsupported";
+  view: "pdf" | "image" | "markdown" | "unsupported";
   exists: boolean;
   progress: { page: number; percent: number };
   highlights: AnnotationView[];
@@ -191,7 +199,7 @@ interface AppState {
   activeSessionTitle: string;
 
   // -- 对话（中栏） --------------------------------------------------------------
-  /** 中栏当前学习活动（一级导航：对话/测验/复习/阅读）。 */
+  /** 中栏当前学习活动（今天/对话/阅读）。 */
   centerView: CenterView;
   messages: ChatMessage[];
   streaming: boolean;
@@ -227,6 +235,7 @@ interface AppState {
   workspacePath: string | null;
   /** dsh InputMachine 语义：未发送草稿按项目/课程/对话隔离，切回时恢复。 */
   composerDrafts: Record<string, string>;
+  composerReferences: Record<string, ReadingReference>;
 
   // -- 右栏面板 --------------------------------------------------------------------
   activeTab: PanelTab;
@@ -251,9 +260,15 @@ interface AppState {
   heatmap: HeatmapPayload | null;
   /** P3「我的痕迹」：阅读标注按概念聚合（只读信号，不改掌握度）。 */
   readingTraces: Array<{ conceptId: string; count: number; lastAt: string }>;
+  /** M4/M5：一次聚合的全课概念级摘要（courses.digest）。「今天」视图与大纲 Tab 共用。 */
+  digest: CourseDigest | null;
   quiz: QuizState;
   /** 辅助阅读（PRD 需求三）。 */
   reader: ReaderState;
+  /** 每次重置阅读上下文递增；防止同一路径重开后旧请求重新落地。 */
+  readerGeneration: number;
+  /** Identifies one course activation, including reopening the same path/name. */
+  courseGeneration: number;
   /** 大纲树折叠状态（key=章节 id）；入 store 跨视图/重挂保持。 */
   syllabusCollapsed: Record<string, boolean>;
   /** 大纲树搜索词（入 store，切视图不丢）。 */
@@ -275,7 +290,7 @@ interface AppState {
   setActiveCourse: (courseId: string | null) => void;
   setCourseSessions: (courseId: string, sessions: SessionSummary[]) => void;
   setSessions: (sessions: SessionSummary[]) => void;
-  setActiveSession: (sessionId: string | null, title?: string) => void;
+  setActiveSession: (sessionId: string | null, title?: string, activateChat?: boolean) => void;
   /** 只更新激活对话标题（如 done 后拾取自动命名），不动 id/模型座位。 */
   setActiveSessionTitle: (title: string) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -307,11 +322,12 @@ interface AppState {
   setActiveModel: (active: { providerId: string; model: string; effort?: string | null } | null) => void;
   setWorkspacePath: (path: string | null) => void;
   setComposerDraft: (key: string, draft: string) => void;
+  setComposerReference: (key: string, reference: ReadingReference | null) => void;
   setActiveTab: (tab: PanelTab) => void;
   setRightPanelCollapsed: (collapsed: boolean) => void;
   setLastImport: (value: AppState["lastImport"] | ((prev: AppState["lastImport"]) => AppState["lastImport"])) => void;
   toggleBadge: (tab: PanelTab, on: boolean) => void;
-  setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap" | "readingTraces">>) => void;
+  setPanelData: (patch: Partial<Pick<AppState, "progress" | "progressError" | "mastery" | "heatmap" | "readingTraces" | "digest">>) => void;
   setSyllabusCollapsed: (chapterId: string, collapsed: boolean) => void;
   setSyllabusSearch: (search: string) => void;
   setSyllabusView: (view: SyllabusView) => void;
@@ -349,6 +365,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeModel: null,
   workspacePath: null,
   composerDrafts: {},
+  composerReferences: {},
   messages: [],
   streaming: false,
   syncState: "synced",
@@ -359,7 +376,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatFocus: false,
   mascotPulse: null,
   mode: "socratic",
-  centerView: "chat",
+  centerView: "today",
   focusConceptId: null,
   modeBanner: null,
   activeTab: "progress",
@@ -371,6 +388,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   mastery: null,
   heatmap: null,
   readingTraces: [],
+  digest: null,
   quiz: { ...initialQuiz },
   syllabusCollapsed: {},
   syllabusSearch: "",
@@ -381,6 +399,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   wizardOpen: false,
   settingsOpen: false,
   reader: { ...initialReader },
+  readerGeneration: 0,
+  courseGeneration: 0,
 
   setCourses: (courses) => set({ courses }),
   setActiveCourse: (courseId) =>
@@ -397,8 +417,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       mastery: null,
       heatmap: null,
       readingTraces: [],
+  digest: null,
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
+      readerGeneration: state.readerGeneration + 1,
+      courseGeneration: state.courseGeneration + 1,
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",
@@ -411,7 +434,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       wakeupCard: null,
   pendingAsk: null,
       // 阅读视图绑定当前课程资料，切课回落到对话
-      centerView: "chat",
+      centerView: "today",
       badges: state.badges,
     })),
   setCourseSessions: (courseId, sessions) =>
@@ -419,10 +442,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       courseSessions: { ...state.courseSessions, [courseId]: sessions },
     })),
   setSessions: (sessions) => set({ sessions }),
-  setActiveSession: (sessionId, title = "") =>
+  setActiveSession: (sessionId, title = "", activateChat = true) =>
     // 仅更新 id/标题；消息列表由调用方显式控制（恢复渲染/清空/流式 meta 均需区分）。
     // 选中/新建对话即回到对话活动——从测验/复习/阅读点进会话时中栏跟随。
-    set({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null, centerView: "chat" }),
+    set((state) => ({ activeSessionId: sessionId, activeSessionTitle: title, activeModel: null, centerView: activateChat ? "chat" : state.centerView })),
   setActiveSessionTitle: (title) => set({ activeSessionTitle: title }),
   setMessages: (messages) => set({ messages }),
   appendMessage: (message) =>
@@ -481,17 +504,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   setWakeupCard: (wakeupCard) => set({ wakeupCard }),
   setPendingAsk: (pendingAsk) => set({ pendingAsk }),
   setActiveModel: (activeModel) => set({ activeModel }),
-  setWorkspacePath: (workspacePath) => set({ workspacePath }),
+  setWorkspacePath: (workspacePath) => set((state) => state.workspacePath === workspacePath ? state : ({
+    workspacePath, courseGeneration: state.courseGeneration + 1,
+  })),
   setComposerDraft: (key, draft) =>
     set((state) => {
       const current = state.composerDrafts[key];
       if (current === draft || (current === undefined && draft === "")) return state;
       if (draft === "") {
-        const { [key]: _removed, ...composerDrafts } = state.composerDrafts;
+        const composerDrafts = { ...state.composerDrafts };
+        delete composerDrafts[key];
         return { composerDrafts };
       }
       return { composerDrafts: { ...state.composerDrafts, [key]: draft } };
     }),
+  setComposerReference: (key, reference) => set((state) => {
+    const composerReferences = { ...state.composerReferences };
+    if (reference === null) delete composerReferences[key];
+    else composerReferences[key] = reference;
+    return { composerReferences };
+  }),
   setActiveTab: (tab) =>
     set((state) => ({
       activeTab: tab,
@@ -516,12 +548,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({ quiz: { ...state.quiz, ...patch } })),
   quizReset: () => set({ quiz: { ...initialQuiz } }),
   setReader: (patch) => set((state) => ({ reader: { ...state.reader, ...patch } })),
-  readerReset: () => set({ reader: { ...initialReader } }),
+  readerReset: () => set((state) => ({ reader: { ...initialReader }, readerGeneration: state.readerGeneration + 1 })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   setWizardOpen: (wizardOpen) => set({ wizardOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   resetCourseScoped: () =>
-    set({
+    set((state) => ({
       sessions: [],
       activeSessionId: null,
       activeSessionTitle: "",
@@ -536,8 +568,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       mastery: null,
       heatmap: null,
       readingTraces: [],
+  digest: null,
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
+      readerGeneration: state.readerGeneration + 1,
+      courseGeneration: state.courseGeneration + 1,
       syllabusCollapsed: {},
       syllabusSearch: "",
       syllabusView: "tree",
@@ -546,6 +581,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       streamPhase: null,
       toolRunning: 0,
       uploading: false,
-      centerView: "chat",
-    }),
+      centerView: "today",
+    })),
 }));

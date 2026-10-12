@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProgressPayload } from "../src/types/api";
 
 const { storeState, refreshPanelData } = vi.hoisted(() => {
   const refreshPanelData = vi.fn(async () => {});
@@ -10,7 +11,7 @@ const { storeState, refreshPanelData } = vi.hoisted(() => {
         overallMastery: 0,
         dueCount: 0,
         lastUpdatedAt: null as string | null,
-        concepts: [],
+        concepts: [] as ProgressPayload["concepts"],
       },
       lastImport: null as unknown,
       activeCourseId: "course-1" as string | null,
@@ -29,6 +30,7 @@ import ProgressTab from "../src/components/panel/ProgressTab";
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  storeState.progress.concepts = [];
 });
 
 function daysAgo(days: number): string {
@@ -36,6 +38,13 @@ function daysAgo(days: number): string {
 }
 
 describe("ProgressTab", () => {
+  it("none 不显示误报，真实概念混淆仍显示", () => {
+    const base = { name: "Memory", chapter: "Memory", mastery: 0, evals: 0, passRate: 0, ef: 2.5, nextReviewAt: null, exposure: 0 };
+    storeState.progress.concepts = [{ ...base, id: "c1", misattribution: "none" }, { ...base, id: "c2", misattribution: "概念混淆" }];
+    render(<ProgressTab />);
+    expect(screen.queryByText("需要澄清：none")).toBeNull();
+    expect(screen.getByText("需要澄清：概念混淆")).toBeInTheDocument();
+  });
   it("renders new 0% progress as a neutral waiting state", () => {
     render(<ProgressTab />);
 

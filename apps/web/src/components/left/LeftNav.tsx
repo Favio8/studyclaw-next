@@ -24,7 +24,6 @@ import {
   Plus,
   Search,
   Settings2,
-  SlidersHorizontal,
   Upload,
   X,
 } from "lucide-react";
@@ -60,10 +59,6 @@ const iconProps = { size: 16, strokeWidth: 1.8 } as const;
 
 function SearchGlyph() {
   return <Search {...iconProps} aria-hidden />;
-}
-
-function ViewGlyph() {
-  return <SlidersHorizontal {...iconProps} aria-hidden />;
 }
 
 function WorkspaceAddGlyph() {
@@ -120,6 +115,24 @@ function moveSessionBefore(
   return [...remaining.slice(0, insertAt), source, ...remaining.slice(insertAt)];
 }
 
+/** Fetch the registry tree independently from React state updates. */
+async function loadWorkspaceTree() {
+  const payload = await api.workspaces();
+  const courses: Record<string, CourseSummary[]> = {};
+  const missing: Record<string, boolean> = {};
+  await Promise.all(payload.items.map(async (item) => {
+    try {
+      const result = await api.workspaceCourses(item.path);
+      courses[item.path] = result.courses;
+      missing[item.path] = result.missing;
+    } catch {
+      courses[item.path] = [];
+      missing[item.path] = true;
+    }
+  }));
+  return { items: payload.items, courses, missing };
+}
+
 export default function LeftNav({ collapsed: railCollapsed = false, onExpand, onCollapse }: { collapsed?: boolean; onExpand?: () => void; onCollapse?: () => void }) {
   const courses = useAppStore((s) => s.courses);
   const activeCourseId = useAppStore((s) => s.activeCourseId);
@@ -143,7 +156,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   // 资料弹窗的默认页：左栏两个入口分别指定（上传到当前课 / 从项目建新课）。
   const [materialsInitialTab, setMaterialsInitialTab] = useState<"upload" | "import">("upload");
   const searchAreaRef = useRef<HTMLDivElement>(null);
-  const [remoteSearch, setRemoteSearch] = useState<{ query: string; status: "idle" | "loading" | "ready" | "error"; items: SessionSearchResult[]; hasMore: boolean }>({
+  const [remoteSearch, setRemoteSearch] = useState<RemoteSearchState>({
     query: "", status: "idle", items: [], hasMore: false,
   });
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -162,6 +175,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   const [collapsedWs, setCollapsedWs] = useState<Set<string>>(new Set());
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
+    setRemoteSearch({ query: "", status: "idle", items: [], hasMore: false });
   }, []);
   const searchQuery = query.trim();
   const searching = searchOpen && searchQuery.length > 0;
@@ -185,33 +199,16 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     : "StudyClaw";
 
   /** 注册表 + 各项目课程并行装载（并列树的唯一数据源）。 */
-  const refreshWorkspaces = useCallback(async () => {
-    try {
-      const payload = await api.workspaces();
-      setWsItems(payload.items);
-      const coursesMap: Record<string, CourseSummary[]> = {};
-      const missingMap: Record<string, boolean> = {};
-      await Promise.all(
-        payload.items.map(async (item) => {
-          try {
-            const result = await api.workspaceCourses(item.path);
-            coursesMap[item.path] = result.courses;
-            missingMap[item.path] = result.missing;
-          } catch {
-            coursesMap[item.path] = [];
-            missingMap[item.path] = true;
-          }
-        }),
-      );
-      setWsCourses(coursesMap);
-      setWsMissing(missingMap);
-    } catch {
+  const refreshWorkspaces = useCallback(() => loadWorkspaceTree().then((tree) => {
+      setWsItems(tree.items);
+      setWsCourses(tree.courses);
+      setWsMissing(tree.missing);
+    }).catch(() => {
       // P1-2：瞬时失败（宿主重启/请求超时）不清空列表——旧实现直接
       // setWsItems([])，用户视角是「项目全丢了」。保留上次的列表 + 横幅，
       // effect 会在 workspacePath 变化时重试。
       flashStatusBanner("✗ 项目列表加载失败，显示的是上次的列表");
-    }
-  }, [flashStatusBanner]);
+    }), [flashStatusBanner]);
 
   // 挂载即载；切换项目后（workspacePath 变化）重载以同步注册表/课程。
   useEffect(() => {
@@ -547,13 +544,10 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   }, [closeSearch, searchOnExpand, searchOpen]);
 
   useEffect(() => {
-    if (!searching) {
-      setRemoteSearch({ query: "", status: "idle", items: [], hasMore: false });
-      return;
-    }
+    if (!searching) return;
     const controller = new AbortController();
-    setRemoteSearch({ query: searchQuery, status: "loading", items: [], hasMore: false });
     const timer = window.setTimeout(() => {
+      setRemoteSearch({ query: searchQuery, status: "loading", items: [], hasMore: false });
       api.searchSessions(searchQuery, controller.signal).then((result) => {
         if (controller.signal.aborted) return;
         setRemoteSearch({ query: searchQuery, status: "ready", items: result.items, hasMore: result.hasMore });
@@ -579,15 +573,6 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
     for (const [courseId, sessions] of Object.entries(sessionOrderOverrides)) next[courseId] = sessions;
     return next;
   }, [activeCourseId, activeSessions, courseSessions, sessionOrderOverrides]);
-
-  const visibleCourses = useMemo(() => {
-    if (orderBy === "manual") return courses;
-    return [...courses].sort((a, b) => {
-      const aTime = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : 0;
-      const bTime = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : 0;
-      return bTime - aTime;
-    });
-  }, [courses, orderBy]);
 
   async function openSearchResult(result: SessionSearchResult) {
     // P1-1/N-2：整链路兜底——adoptWorkspace（项目打开失败）与 selectSession
@@ -636,8 +621,9 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   function clearSessionOrderOverride(courseId: string) {
     setSessionOrderOverrides((previous) => {
       if (!Object.hasOwn(previous, courseId)) return previous;
-      const { [courseId]: _discarded, ...rest } = previous;
-      return rest;
+      const next = { ...previous };
+      delete next[courseId];
+      return next;
     });
   }
 
@@ -809,7 +795,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         title={missing ? `${item.path}（目录不存在）` : `${title} · ${item.path}`}
         draggable
         aria-expanded={!collapsed}
-        aria-selected={active}
+        aria-current={active ? "true" : undefined}
         className={`group relative flex h-[34px] w-full cursor-grab items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium transition-colors hover:bg-bg-card active:cursor-grabbing ${
           active ? "bg-bg-card text-text-primary" : "text-text-muted"
         } ${dragWsId === item.id ? "opacity-60" : ""}`}

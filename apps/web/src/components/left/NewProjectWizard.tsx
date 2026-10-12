@@ -199,25 +199,29 @@ function BrowsePicker({ onAdopt, onCancel, onPreferNative, busy }: {
   const [loading, setLoading] = useState(true);
   const requestSeq = useRef(0);
 
-  const navigate = useCallback(async (path: string | null) => {
-    const seq = (requestSeq.current += 1);
-    setLoadError(null);
-    setLoading(true);
-    try {
-      const next = await api.browseDirectory(path);
+  const loadPage = useCallback((path: string | null, seq: number) =>
+    api.browseDirectory(path).then((next) => {
       if (seq !== requestSeq.current) return;
       setPage(next);
-    } catch (cause) {
+    }).catch((cause) => {
       if (seq !== requestSeq.current) return;
       setLoadError(errorMessage(cause));
-    } finally {
+    }).finally(() => {
       if (seq === requestSeq.current) setLoading(false);
-    }
-  }, []);
+    }), []);
+
+  const navigate = useCallback((path: string | null) => {
+    const seq = ++requestSeq.current;
+    setLoadError(null);
+    setLoading(true);
+    return loadPage(path, seq);
+  }, [loadPage]);
 
   useEffect(() => {
-    void navigate(null);
-  }, [navigate]);
+    const seq = ++requestSeq.current;
+    void loadPage(null, seq);
+    return () => { requestSeq.current += 1; };
+  }, [loadPage]);
 
   const current = page?.path ?? "";
 

@@ -462,7 +462,7 @@ export function useChatStream() {
         // course file has a path or a supported document extension.
         .filter(
           (ref): ref is string =>
-            Boolean(ref) && (ref.includes("/") || /\.(?:md|txt|pdf)$/i.test(ref)),
+            Boolean(ref) && (ref.includes("/") || /\.(?:md|txt|pdf|docx?|pptx?|png|jpe?g|webp|xlsx|html?)$/i.test(ref)),
         );
 
       const state = useAppStore.getState();
@@ -703,7 +703,7 @@ export function useChatStream() {
       unregisterActiveChat(abort);
       return false;
     }
-  }, [appendMessage, cancelPendingFlush, clearStaleQueue, commitLastAgent, drainQueueIfOwned, flashStatusBanner, handleEvent, setPendingAsk, setStreamPhase, setStreaming, setSyncState, updateLastAgent]);
+  }, [appendMessage, cancelPendingFlush, drainQueueIfOwned, flashStatusBanner, handleEvent, setPendingAsk, setStreamPhase, setStreaming, setSyncState, updateLastAgent]);
 
   /** 重试一条失败的消息（不重复追加用户消息）。
    * UI-6：`text` 指定要重发的文本（来自对应消息卡），不再依赖全局
@@ -721,7 +721,9 @@ export function useChatStream() {
       : undefined;
     return send(requested, { skipAppendUser: true, ...(reuse !== undefined ? { reuseRequestId: reuse } : {}) });
   }, [send]);
-  sendRef.current = send;
+  useEffect(() => {
+    sendRef.current = send;
+  }, [send]);
 
   /** 停止当前流（DSH 发送钮运行中变停止钮）。
    * UI-5：走模块级活跃流句柄——无论流由哪个实例（ChatArea/CommandPalette）

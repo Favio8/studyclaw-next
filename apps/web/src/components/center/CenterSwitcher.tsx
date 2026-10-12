@@ -1,48 +1,36 @@
 "use client";
 
 /**
- * 中栏一级「学习活动」切换：对话 / 测验 / 复习 / 阅读。
+ * 中栏学习活动：今天 / 对话 / 阅读；测验与复习统一在右栏题卡操作。
  *
  * 语义（PRD 需求二，选项 B：学习活动 × 对话风格拆两个维度）：
  * - 对话/阅读切换中栏视图（centerView）；
- * - 测验/复习的数据面板在右栏（QuizTab），点击即聚焦右栏并装载对应模式——
- *   quizFlow 的活跃评测流句柄是模块级单例，中栏不再挂第二个 QuizTab 实例
- *   互相中止；双入口同数据源，主从关系：一级入口=去活动，右栏 Tab=活动中看数据。
+ * - 题卡、今天的复习入口及快捷命令共用右栏 QuizTab。
  * - 对话风格（苏格拉底/冲刺/费曼/排错）是对话活动内的第二维：右置分段控件
  *   一步切换。放在独占一行的活动栏而非输入框 footer——后者行内空间不足，
  *   CJK 无词边界会把四按钮折断成两行（历史提交已实测踩坑）。
  */
 
-import { BookOpen, ListChecks, MessageSquare, RotateCcw } from "lucide-react";
+import { BookOpen, MessageSquare, Sun } from "lucide-react";
 import { MODES, MODE_DESCRIPTIONS } from "@/src/lib/modes";
-import { quizLoad } from "@/src/lib/quizFlow";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { CenterView } from "@/src/store/useAppStore";
 
 const ACTIVITIES: Array<{ value: CenterView; label: string; icon: typeof BookOpen }> = [
+  { value: "today", label: "今天", icon: Sun },
   { value: "chat", label: "对话", icon: MessageSquare },
-  { value: "quiz", label: "测验", icon: ListChecks },
-  { value: "review", label: "复习", icon: RotateCcw },
   { value: "reading", label: "阅读", icon: BookOpen },
 ];
 
 export default function CenterSwitcher() {
   const centerView = useAppStore((s) => s.centerView);
   const setCenterView = useAppStore((s) => s.setCenterView);
-  const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const setRightPanelCollapsed = useAppStore((s) => s.setRightPanelCollapsed);
   const mode = useAppStore((s) => s.mode);
   const setMode = useAppStore((s) => s.setMode);
   const flashModeBanner = useAppStore((s) => s.flashModeBanner);
 
   function selectActivity(view: CenterView) {
     setCenterView(view);
-    if (view === "quiz" || view === "review") {
-      // 测验/复习：聚焦右栏面板并装载（新题 / 到期复习）。
-      setActiveTab("quiz");
-      setRightPanelCollapsed(false);
-      void quizLoad(view === "review" ? "review" : "new");
-    }
   }
 
   function chooseMode(next: (typeof MODES)[number]) {
@@ -104,9 +92,9 @@ export default function CenterSwitcher() {
         </>
       ) : centerView === "reading" ? (
         <span className="min-w-0 flex-1 truncate text-[11px] leading-5 text-text-faint">资料精读 · 划线/翻译/解释/笔记</span>
-      ) : (
-        <span className="min-w-0 flex-1 truncate text-[11px] leading-5 text-text-faint">在右栏作答与批改 · 结果驱动 SM-2 复习排期</span>
-      )}
+      ) : centerView === "today" ? (
+        <span className="min-w-0 flex-1 truncate text-[11px] leading-5 text-text-faint">今天该做什么 · 一屏决定</span>
+      ) : null}
     </div>
   );
 }

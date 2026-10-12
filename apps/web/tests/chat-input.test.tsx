@@ -9,6 +9,11 @@ const { storeState, apiMocks } = vi.hoisted(() => {
     activeSessionId: "session-a" as string | null,
     workspacePath: "D:/learn/ws-a" as string | null,
     composerDrafts: {} as Record<string, string>,
+    composerReferences: {} as Record<string, { source: string; page: number; quote: string; result?: string; kind?: "translate" | "explain" }>,
+    setComposerReference: vi.fn((key: string, reference: typeof state.composerReferences[string] | null) => {
+      if (reference === null) delete state.composerReferences[key];
+      else state.composerReferences[key] = reference;
+    }),
     setMode: vi.fn(),
     flashModeBanner: vi.fn(),
     setPaletteOpen: vi.fn(),
@@ -53,10 +58,39 @@ afterEach(() => {
   storeState.activeSessionId = "session-a";
   storeState.workspacePath = "D:/learn/ws-a";
   storeState.composerDrafts = {};
+  storeState.composerReferences = {};
   apiMocks.courseFiles.mockResolvedValue({ files: [] });
 });
 
 describe("ChatInput session drafts", () => {
+  it("阅读引用可见、按会话隔离，并完整进入发送的消息", () => {
+    const key = draftKey();
+    const quote = "原文内容".repeat(400);
+    const result = "完整译文".repeat(400);
+    storeState.composerReferences[key] = { source: "paper.pdf", page: 3, quote, result, kind: "translate" };
+    storeState.composerDrafts[key] = "请解释这里";
+    const onSend = vi.fn();
+    const { rerender } = render(<ChatInput onSend={onSend} />);
+    expect(screen.getByTestId("composer-reference")).toHaveTextContent("第 3 页");
+    storeState.activeSessionId = "another-session";
+    rerender(<ChatInput onSend={onSend} />);
+    expect(screen.queryByTestId("composer-reference")).toBeNull();
+    storeState.activeSessionId = "session-a";
+    rerender(<ChatInput onSend={onSend} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith(`请解释这里\n\n引用资料：paper.pdf · 第 3 页\n原文：\n${quote}\n\n译文：\n${result}`);
+    expect(storeState.composerReferences[key]).toBeUndefined();
+  });
+  it("移除引用后只发送用户自己的问题", () => {
+    storeState.composerReferences[draftKey()] = { source: "paper.pdf", page: 1, quote: "引用" };
+    storeState.composerDrafts[draftKey()] = "问题";
+    const onSend = vi.fn();
+    const { rerender } = render(<ChatInput onSend={onSend} />);
+    fireEvent.click(screen.getByRole("button", { name: "移除引用" }));
+    rerender(<ChatInput onSend={onSend} />);
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("问题");
+  });
   it("对齐 dsh：草稿按工作区、课程与会话隔离，切回后恢复", () => {
     const { rerender } = render(<ChatInput onSend={vi.fn()} />);
     const input = screen.getByRole("textbox");

@@ -29,6 +29,7 @@ import SettingsDialog from "../src/components/settings/SettingsDialog";
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  storeState.settingsOpen = true;
 });
 
 const payload = {
@@ -48,6 +49,19 @@ const payload = {
 };
 
 describe("SettingsDialog 通用设置（部分更新语义）", () => {
+  it("关闭再打开重新加载草稿并重新建立焦点圈闭", async () => {
+    apiMocks.settings.mockResolvedValue(payload);
+    const { rerender } = render(<SettingsDialog />);
+    const mode = await screen.findByRole("combobox", { name: /默认学习模式/ });
+    fireEvent.change(mode, { target: { value: "quick" } });
+    storeState.settingsOpen = false;
+    rerender(<SettingsDialog />);
+    storeState.settingsOpen = true;
+    rerender(<SettingsDialog />);
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    expect(await screen.findByRole("combobox", { name: /默认学习模式/ })).toHaveValue("socratic");
+    expect(apiMocks.settings).toHaveBeenCalledTimes(2);
+  });
   it("保存只发送 defaultMode，不再隐式回写旧 llm 段", async () => {
     apiMocks.settings.mockResolvedValue(payload);
     apiMocks.updateSettings.mockResolvedValue({

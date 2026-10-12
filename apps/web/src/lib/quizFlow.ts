@@ -23,6 +23,7 @@ import {
 import { isAbortError } from "@/src/lib/chatStream";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { QuizRubricItem } from "@/src/store/useAppStore";
+import { captureCourseScope } from "@/src/lib/courseScope";
 
 function errorMessage(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
@@ -30,6 +31,7 @@ function errorMessage(exc: unknown): string {
 
 /** 模块级「活跃评测流」中止句柄（单例）。 */
 let activeAbort: AbortController | null = null;
+let loadRequest = 0;
 
 export function abortActiveEval(): void {
   if (activeAbort) {
@@ -40,9 +42,12 @@ export function abortActiveEval(): void {
 
 /** 拉取题卡并重置到该模式首题。 */
 export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise<void> {
-  const courseId = useAppStore.getState().activeCourseId;
+  const scope = captureCourseScope();
+  const courseId = scope.courseId;
   if (!courseId) return;
   abortActiveEval();
+  const request = ++loadRequest;
+  const isCurrent = () => scope.isCurrent() && request === loadRequest;
   useAppStore.getState().setQuiz({
     mode,
     loading: true,
@@ -63,7 +68,7 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
     // W-2：切课守卫——await 期间用户切项目时，旧课程的题卡不得覆盖新课程的
     // quiz 状态（Console.tsx / panelData.ts 均有同类守卫，唯独此处缺失）：
     // 覆盖后再作答即用新 courseId + 旧 taskId 提交，评测落到错课程。
-    if (useAppStore.getState().activeCourseId !== courseId) return;
+    if (!isCurrent()) return;
     // FL-28：池为空时旧实现只写入空数组，界面毫无反应（死胡同交互）——用户点
     // "开始练习"后既没有题也没有提示。这里显式给出可操作的下一步。
     useAppStore.getState().setQuiz({
@@ -77,6 +82,7 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
           : null,
     });
   } catch (exc) {
+    if (!isCurrent()) return;
     useAppStore.getState().setQuiz({
       loading: false,
       error: `题卡加载失败: ${errorMessage(exc)}`,
@@ -121,6 +127,7 @@ function evalFingerprint(courseId: string, taskId: string, sessionId: string | n
  * 静默丢失。正常作答每次生成新键。 */
 export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string | null }): Promise<void> {
   const state = useAppStore.getState();
+  const scope = captureCourseScope();
   const { quiz, activeCourseId, activeSessionId } = state;
   const text = answer.trim();
   if (!text || !activeCourseId) return;
@@ -133,6 +140,7 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
     ?? `${evalFingerprint(activeCourseId, task.taskId, activeSessionId, text)}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
   const abort = new AbortController();
+  const isCurrent = () => scope.isCurrent() && useAppStore.getState().quiz.lastEvalId === evalId;
   activeAbort = abort;
   useAppStore.getState().setQuiz({
     phase: "scanning",
@@ -147,7 +155,11 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
 
   // 扫描线动画窗口（300ms，ui_design_spec §3.3.1）
   await new Promise((resolve) => setTimeout(resolve, 300));
-  if (abort.signal.aborted) return;
+  if (abort.signal.aborted || !isCurrent()) {
+    abort.abort();
+    if (activeAbort === abort) activeAbort = null;
+    return;
+  }
 
   useAppStore.getState().setQuiz({ phase: "evaluating" });
 
@@ -161,6 +173,7 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
       abort.signal,
       evalId,
     )) {
+      if (abort.signal.aborted || !isCurrent()) return;
       switch (ev.event) {
         case "scan":
           break; // 扫描线已本地触发
@@ -174,7 +187,7 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
           const wait = Math.max(0, 150 - (Date.now() - lastRubricAt));
           if (wait > 0) await new Promise((r) => setTimeout(r, wait));
           lastRubricAt = Date.now();
-          if (abort.signal.aborted) return;
+          if (abort.signal.aborted || !isCurrent()) return;
           // PERF-7：整段换新数组 + 单次 setQuiz，避免每条采分点 O(n²) 全量拷贝。
           useAppStore.setState((prev) => ({
             quiz: { ...prev.quiz, rubrics: [...prev.quiz.rubrics, item] },
@@ -231,14 +244,14 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
         }
       }
     }
-    if (abort.signal.aborted) return;
+    if (abort.signal.aborted || !isCurrent()) return;
     useAppStore.getState().setQuiz({ phase: "done" });
     // L1：本题未过 → 查该概念评测趋势；最近 3 次连续未过才记换风格建议。
     // 纯读 history 的增强查询，失败静默（建议不是主流程，不打断结算）。
     const settled = useAppStore.getState().quiz.result;
     if (settled !== null && !settled.passed) {
       void api.evalTrend(activeCourseId, task.conceptId, 3).then((trend) => {
-        if (useAppStore.getState().activeCourseId !== activeCourseId) return;
+        if (!isCurrent()) return;
         if (trend.total >= 3 && trend.consecutiveFailures >= 3) {
           useAppStore.getState().setQuiz({
             styleSuggestion: { conceptId: task.conceptId, consecutiveFailures: trend.consecutiveFailures },
@@ -254,7 +267,7 @@ export async function quizAnswer(answer: string, opts?: { reuseEvalId?: string |
     notifyPanelChanged("progress");
     notifyPanelChanged("quiz");
   } catch (exc) {
-    if (isAbortError(exc) || abort.signal.aborted) return; // 用户切换/重置
+    if (isAbortError(exc) || abort.signal.aborted || !isCurrent()) return; // 用户切换/重置
     useAppStore.getState().setQuiz({
       phase: "idle",
       error: `评测中断: ${errorMessage(exc)}（可重试）`,
@@ -274,6 +287,7 @@ export async function quizRetry(): Promise<void> {
 
 /** 重置到初始态（切换项目/课程时由调用方触发）。 */
 export function quizReset(): void {
+  loadRequest += 1;
   abortActiveEval();
   useAppStore.getState().quizReset();
 }

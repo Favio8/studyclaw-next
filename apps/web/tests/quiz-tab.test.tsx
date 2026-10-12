@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { quizLoad, quizReset, storeState, createSessionMock } = vi.hoisted(() => {
   const quizLoad = vi.fn();
@@ -160,5 +160,58 @@ describe("QuizTab", () => {
     storeState.quiz.styleSuggestion = null;
     render(<QuizTab />);
     expect(screen.queryByText(/换个方式学/)).toBeNull();
+  });
+
+  describe("M2 回顾原文", () => {
+    const HINTS = [
+      { text: "SM-2 的 EF 钳制在 [1.3, 2.9]", prefix: "上文", suffix: "下文", source: "a.pdf", page: 3 },
+      { text: "间隔序列 I(1)=1、I(2)=6", prefix: "", suffix: "", source: "a.pdf", page: 7 },
+    ];
+
+    beforeEach(() => {
+      storeState.quiz.phase = "idle";
+      storeState.quiz.result = null;
+      storeState.quiz.lastAnswer = null;
+      storeState.quiz.styleSuggestion = null;
+      storeState.quiz.tasks = [
+        {
+          taskId: "task-hint",
+          conceptId: "concept-1",
+          type: "concept",
+          difficulty: 2,
+          question: "EF 如何钳制？",
+          options: ["[1.3, 2.9]", "不钳制"],
+          answerIndex: 0,
+          answerRationale: null,
+          hints: HINTS,
+        },
+      ];
+    });
+
+    it("作答前默认折叠，不把线索摊在眼前；点击可展开", () => {
+      render(<QuizTab />);
+      const toggle = screen.getByRole("button", { name: /回顾原文（2）/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText(/EF 钳制在/)).toBeNull();
+
+      fireEvent.click(toggle);
+      expect(screen.getByText(/EF 钳制在/)).toBeDefined();
+      expect(screen.getByText(/a\.pdf p\.3/)).toBeDefined();
+    });
+
+    it("作答后自动展开", () => {
+      storeState.quiz.phase = "done";
+      storeState.quiz.lastAnswer = "[1.3, 2.9]";
+      storeState.quiz.result = { score: 1, passed: true, feedback: "对", misconceptions: [] };
+      render(<QuizTab />);
+      expect(screen.getByText(/EF 钳制在/)).toBeDefined();
+      expect(screen.getByRole("button", { name: "收起原文" })).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("无 hints 时不留空占位", () => {
+      delete storeState.quiz.tasks[0].hints;
+      render(<QuizTab />);
+      expect(screen.queryByRole("button", { name: /回顾原文/ })).toBeNull();
+    });
   });
 });

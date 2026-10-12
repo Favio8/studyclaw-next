@@ -21,7 +21,7 @@ vi.mock("../src/lib/panelData", () => ({
   refreshCourseList: vi.fn(async () => {}),
 }));
 
-import { quizAnswer, quizLoad, quizNext, quizRetry } from "../src/lib/quizFlow";
+import { quizAnswer, quizNext, quizRetry } from "../src/lib/quizFlow";
 import { initialQuiz, useAppStore } from "../src/store/useAppStore";
 
 const TASK = {

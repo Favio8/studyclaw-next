@@ -1,0 +1,51 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+const apiMocks = vi.hoisted(() => ({ agentProjection: vi.fn(), agentStatus: vi.fn(), agents: vi.fn() }));
+vi.mock("../src/lib/api", () => ({ api: apiMocks }));
+import AssistantDetails from "../src/components/panel/AssistantDetails";
+import { useAppStore } from "../src/store/useAppStore";
+const projection = { phase: "idle", currentModel: null, modelProvenance: {}, agentConfig: null, agentRuntime: null, tools: [], plan: { steps: [] }, todos: [], usage: { inputTokens: 7, outputTokens: 3 }, compaction: { count: 0 }, maintenanceJobs: [], children: [], messages: [], lastSeq: 1 };
+beforeEach(() => {
+  vi.useFakeTimers();
+  useAppStore.getState().setActiveCourse("test-course");
+  useAppStore.getState().setActiveSession("test-session");
+  useAppStore.getState().setRightPanelCollapsed(false);
+  apiMocks.agentProjection.mockResolvedValue(projection);
+  apiMocks.agentStatus.mockResolvedValue({ phase: "idle", capabilities: [] });
+  apiMocks.agents.mockResolvedValue({ agents: [] });
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
+it("does not poll until opened, hides empty plan/todos, and stops polling on Escape", async () => {
+  const { container } = render(<AssistantDetails />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(apiMocks.agentProjection).not.toHaveBeenCalled();
+  screen.getByRole("button", { name: "助手详情" }).focus();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "助手详情" })); });
+  expect(screen.getByRole("dialog", { name: "助手详情" })).toBeInTheDocument();
+  expect(screen.queryByText(/暂无学习计划|暂无待办/)).toBeNull();
+  expect(screen.queryByRole("progressbar", { name: "上下文用量" })).toBeNull();
+  expect(screen.getByText("7 / 3")).toBeInTheDocument();
+  expect(apiMocks.agentProjection).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+  expect(apiMocks.agentProjection).toHaveBeenCalledTimes(2);
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(container.querySelector("button")).toHaveFocus();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(apiMocks.agentProjection).toHaveBeenCalledTimes(2);
+});
+it("reports reading activity without opening or querying the chat runtime", () => {
+  useAppStore.getState().setReader({ action: { kind: "explain", text: "", streaming: true, error: null } });
+  render(<AssistantDetails />);
+  expect(screen.getByRole("button", { name: "助手详情" })).toHaveAttribute("title", "助手详情 · 正在解释资料");
+  expect(apiMocks.agentStatus).not.toHaveBeenCalled();
+});
+it("switching sessions or collapsing the sidebar closes the current drawer", async () => {
+  render(<AssistantDetails />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "助手详情" })); });
+  act(() => useAppStore.getState().setActiveSession("other-session"));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "助手详情" })); });
+  act(() => useAppStore.getState().setRightPanelCollapsed(true));
+  expect(screen.queryByRole("dialog")).toBeNull();
+});

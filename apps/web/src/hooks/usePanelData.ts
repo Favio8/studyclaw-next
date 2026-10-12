@@ -11,10 +11,11 @@ import { useAppStore } from "@/src/store/useAppStore";
 
 export function usePanelData() {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
+  const generation = useAppStore((s) => s.courseGeneration);
 
   useEffect(() => {
     void refreshPanelData();
-  }, [activeCourseId]);
+  }, [activeCourseId, generation]);
 
   return { refresh: refreshPanelData };
 }

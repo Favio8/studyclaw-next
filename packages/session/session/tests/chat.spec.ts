@@ -30,10 +30,10 @@ class FakeLlmClient implements ToolLlmClient {
     _tools: Array<Record<string, unknown>> | null,
   ): AsyncGenerator<{ kind: 'text'; delta: string } | { kind: 'toolCalls'; calls: ToolCall[] }> {
     this.received.push(messages)
-    for (const round of this.script.rounds) {
-      if (round.text !== undefined) yield { kind: 'text', delta: round.text }
-      if (round.calls !== undefined) yield { kind: 'toolCalls', calls: round.calls }
-    }
+    const round = this.script.rounds[this.received.length - 1]
+    if (round === undefined) throw new Error('FakeLlmClient script exhausted before the turn finished')
+    if (round.text !== undefined) yield { kind: 'text', delta: round.text }
+    if (round.calls !== undefined) yield { kind: 'toolCalls', calls: round.calls }
   }
 }
 
@@ -76,6 +76,65 @@ function makeSession(courseDir: string, wsRoot: string, script: FakeScript, opti
 }
 
 describe('TutorSession chat loop', () => {
+  it('allows more than eight tool rounds and persists the final answer', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    try {
+      const rounds = Array.from({ length: 12 }, (_, i) => ({
+        calls: [{ id: `read-${i}`, name: 'read_source', arguments: { path: 'overview.md' } }],
+      }))
+      const session = makeSession(courseDir, wsRoot, { rounds: [...rounds, { text: '根据资料，这三个轴是……' }] }, { new: true })
+      await session.init()
+      const events = []
+      for await (const event of session.chatEvents('请完整解释三个轴')) events.push(event)
+      expect(events.filter(event => event.kind === 'tool-start')).toHaveLength(12)
+      expect(events.filter(event => event.kind === 'tool' && event.payload['name'] === '__tool_loop_limit__')).toHaveLength(0)
+      expect(events.filter(event => event.kind === 'token').map(event => event.delta).join('')).toBe('根据资料，这三个轴是……')
+      const history = await session.store.load(session.sessionId)
+      expect(history.some(line => line.type === 'chat' && line.role === 'agent' && line.content === '根据资料，这三个轴是……')).toBe(true)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('if a caller sets an explicit budget, gives the model one final answer request with tools disabled', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const requests: Array<{ tools: unknown; messages: Array<Record<string, unknown>> }> = []
+    const client: ToolLlmClient = {
+      async *request(_system, messages, tools) {
+        requests.push({ messages, tools })
+        if (requests.length === 1) yield { kind: 'toolCalls', calls: [{ id: 'read', name: 'read_source', arguments: { path: 'overview.md' } }] }
+        else yield { kind: 'text', delta: '根据刚才读取的原文，可以这样理解。' }
+      },
+    }
+    try {
+      const session = makeSession(courseDir, wsRoot, { rounds: [] }, { new: true, toolLoopLimit: 1, toolClientFactory: () => client })
+      await session.init()
+      const text = []
+      for await (const event of session.chatEvents('解释原文')) if (event.kind === 'token') text.push(event.delta)
+      expect(requests).toHaveLength(2)
+      expect(requests[1]!.tools).toBeNull()
+      expect(requests[1]!.messages.some(message => message['role'] === 'tool' && String(message['content']).includes('重载是同一类'))).toBe(true)
+      expect(text.join('')).toBe('根据刚才读取的原文，可以这样理解。')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('still stops an unbounded conversation when the user aborts', async () => {
+    const { root, courseDir, wsRoot } = await setup()
+    const controller = new AbortController()
+    let requests = 0
+    const client: ToolLlmClient = {
+      async *request(_system, _messages, _tools, signal) {
+        requests += 1
+        expect(signal).toBe(controller.signal)
+        if (requests === 10) controller.abort()
+        yield { kind: 'toolCalls', calls: [{ id: `read-${requests}`, name: 'read_source', arguments: { path: 'overview.md' } }] }
+      },
+    }
+    try {
+      const session = makeSession(courseDir, wsRoot, { rounds: [] }, { new: true, toolClientFactory: () => client })
+      await session.init()
+      for await (const _ of session.chatEvents('读取资料', undefined, undefined, controller.signal)) { /* consume */ }
+      expect(requests).toBe(10)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
   it('streams a plain turn and persists user+agent lines', async () => {
     const { root, courseDir, wsRoot } = await setup()
     const session = makeSession(courseDir, wsRoot, {

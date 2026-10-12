@@ -22,7 +22,7 @@ function TrapDialog({ onEscape, label = "dialog" }: { onEscape?: () => void; lab
 function Nested() {
   const outer = useRef<HTMLElement>(null);
   const inner = useRef<HTMLElement>(null);
-  const [innerOpen, setInnerOpen] = useState(true);
+  const [innerOpen] = useState(true);
   const outerEscape = vi.fn();
   const innerEscape = vi.fn();
   useFocusTrap({ containerRef: outer, onEscape: outerEscape });

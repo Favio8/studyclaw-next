@@ -4,15 +4,8 @@
  * discovery, and provider CRUD/activation. Wire shapes mirror the Python
  * `_settings_payload` / `ProviderModelPayload` projections.
  * @module @studyclaw/chat-service/src/settings
- */
-
-import { createHash } from 'node:crypto'
-import { readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import yaml from 'js-yaml'
-import { probeMineru, resetMineruProbeCache } from '@studyclaw/course-builder'
-import { sealCredentials, unsealCredentials, writeFileAtomicRestricted } from './secret-box.ts'
-import { resolveParseOptions } from './config.ts'
+ */import { createHash } from 'node:crypto'import { readFile, writeFile } from 'node:fs/promises'import { join } from 'node:path'import yaml from 'js-yaml'import { probeMineru, resetMineruProbeCache } from '@studyclaw/course-builder'
+import { renameWithRetry } from '@studyclaw/fs-atomic'import { sealCredentials, unsealCredentials, writeFileAtomicRestricted } from './secret-box.ts'import { resolveParseOptions } from './config.ts'
 
 export interface ProviderModelPayload {
   readonly id: string
@@ -151,7 +144,10 @@ function credentialsPath(workspaceRoot: string): string {
 }
 
 async function readConfig(workspaceRoot: string): Promise<ConfigYaml> {
-  const raw = await readFile(configPath(workspaceRoot), 'utf8').catch(() => null)
+  const raw = await readFile(configPath(workspaceRoot), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
   if (raw === null) return {}
   const parsed = yaml.load(raw)
   return typeof parsed === 'object' && parsed !== null ? parsed as ConfigYaml : {}
@@ -164,7 +160,9 @@ async function writeConfig(workspaceRoot: string, config: ConfigYaml): Promise<v
   const tmp = path + '.tmp'
   const text = yaml.dump(config, { sortKeys: false, noRefs: true })
   await writeFile(tmp, text, 'utf8')
-  await rename(tmp, path)
+  // 裸 rename 覆盖 config.yaml 在 Windows 上会被杀软/索引器的瞬时句柄顶成 EPERM，
+  // 表现为"保存设置偶发失败"。这是用户直接感知的功能缺陷，必须退避重试。
+  await renameWithRetry(tmp, path)
 }
 
 /** Workspace-wide read/modify/write serialization for credentials.json. */
@@ -207,7 +205,10 @@ async function withConfigLock<T>(workspaceRoot: string, fn: () => Promise<T>): P
  * taking the non-reentrant lock again from inside it would deadlock (RV-17).
  */
 async function readCredentialsRaw(workspaceRoot: string): Promise<Awaited<ReturnType<typeof unsealCredentials>>> {
-  const raw = await readFile(credentialsPath(workspaceRoot), 'utf8').catch(() => null)
+  const raw = await readFile(credentialsPath(workspaceRoot), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
   if (raw === null || raw.trim() === '') return { data: {}, wasPlaintext: false }
   let parsed: Awaited<ReturnType<typeof unsealCredentials>>
   try {
@@ -227,13 +228,13 @@ async function readCredentialsRaw(workspaceRoot: string): Promise<Awaited<Return
  * credentials.json 无值，界面显示“未配置”）。
  */
 async function readCredentials(workspaceRoot: string): Promise<Record<string, string>> {
-  const parsed = await readCredentialsRaw(workspaceRoot)
-  if (parsed.wasPlaintext && Object.keys(parsed.data).length > 0) {
-    await withCredentialLock(workspaceRoot, async () => {
+  return withCredentialLock(workspaceRoot, async () => {
+    const parsed = await readCredentialsRaw(workspaceRoot)
+    if (parsed.wasPlaintext && Object.keys(parsed.data).length > 0) {
       await writeCredentials(workspaceRoot, parsed.data)
-    })
-  }
-  return parsed.data
+    }
+    return parsed.data
+  })
 }
 
 /** Seal + atomic owner-only write (0600/fsync)：分享工作区不再带走明文 key。 */

@@ -12,6 +12,7 @@
 import { useAppStore } from "@/src/store/useAppStore";
 import type { PanelTab } from "@/src/store/useAppStore";
 import { api } from "@/src/lib/api";
+import { captureCourseScope } from "@/src/lib/courseScope";
 
 /** 同一课程的并发刷新合并为一次在途请求——Console/ChatArea/Palette 多实例
  * 的 usePanelData effect 此前各自打满三路请求，落地顺序不定还互相覆盖。 */
@@ -19,29 +20,32 @@ const inflightByKey = new Map<string, Promise<void>>();
 
 /** progress/mastery/heatmap 三路并行刷新（读取 store 当前激活课程）。 */
 export async function refreshPanelData(): Promise<void> {
-  const requestedCourseId = useAppStore.getState().activeCourseId;
+  const scope = captureCourseScope();
+  const requestedCourseId = scope.courseId;
   if (!requestedCourseId) return;
   // 同一课程的并发刷新合并为一次在途请求（多实例 effect 去重）。
-  const existing = inflightByKey.get(requestedCourseId);
+  const existing = inflightByKey.get(scope.key);
   if (existing !== undefined) return await existing;
   const task = (async () => {
-    await runPanelRefresh(requestedCourseId);
+    await runPanelRefresh(requestedCourseId, scope.isCurrent);
   })();
-  inflightByKey.set(requestedCourseId, task);
+  inflightByKey.set(scope.key, task);
   try {
     await task;
   } finally {
-    if (inflightByKey.get(requestedCourseId) === task) inflightByKey.delete(requestedCourseId);
+    if (inflightByKey.get(scope.key) === task) inflightByKey.delete(scope.key);
   }
 }
 
-async function runPanelRefresh(courseId: string): Promise<void> {
-  const [progress, mastery, heatmap, traces] = await Promise.allSettled([
+async function runPanelRefresh(courseId: string, isCurrent: () => boolean): Promise<void> {
+  const [progress, mastery, heatmap, traces, digest] = await Promise.allSettled([
     api.progress(courseId),
     api.mastery(courseId),
     api.heatmap(12),
     // P3「我的痕迹」：阅读标注按概念聚合（失败不阻塞其余面板）。
     api.readingTraces(),
+    // M4/M5：概念级摘要（一次请求，供「今天」视图与大纲 Tab 共用）。
+    api.digest(courseId),
   ]);
   // 进度一路失败必须显式落错（否则 ProgressTab 只有骨架屏可渲染，
   // 出现「大纲正常、进度永远转圈」的割裂画面）。
@@ -53,28 +57,31 @@ async function runPanelRefresh(courseId: string): Promise<void> {
         : String(progress.reason);
   // FE-3：落地前必须仍属于发起时的课程——快速切课时旧课程的慢响应
   // 不允许覆盖新课的骨架数据。
-  if (useAppStore.getState().activeCourseId !== courseId) return;
+  if (!isCurrent()) return;
   useAppStore.getState().setPanelData({
     progress: progress.status === "fulfilled" ? progress.value : null,
     progressError,
     mastery: mastery.status === "fulfilled" ? mastery.value : null,
     heatmap: heatmap.status === "fulfilled" ? heatmap.value : null,
     readingTraces: traces.status === "fulfilled" ? traces.value.traces : [],
+    digest: digest.status === "fulfilled" ? digest.value : null,
   });
 }
 
 /** 重拉课程列表（评测/同步后 Due 徽标、掌握度更新；M1 起按项目读取）。 */
 export async function refreshCourseList(): Promise<void> {
+  const scope = captureCourseScope();
+  const workspacePath = scope.workspacePath;
+  if (!workspacePath) return;
   try {
-    const workspacePath = useAppStore.getState().workspacePath;
-    if (!workspacePath) return;
     const { courses } = await api.courseList(workspacePath);
     // W-6：切工作区的在途响应不得覆盖新工作区的课程列表——chat sync/done 触发
     // 的 refresh 与用户切项目竞态时，旧项目 courses 晚到会显示错项目且不自愈
     // （Console effect 已先跑完）。与 runPanelRefresh 的课程守卫同口径。
-    if (useAppStore.getState().workspacePath !== workspacePath) return;
+    if (!scope.isCurrent()) return;
     useAppStore.getState().setCourses(courses);
   } catch (error) {
+    if (!scope.isCurrent()) return;
     // PERF-6：不再完全静默——横幅一次性提示；左栏下次装载仍会重试。
     console.warn("[panelData] 课程列表刷新失败:", error);
     useAppStore.getState().flashStatusBanner("✗ 课程列表加载失败，稍后自动重试");

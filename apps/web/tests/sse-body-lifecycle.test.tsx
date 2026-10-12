@@ -107,6 +107,7 @@ describe("streamSse 响应体生命周期", () => {
 
     await expect(async () => {
       for await (const _frame of streamSse<{ event: string }>("/api/x", {})) {
+        void _frame;
         throw new Error("调用方处理失败");
       }
     }).rejects.toThrow("调用方处理失败");

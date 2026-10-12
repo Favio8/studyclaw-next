@@ -86,6 +86,9 @@ export interface Concept {
   type: ConceptType;
   prerequisites: ConceptId[];
   masteryScore: MasteryScore;
+  definition?: string;
+  learning_objective?: string;
+  evidence?: Array<{source: string; page: number; block_id: string; quote: string}>;
 }
 
 /** 章节节点（章节级 DAG）。 */
@@ -99,6 +102,8 @@ export interface Chapter {
 
 /** syllabus.json 顶层结构；ID 前缀与无环 DAG 为硬约束（后端校验）。 */
 export interface Syllabus {
+  concept_origin?: "headings" | "semantic";
+  document_outline?: Array<{title: string; source: string}>;
   courseId: string;
   title: string;
   version: string;

@@ -9,11 +9,7 @@
  * writer per process and last-write-wins is correct. After the rename the
  * parent directory is fsynced on POSIX so the new entry is crash-durable.
  * @module @deepseek-ai/dsh-storage-json/src/atomic
- */
-
-import { open, rename, rm } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+ */import { open, rm } from 'node:fs/promises'import { dirname, join } from 'node:path'import { randomUUID } from 'node:crypto'import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 /**
  * Durably replace `path` with `data`.
@@ -31,7 +27,7 @@ export async function writeAtomic(path: string, data: string): Promise<void> {
     } finally {
       await handle.close()
     }
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
     await fsyncDirectory(dirname(path))
   } catch (error) {
     await rm(tmp, { force: true })

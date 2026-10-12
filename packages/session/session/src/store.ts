@@ -5,14 +5,23 @@
  * @module @studyclaw/session/src/store
  */
 
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { renameWithRetry } from '@studyclaw/fs-atomic'
 import { LEARNING_MODES, chatLine, sessionMetaLine, sessionModelLine, type ChatLine, type HistoryLine, type LearningMode, type SessionMetaLine, type SessionModelLine } from './models.ts'
 
 const SESSION_FILE_RE = /^session_(\d{8}-\d{6})\.jsonl$/
 const EVENT_FILE_RE = /^session_(\d{8}-\d{6})\.events\.jsonl$/
 const SESSION_ID_RE = /^\d{8}-\d{6}$/
+
+/** Only ENOENT means absent. An unreadable file must never become an empty snapshot. */
+export function readTextIfPresent(path: string): Promise<string | null> {
+  return readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+}
 
 export class SessionError extends Error {
   constructor(message: string) {
@@ -47,30 +56,11 @@ async function withFileWriteLock<T>(key: string, fn: () => Promise<T>): Promise<
 }
 
 /**
- * 判定「目标文件被外部短暂占用」。这些码在 POSIX 上基本不出现，在 Windows
- * 上是 rename 撞上杀软/索引器/其它 reader 句柄的典型症状，值得退避重试；
- * 而 ENOENT / EEXIST 之类是真实错误，重试只会掩盖。
+ * rename 的有界退避重试已收敛到 `@studyclaw/fs-atomic`（Windows 上 rename 覆盖
+ * 目标会被杀软/索引器的瞬时句柄顶成 EPERM/EBUSY/EACCES）。本仓库早期只在这个
+ * 文件里就地实现了一份，其余 write-temp + rename 全是裸调用，于是同一个问题
+ * 以"随机失败的测试"和"偶发保存不了设置"两种形式反复出现。
  */
-function isTransientFileBusy(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | null)?.code
-  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
-}
-
-const RENAME_RETRY_DELAYS_MS = [10, 40, 150]
-
-/** rename 的有界退避重试（仅对临时占用类错误）。 */
-async function renameWithRetry(from: string, to: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(from, to)
-      return
-    } catch (error) {
-      const delay = RENAME_RETRY_DELAYS_MS[attempt]
-      if (delay === undefined || !isTransientFileBusy(error)) throw error
-      await new Promise(resolve => setTimeout(resolve, delay))
-    }
-  }
-}
 
 /** UTC timestamp in file-contract form: `YYYY-MM-DDTHH:MM:SSZ`. */
 export function utcTs(date = new Date()): string {
@@ -99,7 +89,7 @@ export class SessionStore {
   /** Read title/mode metadata emitted by the event-log runtime. */
   private async eventSummary(sessionId: string): Promise<{ title: string; mode: LearningMode; createdAt: string; archived: boolean; userNamed: boolean; autoProvenance: 'fallback' | 'llm' | '' } | null> {
     const path = join(this.historyDir, `session_${sessionId}.events.jsonl`)
-    const text = await readFile(path, 'utf8').catch(() => null)
+    const text = await readTextIfPresent(path)
     if (text === null) return null
     let title = ''
     let userNamed = false
@@ -149,7 +139,7 @@ export class SessionStore {
   }
 
   private async archivedIds(): Promise<Set<string>> {
-    const text = await readFile(this.archivePath(), 'utf8').catch(() => null)
+    const text = await readTextIfPresent(this.archivePath())
     if (text === null) return new Set()
     try {
       const parsed = JSON.parse(text) as unknown
@@ -164,7 +154,7 @@ export class SessionStore {
    * an invalid file is treated as an empty order and healed on the next list.
    */
   private async sessionOrder(): Promise<string[] | null> {
-    const text = await readFile(this.sessionOrderPath(), 'utf8').catch(() => null)
+    const text = await readTextIfPresent(this.sessionOrderPath())
     if (text === null) return null
     try {
       const parsed = JSON.parse(text) as unknown
@@ -186,8 +176,10 @@ export class SessionStore {
     await mkdir(this.historyDir, { recursive: true })
     const path = this.sessionOrderPath()
     const tmp = path + '.tmp'
-    await writeFile(tmp, JSON.stringify(order) + '\n', 'utf8')
-    await rename(tmp, path)
+    try {
+      await writeFile(tmp, JSON.stringify(order) + '\n', 'utf8')
+      await renameWithRetry(tmp, path)
+    } finally { await rm(tmp, { force: true }).catch(() => undefined) }
   }
 
   async newSession(
@@ -208,7 +200,10 @@ export class SessionStore {
       mode,
       created_at: now.toISOString(),
     }
-    await writeFile(path, dumps(meta) + '\n', 'utf8')
+    await writeFile(path, dumps(meta) + '\n', { encoding: 'utf8', flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'EEXIST') throw new SessionError(`会话已存在: ${sessionId}（同一秒内请勿重复创建）`)
+      throw error
+    })
     return { sessionId, path }
   }
 
@@ -218,6 +213,10 @@ export class SessionStore {
    * appended in deterministic recency order, matching dsh reconciliation.
    */
   async listSessions(): Promise<SessionSummary[]> {
+    return withFileWriteLock(this.sessionOrderPath(), () => this.listSessionsInternal())
+  }
+
+  private async listSessionsInternal(): Promise<SessionSummary[]> {
     const dir = await stat(this.historyDir).catch(() => null)
     if (dir === null || !dir.isDirectory()) return []
     const { readdir } = await import('node:fs/promises')
@@ -253,7 +252,7 @@ export class SessionStore {
       let userNamed = false
       let mode: LearningMode = event?.mode ?? 'socratic'
       let createdAt = info.mtimeMs > 0 ? new Date(info.mtimeMs).toISOString() : ''
-      const text = await readFile(join(this.historyDir, name), 'utf8').catch(() => '')
+      const text = (await readTextIfPresent(join(this.historyDir, name))) ?? ''
       for (const raw of text.split(/\r?\n/)) {
         if (raw.trim() === '') continue
         try {
@@ -303,21 +302,23 @@ export class SessionStore {
 
   /** Move one visible session before another one (or to the end when omitted). */
   async insertSessionBefore(sessionId: string, beforeId?: string): Promise<SessionSummary[]> {
-    const sessions = await this.listSessions()
-    if (!sessions.some(session => session.id === sessionId)) {
-      throw new SessionError(`会话不存在: ${sessionId}`)
-    }
-    if (beforeId === sessionId) return sessions
-    if (beforeId !== undefined && !sessions.some(session => session.id === beforeId)) {
-      throw new SessionError(`会话不存在: ${beforeId}`)
-    }
-    const reordered = sessions.filter(session => session.id !== sessionId)
-    const insertAt = beforeId === undefined
-      ? reordered.length
-      : reordered.findIndex(session => session.id === beforeId)
-    reordered.splice(insertAt, 0, sessions.find(session => session.id === sessionId)!)
-    await this.writeSessionOrder(reordered.map(session => session.id))
-    return reordered
+    return withFileWriteLock(this.sessionOrderPath(), async () => {
+      const sessions = await this.listSessionsInternal()
+      if (!sessions.some(session => session.id === sessionId)) {
+        throw new SessionError(`会话不存在: ${sessionId}`)
+      }
+      if (beforeId === sessionId) return sessions
+      if (beforeId !== undefined && !sessions.some(session => session.id === beforeId)) {
+        throw new SessionError(`会话不存在: ${beforeId}`)
+      }
+      const reordered = sessions.filter(session => session.id !== sessionId)
+      const insertAt = beforeId === undefined
+        ? reordered.length
+        : reordered.findIndex(session => session.id === beforeId)
+      reordered.splice(insertAt, 0, sessions.find(session => session.id === sessionId)!)
+      await this.writeSessionOrder(reordered.map(session => session.id))
+      return reordered
+    })
   }
 
   async latestSessionId(): Promise<string | null> {
@@ -339,7 +340,7 @@ export class SessionStore {
 
   async readMeta(sessionId: string): Promise<SessionMetaLine | null> {
     const path = this.pathFor(sessionId)
-    const text = await readFile(path, 'utf8').catch(() => null)
+    const text = await readTextIfPresent(path)
     if (text === null) return null
     const first = text.split(/\r?\n/, 1)[0] ?? ''
     if (first === '') return null
@@ -500,7 +501,7 @@ export class SessionStore {
     throughChatIndex?: number,
   ): Promise<{ sessionId: string; path: string }> {
     const sourcePath = this.pathFor(sessionId)
-    const source = await readFile(sourcePath, 'utf8').catch(() => null)
+    const source = await readTextIfPresent(sourcePath)
     if (source === null) throw new SessionError(`会话不存在: ${sessionId}`)
     const sourceMeta = await this.readMeta(sessionId)
     if (throughChatIndex !== undefined && (!Number.isInteger(throughChatIndex) || throughChatIndex < 0)) {
@@ -558,14 +559,19 @@ export class SessionStore {
       return
     }
     await this.load(sessionId)
-    const archived = await this.archivedIds()
-    archived.add(sessionId)
-    await mkdir(this.historyDir, { recursive: true })
-    await writeFile(this.archivePath(), JSON.stringify([...archived]) + '\n', 'utf8')
-    const order = await this.sessionOrder()
-    if (order !== null && order.includes(sessionId)) {
-      await this.writeSessionOrder(order.filter(id => id !== sessionId))
-    }
+    await withFileWriteLock(this.archivePath(), async () => {
+      const archived = await this.archivedIds()
+      archived.add(sessionId)
+      await mkdir(this.historyDir, { recursive: true })
+      const tmp = `${this.archivePath()}.tmp`
+      await writeFile(tmp, JSON.stringify([...archived]) + '\n', 'utf8')
+      try { await renameWithRetry(tmp, this.archivePath()) }
+      finally { await rm(tmp, { force: true }).catch(() => undefined) }
+    })
+    await withFileWriteLock(this.sessionOrderPath(), async () => {
+      const order = await this.sessionOrder()
+      if (order !== null && order.includes(sessionId)) await this.writeSessionOrder(order.filter(id => id !== sessionId))
+    })
   }
 }
 

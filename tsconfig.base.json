@@ -62,6 +62,7 @@
       "@studyclaw/session": ["./packages/session/session/src"],
       "@studyclaw/chat-service": ["./packages/host/chat-service/src"],
       "@studyclaw/course-builder": ["./packages/course/builder/src"],
+      "@studyclaw/fs-atomic": ["./packages/util/fs-atomic/src"],
       "@studyclaw/learning": ["./packages/learning/learning/src"]
       ,"@studyclaw/agent": ["./packages/agent/agent/src"]
       ,"@studyclaw/acp": ["./packages/acp/acp/src"]

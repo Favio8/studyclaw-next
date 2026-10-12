@@ -1,9 +1,4 @@
-/** Explicit migration from StudyClaw JSONL history to Agent event JSONL. */
-
-import { copyFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { historyLine, type HistoryLine } from './models.ts'
-import { SessionEventStore, type SessionEventEnvelope } from './events.ts'
+/** Explicit migration from StudyClaw JSONL history to Agent event JSONL. */import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'import { join } from 'node:path'import { historyLine, type HistoryLine } from './models.ts'import { SessionEventStore, type SessionEventEnvelope } from './events.ts'import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 export interface SessionMigrationResult {
   readonly sessionId: string
@@ -71,6 +66,6 @@ export async function migrateLegacySession(historyDir: string, sessionId: string
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`
   const rows = events.map((event, index) => JSON.stringify({ ...event, seq: index + 1 })).join('\n')
   await writeFile(tmp, rows === '' ? '' : `${rows}\n`, 'utf8')
-  await rename(tmp, target)
+  await renameWithRetry(tmp, target)
   return { sessionId, migrated: true, eventFile: target, backupFile: backup, events: events.length }
 }

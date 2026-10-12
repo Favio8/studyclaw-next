@@ -157,10 +157,22 @@ interface PendingApproval extends ApprovalRequest {
 /** Host-neutral approval broker shared by Web, CLI and ACP adapters. */
 /** 审批默认存活时长；restore 兜底重算 expiresAt 时复用同一口径。 */
 const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60_000
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
 export class ApprovalQueue {
   private readonly pending = new Map<string, PendingApproval>()
   private readonly resolvedListeners = new Set<(request: ApprovalRequest, decision: ApprovalDecision) => void | Promise<void>>()
+
+  /** Node clamps overflowing timer delays to 1ms; keep the actual deadline. */
+  private expiryTimer(requestId: string, expiresMs: number): ReturnType<typeof setTimeout> {
+    const remaining = Math.max(0, expiresMs - Date.now())
+    return setTimeout(() => {
+      const pending = this.pending.get(requestId)
+      if (pending === undefined) return
+      if (Date.now() >= expiresMs) this.resolve(requestId, 'timeout')
+      else pending.timer = this.expiryTimer(requestId, expiresMs)
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS))
+  }
 
   /** Subscribe to every terminal decision, including timeout. */
   onResolved(listener: (request: ApprovalRequest, decision: ApprovalDecision) => void | Promise<void>): () => void {
@@ -192,7 +204,7 @@ export class ApprovalQueue {
     }
     let resolvePromise!: (decision: ApprovalDecision) => void
     const decision = new Promise<ApprovalDecision>(resolve => { resolvePromise = resolve })
-    const pending: PendingApproval = { ...request, resolve: resolvePromise, timer: setTimeout(() => this.resolve(approvalId, 'timeout'), timeoutMs) }
+    const pending: PendingApproval = { ...request, resolve: resolvePromise, timer: this.expiryTimer(approvalId, createdAt.getTime() + timeoutMs) }
     this.pending.set(approvalId, pending)
     return { request, decision }
   }
@@ -218,7 +230,6 @@ export class ApprovalQueue {
     // 都会把恢复路径炸掉，而 createdAt 的同类防护却是有效的——纯粹是顺序错了。
     const expiresMs = new Date(input.expiresAt).getTime()
     const expiresMsSafe = Number.isFinite(expiresMs) ? expiresMs : Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS
-    const remaining = Math.max(0, expiresMsSafe - Date.now())
     let resolvePromise!: (decision: ApprovalDecision) => void
     const decision = new Promise<ApprovalDecision>(resolve => { resolvePromise = resolve })
     const request: ApprovalRequest = {
@@ -235,7 +246,7 @@ export class ApprovalQueue {
     const pending: PendingApproval = {
       ...request,
       resolve: resolvePromise,
-      timer: setTimeout(() => this.resolve(request.id, 'timeout'), remaining),
+      timer: this.expiryTimer(request.id, expiresMsSafe),
     }
     this.pending.set(request.id, pending)
     // Keep the promise owned by the queue. A restored request has no old turn

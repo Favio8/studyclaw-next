@@ -5,12 +5,7 @@
  * simplification: hints stay course-scoped). Ported from Python
  * `session.py::SyncApplier` / `memory.py::MemoryEngine.register` (reduced).
  * @module @studyclaw/session/src/applier
- */
-
-import { readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import type { SyncBlock } from './models.ts'
-import type { SyncLine } from './models.ts'
+ */import { stat, writeFile } from 'node:fs/promises'import { join } from 'node:path'import type { SyncBlock } from './models.ts'import type { SyncLine } from './models.ts'import { readTextIfPresent } from './store.ts'import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 const EVIDENCE_TARGET = 'memory_pool'
 const EVIDENCE_PREFIX = 'hints: '
@@ -113,7 +108,7 @@ export class SyncApplier {
     const legacy = join(this.courseDir, 'syllabus.json')
     let raw: string | null = null
     for (const path of [v2, legacy]) {
-      raw = await readFile(path, 'utf8').catch(() => null)
+      raw = await readTextIfPresent(path)
       if (raw !== null) break
     }
     const map = new Map<string, { name: string; chapter: string }>()
@@ -137,7 +132,7 @@ export class SyncApplier {
     if (updates.length === 0) return ''
     const path = await progressBoardPath(this.courseDir)
     const facts = await this.conceptFacts()
-    const text = await readFile(path, 'utf8').catch(() => null)
+    const text = await readTextIfPresent(path)
     if (text === null) {
       // No board yet: create one with the updated concepts (best-effort M2 form).
       const header = ['| concept_id | name | chapter | mastery | evals | pass_rate | ef | next_review_at | misattribution |',
@@ -254,5 +249,5 @@ async function atomicWrite(path: string, content: string): Promise<void> {
   // 随机 tmp 同口径；storage-json atomic.ts 用 uuid）。
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   await writeFile(tmp, content, 'utf8')
-  await rename(tmp, path)
+  await renameWithRetry(tmp, path)
 }

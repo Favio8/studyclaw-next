@@ -19,6 +19,7 @@
     { "path": "./packages/util/launch-environment" },
     { "path": "./packages/util/timeout" },
     { "path": "./packages/util/home-paths" },
+    { "path": "./packages/util/fs-atomic" },
     { "path": "./packages/tools/tools" },
     { "path": "./packages/session/session" },
     { "path": "./packages/agent/agent" },

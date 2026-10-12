@@ -9,7 +9,7 @@
  * 重放路径炸掉，而同文件里 createdAt 的同类防护却是有效的。
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApprovalQueue } from '../src/index.ts'
 
 function base(overrides: Record<string, unknown> = {}) {
@@ -27,6 +27,34 @@ function base(overrides: Record<string, unknown> = {}) {
 }
 
 describe('ApprovalQueue.restore 容错', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('远期审批不能因 Node timer 溢出在 1ms 后错误超时', () => {
+    vi.useFakeTimers()
+    const now = Date.UTC(2026, 9, 11)
+    vi.setSystemTime(now)
+    const queue = new ApprovalQueue()
+    const timeout = 2 ** 31 + 1000
+    queue.restore(base({ expiresAt: new Date(now + timeout).toISOString() }) as never)
+    vi.advanceTimersByTime(1)
+    expect(queue.list()).toHaveLength(1)
+    vi.advanceTimersByTime(2 ** 31 - 2)
+    expect(queue.list()).toHaveLength(1)
+    vi.advanceTimersByTime(1001)
+    expect(queue.list()).toHaveLength(0)
+  })
+
+  it('超长新请求也按实际截止时间超时，分段计时后仍可取消', async () => {
+    vi.useFakeTimers()
+    const queue = new ApprovalQueue()
+    const pending = queue.request({ agentId: 'a', sessionId: 's', name: 'write_file', policy: 'ask', args: {}, timeoutMs: 2 ** 31 + 1000 })
+    vi.advanceTimersByTime(2 ** 31 - 1)
+    expect(queue.list()).toHaveLength(1)
+    queue.resolve(pending.request.id, 'cancel')
+    await expect(pending.decision).resolves.toBe('cancel')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('expiresAt 损坏时按默认时长兜底，不抛错', () => {
     const queue = new ApprovalQueue()
     for (const bad of ['not-a-date', '', 'NaN', '2026-13-45T99:99:99Z']) {

@@ -7,10 +7,12 @@
  * @module @studyclaw/session/events
  */
 
-import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, stat, writeFile } from 'node:fs/promises'
+import { renameWithRetry } from '@studyclaw/fs-atomic'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { utcTs } from './store.ts'
+import { readTextIfPresent, utcTs } from './store.ts'
 
 export const sessionEventEnvelope = z.object({
   seq: z.number().int().positive(),
@@ -236,20 +238,8 @@ function serializeRows(rows: ReadonlyArray<SessionEventEnvelope>): string {
 /** Windows can briefly hold the destination while a concurrent projection
  * read closes its handle. Retry only transient replace failures; all other
  * filesystem errors remain visible to the caller. */
-async function replaceEventFile(tmp: string, target: string): Promise<void> {
-  let last: unknown = null
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      await rename(tmp, target)
-      return
-    } catch (error) {
-      last = error
-      const code = (error as NodeJS.ErrnoException | null)?.code
-      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw error
-      await new Promise(resolve => setTimeout(resolve, 5 * (attempt + 1)))
-    }
-  }
-  throw last
+function replaceEventFile(tmp: string, target: string): Promise<void> {
+  return renameWithRetry(tmp, target)
 }
 
 /** Durable event store used by Agent runtime and ACP replay. */
@@ -269,7 +259,7 @@ export class SessionEventStore {
   }
 
   async load(sessionId: string): Promise<SessionEventEnvelope[]> {
-    const text = await readFile(this.pathFor(sessionId), 'utf8').catch(() => '')
+    const text = await readTextIfPresent(this.pathFor(sessionId)) ?? ''
     return scanRowsTolerant(text, sessionId).rows
   }
 
@@ -293,12 +283,15 @@ export class SessionEventStore {
       let damaged = false
       let rawForHeal: string | null = null
       let healRows: SessionEventEnvelope[] = []
-      const currentStat = await stat(path).catch(() => null)
+      const currentStat = await stat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
       const cached = SessionEventStore.appendState.get(path)
       if (currentStat !== null && cached !== undefined && currentStat.size === cached.size && currentStat.mtimeMs === cached.mtimeMs) {
         existingCount = cached.rows
       } else {
-        const raw = await readFile(path, 'utf8').catch(() => null)
+        const raw = await readTextIfPresent(path)
         const { rows: existing, damaged: isDamaged } = raw === null ? { rows: [] as SessionEventEnvelope[], damaged: false } : scanRowsTolerant(raw, sessionId)
         rawForHeal = raw
         healRows = existing
@@ -334,7 +327,7 @@ export class SessionEventStore {
       } else {
         // 自愈：原件备份 .corrupt-<时间戳>，以合法前缀 + 新事件原子重建。
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-        await writeFile(`${path}.corrupt-${stamp}`, rawForHeal, 'utf8').catch(() => undefined)
+        await writeFile(`${path}.corrupt-${stamp}-${randomUUID()}`, rawForHeal, 'utf8')
         const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         await writeFile(tmp, serializeRows(healRows) + chunk, 'utf8')
         await replaceEventFile(tmp, path)

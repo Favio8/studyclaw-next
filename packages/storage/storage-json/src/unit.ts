@@ -1,11 +1,8 @@
 /**
  * One opened JSON unit. The in-memory state is authoritative; every write
- * primitive mutates it and republishes the whole file atomically. The ORDER
- * of individual write calls belongs to the caller (the domain layer's write
- * chain), but file publishes themselves are serialized internally — with
- * concurrent callers the last rename must be the one that saw every
- * committed mutation, or a resolved write could be silently overwritten by
- * an older whole-file snapshot (breaking "resolved == durable").
+ * primitive runs mutation, atomic publish and any rollback in one serialized
+ * window. Concurrent calls are admitted in invocation order, so a failed
+ * earlier write cannot overwrite the memory or medium of a later success.
  * @module @deepseek-ai/dsh-storage-json/src/unit
  */
 
@@ -110,27 +107,29 @@ class JsonKvUnit implements KvUnit {
     this.assertOpen()
     assertJsonSafe(this.descriptor.name, value)
     const records = this.records(table)
-    const hadKey = records.has(key)
-    const previous = records.get(key)
-    records.set(key, value)
-    // Roll back on a failed publish: memory is authoritative, so a rejected
-    // write must not survive in memory (or ride along with the next publish).
-    await this.publish().catch((error: unknown) => {
-      if (hadKey) records.set(key, previous)
-      else records.delete(key)
-      throw error
+    await this.publish(async () => {
+      const hadKey = records.has(key)
+      const previous = records.get(key)
+      records.set(key, value)
+      try { await writeAtomic(this.path, serialize(this.descriptor.name, this.state)) } catch (error) {
+        if (hadKey) records.set(key, previous)
+        else records.delete(key)
+        throw error
+      }
     })
   }
 
   async deleteRecord(table: string, key: string): Promise<void> {
     this.assertOpen()
     const records = this.records(table)
-    if (!records.has(key)) return
-    const previous = records.get(key)
-    records.delete(key)
-    await this.publish().catch((error: unknown) => {
-      records.set(key, previous)
-      throw error
+    await this.publish(async () => {
+      if (!records.has(key)) return
+      const previous = records.get(key)
+      records.delete(key)
+      try { await writeAtomic(this.path, serialize(this.descriptor.name, this.state)) } catch (error) {
+        records.set(key, previous)
+        throw error
+      }
     })
   }
 
@@ -140,11 +139,13 @@ class JsonKvUnit implements KvUnit {
       throw new Error(`unit '${this.descriptor.name}' does not declare a global slot`)
     }
     assertJsonSafe(this.descriptor.name, value, 'global')
-    const previous = this.state.global
-    this.state.global = value
-    await this.publish().catch((error: unknown) => {
-      this.state.global = previous
-      throw error
+    await this.publish(async () => {
+      const previous = this.state.global
+      this.state.global = value
+      try { await writeAtomic(this.path, serialize(this.descriptor.name, this.state)) } catch (error) {
+        this.state.global = previous
+        throw error
+      }
     })
   }
 
@@ -172,17 +173,12 @@ class JsonKvUnit implements KvUnit {
     return records
   }
 
-  private publish(): Promise<void> {
-    // Serialize the atomic replacements: concurrent callers each snapshot the
-    // authoritative in-memory state, but rename order is uncontrollable —
-    // the last rename must be the one that saw every committed mutation,
-    // otherwise an older whole-file snapshot can overwrite a newer one after
-    // both writes resolved (silent loss under a success receipt). Serializing
-    // also means each snapshot is taken at turn start, so it always includes
-    // every mutation that happened before it.
+  private publish(mutateAndPersist: () => Promise<void>): Promise<void> {
+    // Serialize the entire mutation/publish/rollback window. Serializing only
+    // rename lets a failed earlier mutation roll back a later successful one.
     const write = this.writeChain
       .catch(() => undefined)
-      .then(() => writeAtomic(this.path, serialize(this.descriptor.name, this.state)))
+      .then(mutateAndPersist)
     this.writeChain = write
     this.inFlight.add(write)
     // Swallow only on the tracking branch: the caller still awaits `write`

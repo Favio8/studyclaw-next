@@ -5,7 +5,7 @@
  * 是真实目录——用 os.tmpdir 下的独立目录，避免污染仓库工作目录。
  */
 
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -18,6 +18,46 @@ async function makeCourseDir(): Promise<string> {
 }
 
 describe('withCourseLock', () => {
+  it('锁文件刚创建而 token 尚未写入时不抢占', async () => {
+    const dir = await makeCourseDir()
+    await mkdir(join(dir, '.studyclaw'))
+    const path = join(dir, '.studyclaw', 'course.lock')
+    const handle = await open(path, 'wx')
+    let entered = false
+    const pending = withCourseLock(dir, async () => { entered = true })
+    try {
+      await sleep(60)
+      expect(entered).toBe(false)
+    } finally {
+      await handle.close()
+      await rm(path, { force: true })
+      await pending
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('同一目录的不同路径写法共用锁，不能抢走本进程的活锁', async () => {
+    const dir = await makeCourseDir()
+    let release!: () => void
+    const gate = new Promise<void>(yes => { release = yes })
+    let entered!: () => void
+    const started = new Promise<void>(yes => { entered = yes })
+    let running = 0, maxRunning = 0
+    const first = withCourseLock(dir, async () => {
+      maxRunning = Math.max(maxRunning, ++running)
+      entered(); await gate; running--
+    })
+    let second: Promise<void> | undefined
+    try {
+      await started
+      second = withCourseLock(`${dir}/.`, async () => { maxRunning = Math.max(maxRunning, ++running); running-- })
+      await sleep(40)
+      release()
+      await Promise.all([first, second])
+      expect(maxRunning).toBe(1)
+    } finally { release(); await Promise.allSettled([first, second]); await rm(dir, { recursive: true, force: true }) }
+  })
+
   it('并发调用严格互斥（maxConcurrent === 1）', async () => {
     const dir = await makeCourseDir()
     try {

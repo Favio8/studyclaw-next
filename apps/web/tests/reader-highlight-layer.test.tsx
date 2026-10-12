@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -29,10 +29,12 @@ const { apiMocks, pdfjsMock } = vi.hoisted(() => ({
     GlobalWorkerOptions: {} as { workerPort?: unknown },
     getDocument: vi.fn(),
     TextLayer: vi.fn(),
+    TextLayerImages: vi.fn(),
   },
 }));
 
 vi.mock("pdfjs-dist", () => pdfjsMock);
+vi.mock("pdfjs-dist/web/pdf_viewer.mjs", () => ({ TextLayerBuilder: pdfjsMock.TextLayer }));
 vi.mock("@/src/lib/api", () => ({
   ApiError: class extends Error {},
   api: apiMocks,
@@ -63,19 +65,21 @@ const HIGHLIGHT: AnnotationView = {
 };
 
 /** getDocument 打桩：返回一个可渲染的单页文档。 */
-function stubPdfjs() {
+function stubPdfjs(numPages = 1) {
   const page = {
-    getViewport: () => ({ width: 600, height: 800, scale: 1 }),
+    getViewport: ({ scale }: { scale: number }) => ({ width: 600 * scale, height: 800 * scale, scale }),
     render: () => ({ promise: Promise.resolve() }),
     getTextContent: async () => ({ items: [{ str: "hello" }] }),
     cleanup: vi.fn(),
   };
   pdfjsMock.getDocument.mockReturnValue({
-    promise: Promise.resolve({ numPages: 1, getPage: async () => page, cleanup: vi.fn() }),
+    promise: Promise.resolve({ numPages, getPage: async () => page, cleanup: vi.fn() }),
     destroy: async () => {},
   });
   pdfjsMock.TextLayer.mockImplementation(function () {
-    return { render: async () => {}, cancel: vi.fn() };
+    const div = document.createElement("div");
+    div.className = "textLayer";
+    return { div, render: async () => {}, cancel: vi.fn() };
   });
 }
 
@@ -111,6 +115,94 @@ afterEach(() => {
 });
 
 describe("PdfCanvas 高亮覆盖层（回归：已高亮的原文必须仍可划词）", () => {
+  it("页面连续存在，普通滚轮不再接管翻页，滚动报告页码不会把视口拉回页首", async () => {
+    stubPdfjs(5);
+    const onPageChange = vi.fn();
+    const { container, rerender } = render(<PdfCanvas source="sources/a.pdf" page={1} zoom={1} highlights={[]} onPageCount={vi.fn()} onPageChange={onPageChange} />);
+    await waitFor(() => expect(container.querySelectorAll("[data-page-number]")).toHaveLength(5));
+
+    // ---- 几何桩 ------------------------------------------------------------
+    // 这个用例要断言"滚动按真实几何报页码"，所以必须给 jsdom 补出布局。
+    // 有两个坑，少补一个就得到**看似随机**的失败：
+    //
+    // 1. jsdom 完全没有 offsetTop/offsetHeight/offsetLeft（不是 0，是 undefined）。
+    //    offsetTop + offsetHeight > probe 变成 NaN > probe，恒假 → find() 落空
+    //    → 走 pages.at(-1) 兜底 → 页码报成最后一页（5）而不是 2。
+    // 2. 锚点还原会算 (scrollLeft + clientWidth/2 - offsetLeft)/offsetWidth 并写回
+    //    scrollLeft/scrollTop。任一项 undefined 就产生 NaN，并顺着写入污染
+    //    scrollTop —— 页码计算直接变成 NaN 阈值，同样落到兜底。
+    //
+    // 打桩必须**贴着滚动**且作用在**仍连接在 DOM 上**的节点：组件在 pdf.js 异步
+    // 就绪后会重建页面槽，之前抓的节点快照会脱离文档、桩随之失效。
+    const withGeometry = <T extends Element>(el: T, values: Record<string, number>): T => {
+      for (const [key, value] of Object.entries(values)) {
+        Object.defineProperty(el, key, { configurable: true, value });
+      }
+      return el;
+    };
+    const applyLayout = (): { scroller: HTMLElement; slots: HTMLElement[] } => {
+      const scroller = screen.getByTestId("reader-scroller") as HTMLElement;
+      withGeometry(scroller, { clientWidth: 600, clientHeight: 600, offsetWidth: 600, offsetHeight: 600, offsetTop: 0, offsetLeft: 0 });
+      const slots = [...scroller.querySelectorAll<HTMLElement>("[data-page-number]")];
+      slots.forEach((slot, index) => {
+        withGeometry(slot, {
+          offsetTop: 16 + index * 816, offsetHeight: 800, offsetWidth: 600,
+          offsetLeft: 40, clientWidth: 600, clientHeight: 800,
+        });
+      });
+      return { scroller, slots };
+    };
+    // scrollTop/scrollLeft 在 jsdom 上是钳成 0 的真访问器（无布局 → 可滚动区为 0），
+    // 写入会被丢弃。用可写桩替掉，写入才存得住，末尾"滚动位置未被重置"的断言才有意义。
+    const scroller = screen.getByTestId("reader-scroller");
+    let scrollTopValue = 0;
+    let scrollLeftValue = 0;
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true, get: () => scrollTopValue, set: (v: number) => { scrollTopValue = Number.isFinite(v) ? v : scrollTopValue; },
+    });
+    Object.defineProperty(scroller, "scrollLeft", {
+      configurable: true, get: () => scrollLeftValue, set: (v: number) => { scrollLeftValue = Number.isFinite(v) ? v : scrollLeftValue; },
+    });
+    withGeometry(scroller, { clientWidth: 600, clientHeight: 600, offsetWidth: 600, offsetHeight: 600, offsetTop: 0, offsetLeft: 0 });
+
+    const wheel = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
+    scroller.dispatchEvent(wheel);
+    expect(wheel.defaultPrevented).toBe(false);
+
+    await act(async () => {
+      // 组件可能已重建子树：重新取并重新打桩，且要求槽确实在文档里。
+      const live = applyLayout();
+      expect(live.slots).toHaveLength(5);
+      expect(live.slots.every(slot => slot.isConnected)).toBe(true);
+      live.scroller.scrollTop = 1000;
+      fireEvent.scroll(live.scroller);
+      // onScroll 用 rAF 节流（PdfCanvas.tsx），页码是在那一帧里算出来的：
+      // 显式等一帧，我们的 rAF 排在组件那一个之后，返回时页码必然已算完。
+      await new Promise<void>(resolve => { requestAnimationFrame(() => resolve()); });
+    });
+    expect(onPageChange).toHaveBeenCalledWith(2);
+    rerender(<PdfCanvas source="sources/a.pdf" page={2} zoom={1} highlights={[]} onPageCount={vi.fn()} onPageChange={onPageChange} />);
+    expect(screen.getByTestId("reader-scroller").scrollTop).toBe(1000);
+  });
+  it("离屏页不绘制，页级卸载不取消仍在阅读的页面选区监听", async () => {
+    stubPdfjs(5);
+    const observers = new Map<Element, (entries: Array<{ isIntersecting: boolean }>) => void>();
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(private callback: (entries: Array<{ isIntersecting: boolean }>) => void) {}
+      observe(element: Element) { observers.set(element, this.callback); }
+      disconnect() {}
+    });
+    const otherPage = { ...HIGHLIGHT, page: 2 };
+    const { container } = render(<PdfCanvas source="sources/a.pdf" page={1} zoom={1} highlights={[otherPage]} onPageCount={vi.fn()} onPageChange={vi.fn()} />);
+    await waitFor(() => expect(pdfjsMock.TextLayer).toHaveBeenCalledTimes(2));
+    expect(container.querySelector('[data-page-number="5"] canvas')).toBeNull();
+    expect(container.querySelector('[data-page-number="2"] [data-testid="pdf-highlight-layer"] div')).not.toBeNull();
+    const signal = pdfjsMock.TextLayer.mock.calls[0][0].abortSignal as AbortSignal;
+    act(() => observers.get(container.querySelector('[data-page-number="1"]')!)!([{ isIntersecting: false }]));
+    expect(signal.aborted).toBe(false);
+    expect(container.querySelector('[data-page-number="1"] canvas')).toBeNull();
+    expect(container.querySelector('[data-page-number="2"] canvas')).not.toBeNull();
+  });
   it("高亮层是纯装饰覆盖层：pointer-events-none 且不含可点元素", async () => {
     render(
       <PdfCanvas
@@ -121,7 +213,7 @@ describe("PdfCanvas 高亮覆盖层（回归：已高亮的原文必须仍可划
         onPageChange={() => {}}
       />,
     );
-    const pageEl = await screen.findByTestId("pdf-page");
+    await screen.findByTestId("pdf-page");
     await waitFor(() => expect(screen.getByTestId("pdf-highlight-layer")).toBeInTheDocument());
 
     const layer = screen.getByTestId("pdf-highlight-layer");
@@ -137,7 +229,8 @@ describe("PdfCanvas 高亮覆盖层（回归：已高亮的原文必须仍可划
     expect((marks[0] as HTMLElement).style.left).toBe(`${HIGHLIGHT.rects[0]!.x * 100}%`);
 
     // 文本层（可选中的那一层）与页面容器仍然就位。
-    expect(pageEl.contains(layer)).toBe(true);
+    // PDF 异步初始化会替换占位页；校验当前页面，避免持有已卸载的旧 DOM。
+    expect(screen.getByTestId("pdf-page").contains(layer)).toBe(true);
     expect(screen.getByTestId("pdf-text-layer")).toBeInTheDocument();
   });
 
@@ -199,9 +292,11 @@ describe("ReaderView 窄栏标注浮层（回归：打开后能再关掉）", ()
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "标注列表" }).getAttribute("aria-expanded")).toBe("true"),
     );
-    const overlay = document.querySelector(".absolute.right-0.bottom-0.top-9");
+    const overlay = screen.getByTestId("annotation-drawer");
+    expect(screen.getByTestId("reader-content").contains(overlay)).toBe(true);
+    expect(screen.getByTestId("reader-toolbar").contains(overlay)).toBe(false);
     expect(overlay).not.toBeNull();
-    expect(overlay?.className).not.toContain("inset-y-0");
+    expect(overlay?.className).toContain("absolute");
 
     // 再点一次即可关闭。
     screen.getByRole("button", { name: "标注列表" }).click();
@@ -210,7 +305,7 @@ describe("ReaderView 窄栏标注浮层（回归：打开后能再关掉）", ()
     );
   });
 
-  it("宽容器下标注栏常驻，不出现切换钮", async () => {
+  it("宽容器默认让出阅读空间，标注列表仍可主动打开", async () => {
     useAppStore.getState().setReader({
       source: "sources/a.pdf",
       view: "pdf",
@@ -227,6 +322,7 @@ describe("ReaderView 窄栏标注浮层（回归：打开后能再关掉）", ()
     fireWidth();
 
     expect(await screen.findByText(/标注 0/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "标注列表" })).toBeNull();
+    expect(screen.getByRole("button", { name: "标注列表" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("annotation-drawer")).toBeNull();
   });
 });

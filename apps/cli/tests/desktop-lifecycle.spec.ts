@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -7,6 +8,10 @@ import { describe, expect, it, vi } from 'vitest'
 
 const mainPath = fileURLToPath(new URL('../../desktop/src/main.cjs', import.meta.url))
 const source = await readFile(mainPath, 'utf8')
+// main.cjs 的主窗口加载辅助（真实模块）：vm 沙箱里按路径注入，测试覆盖真实逻辑。
+const { loadWindowUrl } = createRequire(import.meta.url)('../../desktop/src/window-load.cjs') as {
+  loadWindowUrl: (win: unknown, url: string, state?: unknown) => Promise<{ ok: boolean; error?: unknown }>
+}
 
 function harness(devUrl = '') {
   const children: Array<EventEmitter & { pid: number; kill: ReturnType<typeof vi.fn>; stdout: EventEmitter; stderr: EventEmitter }> = []
@@ -26,6 +31,7 @@ function harness(devUrl = '') {
     static getAllWindows() { return [] }
     webContents = Object.assign(new EventEmitter(), { setWindowOpenHandler: vi.fn() })
     loadURL = vi.fn(async () => {})
+    isDestroyed = vi.fn(() => false)
     isMinimized = vi.fn(() => false)
     restore = vi.fn()
     show = vi.fn()
@@ -47,6 +53,7 @@ function harness(devUrl = '') {
       if (name === 'node:child_process') return { spawn }
       if (name === 'node:fs') return fileSystem
       if (name === 'node:path') return path
+      if (name === './window-load.cjs') return { loadWindowUrl }
       throw new Error(`unexpected require ${name}`)
     },
   })

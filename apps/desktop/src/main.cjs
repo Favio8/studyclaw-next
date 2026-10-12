@@ -7,6 +7,7 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const { spawn } = require('node:child_process')
 const { existsSync, readFileSync, mkdirSync, rmSync } = require('node:fs')
 const { join } = require('node:path')
+const { loadWindowUrl } = require('./window-load.cjs')
 
 // 开发联调模式：设置 STUDYCLAW_DESKTOP_DEV_URL 后不拉起 sidecar，
 // 直接加载外部地址（配合 `pnpm serve` / `next dev` 热更新，plan 3.4）。
@@ -115,7 +116,10 @@ function startHost() {
         const target = `http://127.0.0.1:${cfg.port}/`
         const existing = BrowserWindow.getAllWindows()
         if (existing.length > 0) {
-          return Promise.all(existing.map(w => w.loadURL(target)))
+          return Promise.all(existing.map(async w => {
+            const loaded = await loadIntoWindow(w, target)
+            if (!loaded.ok) throw loaded.error
+          }))
         } else {
           return createMainWindow()
         }
@@ -180,6 +184,18 @@ function waitForHost() {
   })
 }
 
+/** 每个窗口的导航代次：并发加载时旧载荷的 ERR_ABORTED 不能算失败（见 window-load.cjs）。 */
+const loadSeqByWindow = new WeakMap()
+
+function loadIntoWindow(target, url) {
+  const seq = (loadSeqByWindow.get(target) ?? 0) + 1
+  loadSeqByWindow.set(target, seq)
+  return loadWindowUrl(target, url, {
+    isSuperseded: () => loadSeqByWindow.get(target) !== seq,
+    isQuitting: () => quitting,
+  })
+}
+
 async function createMainWindow() {
   let url
   if (isDev) {
@@ -222,7 +238,13 @@ async function createMainWindow() {
     } catch {}
     if (!allowed) { e.preventDefault(); openExternalWebLink(target) }
   })
-  await win.loadURL(url)
+  // 主帧加载失败只记日志；ERR_ABORTED(-3) 是并发/主动导航，不是失败。
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return
+    console.error('[desktop] 页面加载失败', errorCode, errorDescription, validatedURL)
+  })
+  const loaded = await loadIntoWindow(win, url)
+  if (!loaded.ok) throw loaded.error
   win.on('closed', () => { win = null })
 }
 

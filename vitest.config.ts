@@ -36,6 +36,7 @@ export default defineConfig({
           include: [
             'packages/*/*/tests/**/*.spec.ts',
             'apps/cli/tests/**/*.spec.ts',
+            'apps/desktop/tests/**/*.spec.ts',
             'scripts/**/*.spec.ts',
           ],
           exclude: [

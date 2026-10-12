@@ -21,6 +21,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # `tsc -b` 走 project references 全图，是契约变更的第一道防线。
       - run: node_modules/.bin/tsc -b tsconfig.json
+      - run: node_modules/.bin/tsc -p scripts/release/tsconfig.json
       # 陷阱防护：tsc 误发射会在 src/ 下留下 .js 产物，历史上误提交过两次。
       - name: Guard against stray tsc emit in src/
         run: |
@@ -47,7 +48,7 @@ jobs:
       - run: node_modules/.bin/vitest run --testTimeout=60000 --hookTimeout=60000
 
   test-web:
-    name: Web tests
+    name: Web lint and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -59,8 +60,37 @@ jobs:
           node-version: 22.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter web lint
       - run: node_modules/.bin/vitest run
         working-directory: apps/web
+
+  # M3/G4：备份归档必须跨平台成立。ZIP 容器是手写的（无第三方依赖），DOS
+  # 时间戳、UTF-8 标志位、跨卷 rename 重试这些都只有真机才验得出来，而
+  # "自己的 reader 能读自己的 writer"是完全不够的互操作证明。
+  # 只跑与归档相关的套件，不跑全量，控制流水线时长。
+  portability:
+    name: Archive portability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4.4.0
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 归档容器：ZIP 读写 + 第三方互操作（unzip / .NET）+ 版本矩阵
+      - run: node_modules/.bin/vitest run packages/course/builder/tests/archive-adversarial.spec.ts packages/course/builder/tests/archive-integrity.spec.ts packages/course/builder/tests/zip.spec.ts packages/course/builder/tests/course-export.spec.ts --testTimeout=60000 --hookTimeout=60000
+      # 导出/导入的真实传输：二进制通道 + 跨卷暂存 + 二进制请求体上限
+      - run: node_modules/.bin/vitest run packages/host/chat-service/tests/course-import-service.spec.ts apps/cli/tests/serve-http.spec.ts apps/cli/tests/transfer-cli.spec.ts --testTimeout=60000 --hookTimeout=60000
+      # 原子替换在 Windows 上依赖 EPERM/EBUSY/EACCES 退避，跨平台必须都过
+      - run: node_modules/.bin/vitest run packages/util/fs-atomic --testTimeout=60000 --hookTimeout=60000
 
   release-gate:
     name: Release pack + verify packed install + publint
@@ -111,6 +141,9 @@ jobs:
         working-directory: apps/desktop
         env:
           SMOKE_STRICT: '1'
+      - name: Smoke native folder selection through the bundled Host
+        run: node scripts/smoke-sidecar.mjs
+        working-directory: apps/desktop
 
   # 同上，但在 macOS runner 上跑——覆盖 POSIX 分支：main.cjs 新增的
   # SIGTERM/SIGINT → app.quit()（Windows 上 SIGINT 被映射为强杀，那条路径只在

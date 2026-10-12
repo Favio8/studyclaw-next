@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import ConceptEditor from "@/src/components/panel/ConceptEditor";
+import { useCallback, useState } from "react";
 import { BarChart3, CalendarClock, CircleHelp, FileDown, FileText, Highlighter, ListChecks, RefreshCw } from "lucide-react";
 import { masteryTone, pct, relativeTime } from "@/src/lib/format";
 import { useAppStore } from "@/src/store/useAppStore";
 import { refreshPanelData } from "@/src/lib/panelData";
+import { useDeadlineActive } from "@/src/hooks/useDeadlineActive";
 import {
   LinearProgress,
   PanelEmptyState,
@@ -37,6 +39,8 @@ export default function ProgressTab() {
   const lastImport = useAppStore((s) => s.lastImport);
   const readingTraces = useAppStore((s) => s.readingTraces);
   const [refreshing, setRefreshing] = useState(false);
+  const updatedAt = progress?.lastUpdatedAt ? Date.parse(progress.lastUpdatedAt) : NaN;
+  const fresh = useDeadlineActive(Number.isFinite(updatedAt) ? updatedAt + STUDY_DATA_STALE_MS : null);
 
   // 痕迹按 conceptId 展示时尽量回显概念名（进度数据已在 store）。
   const conceptNameOf = useCallback(
@@ -69,13 +73,14 @@ export default function ProgressTab() {
   const overallTone = progressTone(progress.overallMastery);
   // 数据新鲜度：超过阈值提示"可能过期"——用户看到"更新于 30 天前"时无从判断
   // 该不该信这份掌握度，也给一键刷新的入口。
-  const stale = progress.lastUpdatedAt !== null
-    && Date.now() - new Date(progress.lastUpdatedAt).getTime() > STUDY_DATA_STALE_MS;
+  const stale = Number.isFinite(updatedAt) && !fresh;
   // 最近导入：仅展示属于当前课程的那次（切课即隐藏），下次导入即被替换。
   const recentImport = lastImport !== null && lastImport.courseId === activeCourseId ? lastImport : null;
 
   return (
     <div className="space-y-4 pb-2">
+      <ConceptEditor />
+      {progress.conceptOrigin === "headings" ? <p className="text-xs leading-5 text-text-muted">资料索引已就绪。先通过 AI 概念提炼确认学习知识点，再补齐题卡。</p> : null}
       {recentImport ? (
         <PanelSection title="最近导入" icon={FileDown}>
           <div className={`${panelSurfaceClass} p-3`} data-last-import="">
@@ -140,7 +145,7 @@ export default function ProgressTab() {
       </PanelSection>
 
       <PanelSection
-        title="概念掌握"
+        title={progress.conceptOrigin === "headings" ? "资料结构（待提炼）" : "概念掌握"}
         icon={ListChecks}
         action={<span className="text-[11px] text-text-faint">{progress.concepts.length} 个概念</span>}
       >
@@ -170,10 +175,16 @@ export default function ProgressTab() {
                     <span className="truncate">{concept.chapter}</span>
                     <span aria-hidden>·</span>
                     <span className="shrink-0">{concept.evals} 次评测</span>
+                    {concept.exposure > 0 ? (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span className="shrink-0" title="阅读划线关联到该概念的次数">阅读 {concept.exposure} 次</span>
+                      </>
+                    ) : null}
                     <span aria-hidden>·</span>
                     <span className="shrink-0">下次 {concept.nextReviewAt ?? "待安排"}</span>
                   </div>
-                  {concept.misattribution && concept.misattribution !== "无" ? (
+                  {concept.misattribution && concept.misattribution !== "无" && concept.misattribution !== "none" ? (
                     <p className="mt-1 truncate text-[10px] text-accent-warn" title={concept.misattribution}>
                       需要澄清：{concept.misattribution}
                     </p>

@@ -5,12 +5,13 @@
  *
  * 行高 24px：[16px 图标] 标签（14px secondary）· 2×2 分隔点 · 摘要一行
  * ellipsis（tertiary，流式时取最后一行 = 最新思考）；默认折叠、整行可点；
- * 展开体缩进 22px、14px/24px、pre-wrap、tertiary 色。
+ * 展开体缩进 22px，复用紧凑 Markdown 排版、tertiary 色。
  * 流式运行态带 DSH 同款扫光动画。
  */
 
 import { useState } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
+import MarkdownView from "./MarkdownView";
 
 interface ThinkingFoldProps {
   thinking: string;
@@ -43,9 +44,7 @@ export default function ThinkingFold({ thinking, thinkingMs }: ThinkingFoldProps
         </span>
       </button>
       {open && (
-        <pre className="whitespace-pre-wrap break-words py-1 pl-[22px] font-sans text-sm leading-6 text-text-faint">
-          {thinking}
-        </pre>
+        <div className="py-1 pl-[22px] text-text-faint"><MarkdownView content={thinking} compact modelOutput streaming={running} /></div>
       )}
     </div>
   );

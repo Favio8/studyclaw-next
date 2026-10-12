@@ -6,13 +6,14 @@
  * 顶部图标 Tab 条（Ctrl+1~4 快捷键由 useKeyboardShortcuts 处理）；
  * 新事件角标 `●`（badges，查看即清除）；四 Tab **常驻挂载**、非活动
  * `hidden` 隐藏——切 Tab 不丢评测中/数据状态。
+ * 助手详情由顶部按钮按需打开，关闭时卸载详情并停止其轮询。
  */
 
 import ProgressTab from "@/src/components/panel/ProgressTab";
 import SyllabusTab from "@/src/components/panel/SyllabusTab";
 import HeatmapTab from "@/src/components/panel/HeatmapTab";
 import QuizTab from "@/src/components/panel/QuizTab";
-import AgentRuntimePanel from "@/src/components/panel/AgentRuntimePanel";
+import AssistantDetails from "@/src/components/panel/AssistantDetails";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { PanelTab } from "@/src/store/useAppStore";
 import { BarChart3, Flame, Map, PanelRightClose, Target } from "lucide-react";
@@ -72,6 +73,7 @@ export default function RightPanel() {
           );
         })}
         </div>
+        <AssistantDetails />
         <button
           type="button"
           aria-label="折叠右栏"
@@ -84,8 +86,6 @@ export default function RightPanel() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pr-0.5 [scrollbar-gutter:stable]">
-        <AgentRuntimePanel />
-        <div className="h-2" aria-hidden />
         <div id="panel-progress" role="tabpanel" aria-labelledby="tab-progress" aria-label="进度" className={activeTab === "progress" ? "" : "hidden"}>
           <ProgressTab />
         </div>

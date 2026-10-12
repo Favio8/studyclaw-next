@@ -118,7 +118,7 @@ function LeadingIcon({ tool }: { tool: ToolCallView }) {
   if (tool.status === "degraded") {
     return <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-warn" data-tool-state-dot="degraded" />;
   }
-  const Icon = iconFor(tool.name);
+  const Icon = TOOL_ICONS[tool.name] ?? OctagonAlert;
   return (
     <Icon
       size={14}
@@ -147,7 +147,7 @@ export default function ToolFold({ tools }: ToolFoldProps) {
   const last = tools[tools.length - 1];
   const summary = last?.summary ?? "";
   const label = `工具调用 · ${tools.length} 次`;
-  const HeaderIcon = last ? iconFor(last.name) : OctagonAlert;
+  const HeaderIcon = TOOL_ICONS[last?.name ?? ""] ?? OctagonAlert;
 
   return (
     <div className="flex min-w-0 flex-col" data-tool-fold="">

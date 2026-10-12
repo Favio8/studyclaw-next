@@ -9,18 +9,20 @@ import type { AgentStatusView } from "@/src/types/api";
 /** Compact DSH-style queue surface for turns waiting behind the live Agent. */
 export default function QueueDock() {
   const sessionId = useAppStore((state) => state.activeSessionId);
+  const workspacePath = useAppStore((state) => state.workspacePath);
+  const generation = useAppStore((state) => state.courseGeneration);
+  return sessionId ? <SessionQueue key={`${workspacePath}:${generation}:${sessionId}`} sessionId={sessionId} /> : null;
+}
+
+function SessionQueue({ sessionId }: { sessionId: string }) {
   const flashStatusBanner = useAppStore((state) => state.flashStatusBanner);
   const [status, setStatus] = useState<AgentStatusView | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (!sessionId) { setStatus(null); return; }
-    try { setStatus(await api.agentStatus(`study-${sessionId}`)); }
-    catch { setStatus(null); }
-  }, [sessionId]);
+  const refresh = useCallback(() => api.agentStatus(`study-${sessionId}`)
+    .then(setStatus).catch(() => setStatus(null)), [sessionId]);
 
   useEffect(() => {
     void refresh();
-    if (!sessionId) return;
     const timer = window.setInterval(() => void refresh(), 900);
     return () => window.clearInterval(timer);
   }, [refresh, sessionId]);
@@ -35,6 +37,7 @@ export default function QueueDock() {
       const result = await api.clearQueuedAgent(status!.agentId);
       // 同步清空前端队列记录，避免 drain 时再发送已被取消的 turnId。
       const store = useAppStore.getState();
+      if (store.activeSessionId !== sessionId) return;
       if (store.queuedMessages.length > 0) {
         useAppStore.setState({ queuedMessages: [] });
       }

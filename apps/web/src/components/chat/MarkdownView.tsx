@@ -11,6 +11,8 @@
  * - bubble 模式（用户消息）：纯文本 pre-wrap（DSH 用户气泡为明文）；
  * - sc-interactive 围栏：喂给 react-markdown 之前先按行切段，
  *   viz 段交给 InteractiveViz（围栏是行级构造，切分点永远落在块边界）。
+ * - compact：阅读卡/侧栏的紧凑排版，交互围栏作为普通代码展示；
+ * - modelOutput：仅在展示时修正模型强调边界空格，原文阅读不启用。
  */
 
 import { memo, useMemo } from "react";
@@ -18,6 +20,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import InteractiveViz from "./InteractiveViz";
 import { splitVizSegments } from "@/src/lib/vizSegments";
+import { normalizeModelMarkdown } from "@/src/lib/modelMarkdown";
 
 function codeLanguage(children: React.ReactNode): string {
   const first = Array.isArray(children) ? children[0] : children;
@@ -157,17 +160,25 @@ export default function MarkdownView({
   content,
   bubble,
   streaming,
+  compact,
+  modelOutput,
 }: {
   content: string;
   bubble?: boolean;
   streaming?: boolean;
+  compact?: boolean;
+  modelOutput?: boolean;
 }) {
   // Hook 必须在早退之前调用：bubble 分支提前 return 会让两次渲染的 Hook
   // 数量不一致（Rules of Hooks）。bubble 路径本就渲染纯文本，不需要分段，
   // 所以在 memo 内按 bubble 短路，而不是把调用挪到早退之后。
   const segments = useMemo(
-    () => (bubble ? [] : splitVizSegments(content)),
-    [bubble, content],
+    () => {
+      if (bubble) return [];
+      const text = modelOutput ? normalizeModelMarkdown(content) : content;
+      return compact ? [{ type: "md" as const, key: "compact", code: text }] : splitVizSegments(text);
+    },
+    [bubble, content, compact, modelOutput],
   );
   if (bubble) {
     return (
@@ -179,7 +190,7 @@ export default function MarkdownView({
   return (
     <div
       data-markdown-view=""
-      className="flex flex-col gap-4 text-[16px] leading-7 text-text-primary"
+      className={compact ? "sc-markdown-compact flex min-w-0 flex-col gap-2 break-words text-[13px] leading-6 text-inherit" : "flex flex-col gap-4 text-[16px] leading-7 text-text-primary"}
     >
       {segments.map((seg) =>
         seg.type === "md" ? (

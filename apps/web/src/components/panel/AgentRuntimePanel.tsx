@@ -22,6 +22,12 @@ const phaseLabel: Record<AgentStatusView["phase"], string> = {
 
 export default function AgentRuntimePanel() {
   const sessionId = useAppStore((state) => state.activeSessionId);
+  const workspacePath = useAppStore((state) => state.workspacePath);
+  const generation = useAppStore((state) => state.courseGeneration);
+  return sessionId ? <SessionRuntime key={`${workspacePath}:${generation}:${sessionId}`} sessionId={sessionId} /> : null;
+}
+
+function SessionRuntime({ sessionId }: { sessionId: string }) {
   const [projection, setProjection] = useState<AgentProjectionView>(EMPTY);
   const [status, setStatus] = useState<AgentStatusView | null>(null);
   const [agents, setAgents] = useState<AgentStatusView[]>([]);
@@ -30,26 +36,21 @@ export default function AgentRuntimePanel() {
   // 需要排查再展开（摘要里保留项数与降级数这两个关键数字）。
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    if (!sessionId) { setProjection(EMPTY); setStatus(null); setAgents([]); return; }
+  const refresh = useCallback(() => {
     const agentId = `study-${sessionId}`;
-    try {
-      const [nextProjection, nextStatus, nextAgents] = await Promise.all([api.agentProjection(agentId), api.agentStatus(agentId), api.agents()]);
+    return Promise.all([api.agentProjection(agentId), api.agentStatus(agentId), api.agents()]).then(([nextProjection, nextStatus, nextAgents]) => {
       setProjection(nextProjection); setStatus(nextStatus); setAgents(nextAgents.agents);
-    } catch { /* a session can exist before its Agent is resumed */ }
+    }).catch(() => { /* a session can exist before its Agent is resumed */ });
   }, [sessionId]);
 
   useEffect(() => {
     void refresh();
-    if (!sessionId) return;
     const timer = window.setInterval(() => void refresh(), 1500);
     return () => window.clearInterval(timer);
   }, [refresh, sessionId]);
 
-  if (!sessionId) return null;
   const statusPhase = status?.phase ?? projection.phase;
   const latestTools = projection.tools.slice(-4).reverse();
-  const contextPercent = Math.min(100, Math.round((projection.usage.inputTokens / 128000) * 100));
   const childRows = projection.children.map((child) => ({
     ...child,
     status: agents.find((agent) => agent.agentId === child.agentId) ?? null,
@@ -59,7 +60,7 @@ export default function AgentRuntimePanel() {
   return <section className="shrink-0 rounded-lg border border-border-line bg-bg-panel/70 p-2.5" data-agent-runtime-panel="">
     <div className="mb-2 flex items-center gap-2 text-[12px] text-text-muted">
       <Activity size={14} className={statusPhase === "running" ? "text-accent-focus" : "text-text-faint"} aria-hidden />
-      <span className="font-medium text-text-primary">Agent</span>
+      <span className="font-medium text-text-primary">对话助手</span>
       <span className="ml-auto rounded-md bg-bg-card px-1.5 py-0.5 text-[11px]">{phaseLabel[statusPhase]}</span>
       {status?.queued ? <span className="text-text-faint">队列 {status.queued}</span> : null}
     </div>
@@ -74,8 +75,7 @@ export default function AgentRuntimePanel() {
     </div>
     {capabilities.length > 0 ? <div className="mt-2 border-t border-border-faint pt-2" data-agent-capabilities=""><button type="button" aria-expanded={capabilitiesOpen} onClick={() => setCapabilitiesOpen((value) => !value)} className="flex w-full items-center gap-1 text-left text-[11px] font-medium text-text-muted transition-colors hover:text-text-primary"><ChevronDown size={12} className={capabilitiesOpen ? "rotate-180" : ""} aria-hidden /><span>运行能力</span><span className="ml-auto font-normal text-text-faint">{capabilities.length} 项{degradedCount > 0 ? ` · ${degradedCount} 降级` : ""}</span></button>{capabilitiesOpen ? <div className="mt-1 space-y-1">{capabilities.map((capability) => <div key={capability.id} className="flex min-w-0 items-center gap-1.5 text-[11px]" title={capability.available ? capability.id : `${capability.reason ?? "不可用"}${capability.installAction ? ` · ${capability.installAction}` : ""}`}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${capability.available ? "bg-accent-pass" : "bg-accent-warn"}`} aria-hidden /><span className="truncate text-text-faint">{capability.id}</span><span className={`ml-auto shrink-0 ${capability.available ? "text-accent-pass" : "text-accent-warn"}`}>{capability.available ? "可用" : "降级"}</span></div>)}</div> : null}</div> : null}
     <div className="mt-2 border-t border-border-faint pt-2" data-context-meter="">
-      <div className="mb-1 flex items-center justify-between text-[11px] text-text-faint"><span>上下文</span><span title={`${projection.usage.inputTokens} / 128000 tokens`}>{contextPercent}%</span></div>
-      <div role="progressbar" aria-label="上下文用量" aria-valuemin={0} aria-valuemax={100} aria-valuenow={contextPercent} className="h-1 overflow-hidden rounded-full bg-bg-card"><div className="h-full rounded-full bg-accent-focus transition-[width]" style={{ width: `${contextPercent}%` }} /></div>
+      <div className="flex items-center justify-between text-[11px] text-text-faint"><span>累计输入 / 输出 Token</span><span>{projection.usage.inputTokens} / {projection.usage.outputTokens}</span></div>
     </div>
     <PlanPanel steps={projection.plan.steps} />
     <TodoPanel items={projection.todos} />

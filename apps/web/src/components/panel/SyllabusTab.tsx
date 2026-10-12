@@ -1,5 +1,8 @@
 "use client";
 
+import { Fragment } from "react";
+import ConceptEvidence from "@/src/components/panel/ConceptEvidence";
+import ConceptEditor from "@/src/components/panel/ConceptEditor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
@@ -19,7 +22,6 @@ import {
   PanelSection,
   PanelSkeleton,
   SegmentedControl,
-  StatusPill,
   panelSurfaceClass,
 } from "@/src/components/panel/PanelPrimitives";
 
@@ -79,9 +81,31 @@ function Highlight({ text, query }: { text: string; query: string }) {
   );
 }
 
+/**
+ * M5：概念级证据汇总——题卡数 / 标注数 / 下次复习。
+ *
+ * 数据来自 `courses.digest` 的**一次**聚合（前端不再按概念逐个请求）。
+ * 只在有值时显示：0 不占位，否则每个概念都挂着三个「0」，噪声大于信息。
+ */
+function ConceptRollup({ id }: { id: string }) {
+  const concept = useAppStore((s) => s.digest?.concepts.find(item => item.id === id));
+  if (concept === undefined) return null;
+  const parts: string[] = [];
+  if (concept.taskCount > 0) parts.push(`${concept.taskCount} 题`);
+  if (concept.annotationCount > 0) parts.push(`${concept.annotationCount} 标注`);
+  if (concept.nextReviewAt !== null) parts.push(`复习 ${concept.nextReviewAt.slice(5)}`);
+  if (parts.length === 0) return null;
+  return (
+    <span className="hidden shrink-0 text-[9px] text-text-caption lg:inline" title={parts.join(" · ")}>
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
 export default function SyllabusTab() {
   const courseId = useAppStore((s) => s.activeCourseId);
-  const buildStatus = useAppStore((s) => s.buildStatus);
+  const generation = useAppStore((s) => s.courseGeneration);
+  const workspacePath = useAppStore((s) => s.workspacePath);
   if (!courseId) {
     return (
       <PanelEmptyState
@@ -91,10 +115,10 @@ export default function SyllabusTab() {
       />
     );
   }
-  // PERF-5：key 只含 courseId——组件随课程切换重挂；buildStatus 变化不再
+  // The key identifies a project activation; buildStatus changes do not
   // 整树卸载重建（图/导图的 ResizeObserver、布局计算全部作废重来），
   // loader 内部已订阅 buildStatus 并在变化时静默 revalidate（保 UI，不闪）。
-  return <SyllabusLoader key={courseId} courseId={courseId} />;
+  return <SyllabusLoader key={`${workspacePath}:${generation}:${courseId}`} courseId={courseId} />;
 }
 
 function SyllabusLoader({ courseId }: { courseId: string }) {
@@ -121,11 +145,9 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
   // PERF-3：重图组件"首激活渲染、之后保活"，首屏不再承担布局初始化成本。
   const [graphEverShown, setGraphEverShown] = useState(false);
   const [mindmapEverShown, setMindmapEverShown] = useState(false);
-
-  useEffect(() => {
-    if (syllabusView === "graph") setGraphEverShown(true);
-    if (syllabusView === "mindmap") setMindmapEverShown(true);
-  }, [syllabusView]);
+  // Record first activation before committing the render; keep both views mounted afterwards.
+  if (syllabusView === "graph" && !graphEverShown) setGraphEverShown(true);
+  if (syllabusView === "mindmap" && !mindmapEverShown) setMindmapEverShown(true);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -266,12 +288,13 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
 
   return (
     <div className="space-y-4 pb-2">
+      <ConceptEditor onApplied={() => { void api.syllabus(courseId).then(setSyllabus); }} />
       <PanelSection
         title="课程大纲"
         icon={BookOpen}
         action={
           syllabus ? (
-            <StatusPill tone="neutral">v{syllabus.version}</StatusPill>
+            <span title={`内部版本：${syllabus.version}`} className="text-[11px] text-text-faint">{syllabus.chapters.length} 个主题 · {syllabus.chapters.reduce((count, chapter) => count + chapter.concepts.length, 0)} 个概念</span>
           ) : null
         }
       >
@@ -288,7 +311,7 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
             onChange={setSyllabusView}
           />
         </div>
-        {syllabus ? (
+        {syllabus && syllabus.concept_origin !== "semantic" ? (
           <div className="mt-1.5 flex items-center justify-between gap-2">
             <span className="text-[11px] text-text-faint">
               大纲粒度（粗=大章节 3~5 / 细=微概念 15~30）
@@ -445,8 +468,7 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
                                     const isFocused = focusConceptId === concept.id;
                                     const locked = st?.status === "locked";
                                     return (
-                                      <button
-                                        key={concept.id}
+                                      <Fragment key={concept.id}><button
                                         id={`concept-${concept.id}`}
                                         data-concept-row
                                         type="button"
@@ -466,12 +488,13 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
                                           <Highlight text={concept.name} query={syllabusSearch} />
                                           <span className="ml-1.5 shrink-0 text-[9px] uppercase text-text-caption">{CONCEPT_TYPE_LABEL[concept.type]}</span>
                                         </span>
-                                        {locked ? (
+                                                                                {locked ? (
                                           <span className="shrink-0 text-[9px] text-text-faint">{concept.prerequisites.length > 0 ? `解锁需 ${concept.prerequisites.length} 个先修` : "先修缺失"}</span>
                                         ) : st ? (
                                           <span className="shrink-0 text-[10px] text-text-faint">{pct(st.mastery)}</span>
                                         ) : null}
-                                      </button>
+                                        <ConceptRollup id={concept.id} />
+                                      </button><ConceptEvidence concept={concept} /></Fragment>
                                     );
                                   })
                               )}

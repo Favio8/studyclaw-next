@@ -15,6 +15,7 @@
 
 import { useEffect, useState } from "react";
 import { useAppStore, type ChatMessage } from "@/src/store/useAppStore";
+import { useDeadlineActive } from "@/src/hooks/useDeadlineActive";
 import type { MascotState } from "./types";
 
 /** celebrate 脉冲有效窗（≈一轮四段 hop 时长）。 */
@@ -100,12 +101,14 @@ export function useMascotState(): MascotState {
   const buildRunning = useAppStore((s) => s.buildStatus === "running");
   const syncing = useAppStore((s) => s.syncState === "syncing");
   const asking = useAppStore((s) => s.pendingAsk != null);
+  const pulseWindow = pulse?.kind === "encourage" ? ENCOURAGE_WINDOW_MS : PULSE_WINDOW_MS;
+  const activePulse = useDeadlineActive(pulse === null ? null : pulse.at + pulseWindow);
 
   // SSR/首帧输入全为空值 → 恒为 idle，水合安全（§6-5）
   const target = deriveMascotState(
     {
       hasError,
-      pulse,
+      pulse: activePulse ? pulse : null,
       quizPhase,
       streamPhase,
       streaming,
@@ -116,36 +119,25 @@ export function useMascotState(): MascotState {
       syncing,
       asking,
     },
-    Date.now(),
+    pulse?.at ?? 0,
   );
 
-  const [stable, setStable] = useState<MascotState>("idle");
-  // 脉冲过期无 store 变更时也要触发重算（bump 计数器强制重渲染）
-  const [, bumpTick] = useState(0);
-
-  // 仲裁直达：非迟滞对立即切换；thinking↔writing 需在新状态停留 300ms
-  useEffect(() => {
-    if (target === stable) return;
+  const [transition, setTransition] = useState({ target, stable: target });
+  // Non-stream transitions are derived before commit, without a cascading effect.
+  if (target !== transition.target) {
     const isStreamPair =
-      (stable === "thinking" && target === "writing") ||
-      (stable === "writing" && target === "thinking");
-    if (!isStreamPair) {
-      setStable(target);
-      return;
-    }
-    const timer = setTimeout(() => setStable(target), STREAM_HYSTERESIS_MS);
-    return () => clearTimeout(timer);
-  }, [target, stable]);
+      (transition.stable === "thinking" && target === "writing") ||
+      (transition.stable === "writing" && target === "thinking");
+    setTransition({ target, stable: isStreamPair ? transition.stable : target });
+  }
 
-  // 脉冲时间窗到点强制重算（过期无 store 变更时也能回落）
+  // thinking↔writing retains the 300ms hysteresis; obsolete targets are discarded.
   useEffect(() => {
-    if (pulse === null) return;
-    const window = pulse.kind === "celebrate" ? PULSE_WINDOW_MS : ENCOURAGE_WINDOW_MS;
-    const remain = pulse.at + window - Date.now();
-    if (remain <= 0) return;
-    const timer = setTimeout(() => bumpTick((n) => n + 1), remain + 5);
+    if (transition.target === transition.stable) return;
+    const timer = setTimeout(() => setTransition((current) =>
+      current.target === transition.target ? { ...current, stable: current.target } : current), STREAM_HYSTERESIS_MS);
     return () => clearTimeout(timer);
-  }, [pulse]);
+  }, [transition]);
 
-  return stable;
+  return transition.stable;
 }

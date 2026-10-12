@@ -8,6 +8,7 @@ import { api } from "@/src/lib/api";
 import { COMMANDS } from "@/src/lib/commands";
 import { useAppStore } from "@/src/store/useAppStore";
 import ModelSeat from "@/src/components/chat/ModelSeat";
+import MarkdownView from "@/src/components/chat/MarkdownView";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -34,7 +35,7 @@ function activeToken(value: string): { trigger: Trigger; query: string; start: n
 export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }: ChatInputProps) {
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [files, setFiles] = useState<FileCandidate[]>([]);
-  const [highlight, setHighlight] = useState(0);
+  const [highlighted, setHighlighted] = useState({ token: "", index: 0 });
   const [answering, setAnswering] = useState(false);
   const pendingAsk = useAppStore((s) => s.pendingAsk);
   const setPaletteOpen = useAppStore((s) => s.setPaletteOpen);
@@ -44,11 +45,15 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
   const draftKey = `${workspacePath ?? ""}\0${activeCourseId ?? ""}\0${activeSessionId ?? "new"}`;
   const value = useAppStore((s) => s.composerDrafts[draftKey] ?? "");
   const setComposerDraft = useAppStore((s) => s.setComposerDraft);
+  const reference = useAppStore((s) => s.composerReferences[draftKey]);
+  const setComposerReference = useAppStore((s) => s.setComposerReference);
   // 爪爪 listening 态输入源：输入框聚焦/失焦写全局，供 useMascotState 派生
   const setChatFocus = useAppStore((s) => s.setChatFocus);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const token = activeToken(value);
+  const tokenKey = `${draftKey}\0${token?.trigger ?? ""}\0${token?.query ?? ""}`;
+  const highlight = highlighted.token === tokenKey ? highlighted.index : 0;
   const menuOpen = Boolean(token && !streaming);
 
   useEffect(() => {
@@ -94,16 +99,25 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
     if (pendingAsk && onAnswer) {
       setAnswering(true);
       try {
-        if (await onAnswer(text)) setComposerDraft(draftKey, "");
+        if (await onAnswer(withReference(text))) {
+          setComposerDraft(draftKey, "");
+          setComposerReference(draftKey, null);
+        }
       } finally {
         setAnswering(false);
         inputRef.current?.focus();
       }
       return;
     }
-    onSend(text);
+    onSend(withReference(text));
     setComposerDraft(draftKey, "");
+    setComposerReference(draftKey, null);
     inputRef.current?.focus();
+  }
+
+  function withReference(text: string): string {
+    if (!reference) return text;
+    return `${text}\n\n引用资料：${reference.source} · 第 ${reference.page} 页\n原文：\n${reference.quote}${reference.result ? `\n\n${reference.kind === "translate" ? "译文" : "解释"}：\n${reference.result}` : ""}`;
   }
 
   const activeHighlight = Math.min(highlight, Math.max(0, candidates.length - 1));
@@ -141,9 +155,9 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
     };
   }, [attachmentMenuOpen]);
 
-  useEffect(() => {
-    setHighlight(0);
-  }, [token?.trigger, token?.query]);
+  function setHighlight(update: (index: number) => number) {
+    setHighlighted((current) => ({ token: tokenKey, index: update(current.token === tokenKey ? current.index : 0) }));
+  }
 
   function appendAttachment(file: FileCandidate): void {
     const marker = `@${file.relative}`;
@@ -172,6 +186,15 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
   return (
     <div className="flex w-full justify-center px-4 pb-2">
       <div data-composer-card onDragOver={(event) => event.preventDefault()} onDrop={dropAttachments} className="relative flex w-full max-w-[780px] flex-col gap-3 rounded-[22px] border border-border-line bg-bg-panel pt-2.5 shadow-lv2">
+        {reference ? <div data-testid="composer-reference" className="mx-3 flex items-start gap-2 rounded-xl border border-border-line bg-bg-card/50 px-3 py-2 text-xs">
+          <FileText size={14} className="mt-0.5 shrink-0 text-accent-focus" aria-hidden />
+          <details className="min-w-0 flex-1">
+            <summary className="cursor-pointer truncate text-accent-focus">引用 · {reference.source.split(/[\\/]/).pop()} · 第 {reference.page} 页</summary>
+            <blockquote className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap leading-5 text-text-muted">{reference.quote}</blockquote>
+            {reference.result ? <div className="mt-2 max-h-40 overflow-auto text-text-faint"><p className="mb-1">{reference.kind === "translate" ? "译文" : "解释"}：</p><MarkdownView content={reference.result} compact modelOutput /></div> : null}
+          </details>
+          <button type="button" aria-label="移除引用" onClick={() => setComposerReference(draftKey, null)} className="shrink-0 rounded p-1 text-text-faint hover:bg-bg-card"><X size={13} /></button>
+        </div> : null}
         {menuOpen && candidates.length > 0 ? (
           <div role="listbox" aria-label={token?.trigger === "/" ? "快捷命令" : "课程文件"} className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-30 max-h-80 overflow-y-auto rounded-xl border border-border-line bg-bg-panel p-1.5 shadow-lv3">
             {candidates.map((candidate, index) => (

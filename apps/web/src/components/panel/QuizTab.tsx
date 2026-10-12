@@ -2,13 +2,15 @@
 
 import { useEffect } from "react";
 import type { CSSProperties } from "react";
-import { AlertCircle, Check, CircleHelp, ListChecks, RefreshCw, Send, Sparkles, Target, X } from "lucide-react";
+import { useState } from "react";
+import { AlertCircle, BookMarked, Check, CircleHelp, ListChecks, RefreshCw, Send, Sparkles, Target, X } from "lucide-react";
 import { pct } from "@/src/lib/format";
 import { MODES, MODE_DESCRIPTIONS, modeLabel } from "@/src/lib/modes";
 import { quizAnswer, quizLoad, quizNext, quizReset, quizRetry } from "@/src/lib/quizFlow";
 import { useAppStore } from "@/src/store/useAppStore";
 import { useSessionActions } from "@/src/hooks/useSessionActions";
 import { Clawzy } from "@/src/components/mascot";
+import MarkdownView from "@/src/components/chat/MarkdownView";
 import {
   PanelEmptyState,
   PanelErrorState,
@@ -19,6 +21,49 @@ import {
   panelSurfaceClass,
 } from "@/src/components/panel/PanelPrimitives";
 import type { LearningMode } from "@/src/types";
+import type { ReviewHintView } from "@/src/types/api";
+
+/**
+ * M2：复习时的「回顾原文」——把该概念的划线交给用户回忆。
+ *
+ * 默认折叠，避免在作答前把答案性线索摊在眼前；作答后自动展开供核对。
+ * 它是**阅读进学习闭环**的那一环，所以呈现上强调出处（哪份资料第几页），
+ * 让用户能把划线和题面对回去，而不是把它当成答案抄。
+ */
+function ReviewHints({ hints, revealed }: { hints?: ReviewHintView[]; revealed: boolean }) {
+  const [opened, setOpened] = useState(false);
+
+  if (hints === undefined || hints.length === 0) return null;
+  // 作答后强制展开（revealed），作答前允许用户自己翻。派生而非同步状态——
+  // 避免 effect 里 setState 的级联渲染。
+  const expanded = revealed || opened;
+
+  return (
+    <div className="mt-2.5 rounded-md border border-border-line/70 bg-bg-card/40">
+      <button
+        type="button"
+        onClick={() => setOpened((value) => !value)}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-text-muted transition-colors hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+      >
+        <BookMarked size={12} strokeWidth={1.8} className="shrink-0 text-text-faint" aria-hidden />
+        <span className="flex-1 text-left">{expanded ? "收起原文" : `回顾原文（${hints.length}）`}</span>
+      </button>
+      {expanded ? (
+        <ul className="space-y-1.5 border-t border-border-line/60 px-2.5 py-2">
+          {hints.map((hint) => (
+            <li key={`${hint.source}-${hint.page}-${hint.text.slice(0, 24)}`} className="text-[11px] leading-5 text-text-muted">
+              {hint.prefix !== "" ? <span className="text-text-faint">{hint.prefix} </span> : null}
+              <span className="text-text-secondary">{hint.text}</span>
+              {hint.suffix !== "" ? <span className="text-text-faint"> {hint.suffix}</span> : null}
+              <span className="ml-1 text-text-faint">—— {hint.source} p.{hint.page}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
 
 /** L1：连续评测未过后的换风格建议卡（可忽略；不自动跳转）。 */
 function StyleSuggestionCard({ conceptId, consecutiveFailures }: { conceptId: string; consecutiveFailures: number }) {
@@ -163,7 +208,9 @@ export default function QuizTab() {
         </div>
 
         <div className="p-3">
-          <p className="text-[14px] leading-6 text-text-primary">{task.question}</p>
+          <div className="text-text-primary"><MarkdownView content={task.question} compact modelOutput /></div>
+
+          <ReviewHints hints={task.hints} revealed={answered} />
 
           {isChoice ? (
             <div className="mt-3 space-y-2">
@@ -265,7 +312,7 @@ export default function QuizTab() {
                   {task.answerRationale ? `（${task.answerRationale}）` : ""}
                 </p>
               ) : null}
-              {quiz.result.feedback ? <p className="mt-2 text-[11px] leading-5 text-text-muted">导师建议：{quiz.result.feedback}</p> : null}
+              {quiz.result.feedback ? <div className="mt-2 text-text-muted"><p className="mb-1 text-[11px]">导师建议：</p><MarkdownView content={quiz.result.feedback} compact modelOutput /></div> : null}
               {quiz.sm2?.masteryDelta && quiz.sm2.masteryDelta > 0 ? <p className="mt-1 text-[10px] text-accent-pass">掌握度提升 {pct(quiz.sm2.masteryDelta)}</p> : null}
               {quiz.sm2 ? <p className="mt-1 text-[10px] text-text-faint">下次复习：{quiz.sm2.nextReviewAt}</p> : null}
               <button

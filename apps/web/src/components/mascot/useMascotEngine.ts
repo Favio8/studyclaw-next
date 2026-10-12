@@ -14,7 +14,7 @@
  * 6. 帧行为全部从评审定稿原型（claw_animated_optionB.html）逐条搬运。
  */
 
-import { useEffect, useMemo, useRef, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import { EYE, PIVOT } from "./geometry";
 import {
   addTick,
@@ -145,15 +145,22 @@ export function useMascotEngine(
   state: MascotState,
   tier: MascotTier,
 ): void {
-  // 运行时只在首挂创建（含 performance.now 初值，SSR 不会执行到这里）
+  // Initialize random/timed animation state only after the SVG has committed.
   const runtimeRef = useRef<EngineRuntime | null>(null);
-  if (runtimeRef.current === null) {
+  const stateRef = useRef(state);
+  const tierRef = useRef(tier);
+  useEffect(() => {
+    stateRef.current = state;
+    tierRef.current = tier;
+  }, [state, tier]);
+
+  useEffect(() => {
     const now = performance.now();
     runtimeRef.current = {
       springs: mkSprings(),
       t0: now,
       stateAt: now,
-      seenState: state,
+      seenState: stateRef.current,
       sleeping: false,
       wakingUntil: 0,
       wakeStart: 0,
@@ -169,13 +176,8 @@ export function useMascotEngine(
       earTR: 0,
       hopAt: -1,
     };
-  }
+  }, []);
 
-  // 最新 props 经 ref 进入帧循环（不触发重渲染）
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const tierRef = useRef(tier);
-  tierRef.current = tier;
   const reduceRef = useRef(false);
   const flagsRef = useRef({ pageVisible: true, inView: true });
 
@@ -183,8 +185,8 @@ export function useMascotEngine(
    * 帧回调：pose 目标 → 弹簧积分 → setAttribute。
    * 结构与原型 frame() 逐条对应；icon 档裁剪点见各注释。
    */
-  const frame = useMemo(() => {
-    return (now: number, dt: number): void => {
+  useEffect(() => {
+    const frame = (now: number, dt: number): void => {
       const R = runtimeRef.current;
       if (R === null) return;
       const S = R.springs;
@@ -336,12 +338,8 @@ export function useMascotEngine(
       // 渲染的受控值一致，仅睡眠/唤醒覆盖）
       refs.svg.current?.setAttribute("data-mascot-state", poseState);
     };
-    // refs 内的 RefObject 本体跨渲染稳定，帧回调只建一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 订阅管理：两条件取反即退订（离屏/标签页隐藏；idle→sleeping 态保持订阅展示睡姿）
-  useEffect(() => {
+    // The frame callback is owned by this subscription, with a stable rig.
+    // 离屏/标签页隐藏时退订；idle→sleeping 仍保持订阅展示睡姿。
     const sync = (): void => {
       const flags = flagsRef.current;
       const shouldRun = flags.pageVisible && flags.inView;
@@ -388,7 +386,7 @@ export function useMascotEngine(
       observer?.disconnect();
       removeTick(frame);
     };
-  }, [frame, refs]);
+  }, [refs]);
 
   // 状态切换 = 实例恢复活动：睡眠中则唤醒（惊醒 + 强制双眨）
   useEffect(() => {

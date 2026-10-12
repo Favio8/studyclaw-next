@@ -18,20 +18,23 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import MindElixir from "mind-elixir";
 import type { MindElixirData, NodeObj } from "mind-elixir";
 import "mind-elixir/style.css";
-import { Download, Focus, FoldVertical, UnfoldVertical, ZoomIn, ZoomOut } from "lucide-react";
+import { Download, Focus, FoldVertical, Maximize, Minimize, UnfoldVertical, ZoomIn, ZoomOut } from "lucide-react";
 import { toPng } from "html-to-image";
 import type { Syllabus } from "@/src/types";
 import type { ConceptStatus } from "@/src/components/panel/SyllabusGraph";
 import { buildPrereqNames, projectToMindmap, type MindmapConceptMeta, type MindmapNode } from "@/src/lib/syllabusMindmapData";
 import { CHAPTER_COLORS } from "@/src/components/panel/SyllabusGraph";
+import { useFocusTrap } from "@/src/hooks/useFocusTrap";
+import { useAppStore } from "@/src/store/useAppStore";
 
 export { buildPrereqNames, projectToMindmap, type MindmapConceptMeta };
 
 /** 缩放下限/上限（与 mind-elixir options 一致；scaleFit 可能无下限缩小）。 */
-const SCALE_MIN = 0.5;
+const SCALE_MIN = 0.05;
 const SCALE_MAX = 1.8;
 /** 收起分支重新展开后的定位重试次数上限。 */
 const FOCUS_RETRY = 3;
@@ -69,6 +72,14 @@ interface SyllabusMindmapProps {
   onFocusConcept: (conceptId: string, name: string) => void;
 }
 
+function MindmapDialog({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap({ containerRef: dialogRef, onEscape: onClose });
+  return createPortal(<div className="fixed inset-0 z-50 bg-black/20 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="思维导图大图" className="h-full w-full rounded-xl bg-bg-panel shadow-lv3">{children}</div>
+  </div>, document.body);
+}
+
 /** 找到 target 的祖先链（含自身）；返回 [root, …, target]。 */
 function ancestry(root: MindmapNode | undefined, targetId: string): MindmapNode[] | null {
   if (root === undefined) return null;
@@ -94,6 +105,7 @@ export default function SyllabusMindmap({
   const [ready, setReady] = useState(false);
   const [fitMode, setFitMode] = useState<"fit" | "1:1">("fit");
   const [exporting, setExporting] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   const mindRef = useRef<MindElixir | null>(null);
   const dataRef = useRef<MindElixirData | null>(null);
@@ -124,15 +136,11 @@ export default function SyllabusMindmap({
     dataRef.current = data;
   });
 
-  /** 适配视图：scaleFit 后钳制最小缩放值（不把整图缩到不可读）。 */
+  /** Full-map overview uses the actual content bounds, without a 50% floor. */
   const fitToCanvas = useCallback(() => {
     const mind = mindRef.current;
     if (mind === null) return;
     mind.scaleFit();
-    if (mind.scaleVal < SCALE_MIN) {
-      mind.scale(SCALE_MIN);
-      mind.toCenter();
-    }
   }, []);
 
   // 容器可见（尺寸 > 0）后才视为 ready；RightPanel 常驻 hidden 时尺寸为 0。
@@ -155,7 +163,7 @@ export default function SyllabusMindmap({
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [fitToCanvas, ready]);
+  }, [fitToCanvas, ready, fullscreen]);
 
   const selectAndScroll = useCallback((conceptId: string) => {
     const mind = mindRef.current;
@@ -246,7 +254,7 @@ export default function SyllabusMindmap({
       mindRef.current = null;
       appliedDataRef.current = null;
     };
-  }, [fitToCanvas, ready, selectAndScroll]);
+  }, [fitToCanvas, ready, selectAndScroll, fullscreen]);
 
   // 数据变化 → refresh()（保留实例；折叠态由投影数据恢复，避免破坏级重建）。
   useEffect(() => {
@@ -311,35 +319,46 @@ export default function SyllabusMindmap({
   );
 
   const exportImage = useCallback(async () => {
-    const el = containerRef.current;
-    if (el === null || exporting) return;
-    const canvas = el.querySelector<HTMLElement>(".map-canvas") ?? el;
+    if (exporting) return;
+    const el = document.createElement("div");
+    el.className = "studyclaw-mindmap sc-mm-export";
+    Object.assign(el.style, { position: "fixed", left: "-100000px", top: "0", width: "2000px", height: "2000px" });
+    document.body.append(el);
+    let exportedMind: MindElixir | undefined;
     setExporting(true);
     try {
-      const dataUrl = await toPng(canvas, { backgroundColor: "#ffffff" });
+      await document.fonts.ready;
+      exportedMind = new MindElixir({ el, editable: false, contextMenu: false, toolBar: false, keypress: false, allowUndo: false, compact: true, theme: MINIMAP_THEME });
+      const initError = exportedMind.init(projectToMindmap(syllabus, statusMap, prereqNames, { direction: MindElixir.SIDE }) as MindElixirData);
+      if (initError !== undefined) throw new Error(String(initError));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const nodes = exportedMind.nodes;
+      const dataUrl = await toPng(nodes, { backgroundColor: "#ffffff", pixelRatio: 2, width: Math.ceil(nodes.offsetWidth), height: Math.ceil(nodes.offsetHeight), style: { transform: "none" } });
       const link = document.createElement("a");
       link.href = dataUrl;
       link.download = `${(syllabus.title || "syllabus").replace(/[^\w\u4e00-\u9fa5-]+/g, "-")}-mindmap.png`;
       link.click();
     } catch (exc) {
-      console.error("导出思维导图失败：", exc);
+      useAppStore.getState().flashStatusBanner(`导出失败：${exc instanceof Error ? exc.message : String(exc)}`);
     } finally {
+      exportedMind?.destroy();
+      el.remove();
       setExporting(false);
     }
-  }, [exporting, syllabus.title]);
+  }, [exporting, syllabus, statusMap, prereqNames]);
 
-  return (
-    <div className="relative h-[clamp(320px,62vh,640px)] w-full overflow-hidden rounded-lg border border-border-line bg-bg-root/60">
-      <div ref={containerRef} className="studyclaw-mindmap h-full w-full" data-testid="syllabus-mindmap" />
+  const view = (
+    <div className={`relative flex ${fullscreen ? "h-full" : "h-[clamp(320px,62vh,640px)]"} w-full flex-col overflow-hidden rounded-lg border border-border-line bg-bg-root/60`}>
+      <div ref={containerRef} className="studyclaw-mindmap min-h-0 flex-1 w-full" data-testid="syllabus-mindmap" />
       {error ? (
         <p className="absolute inset-0 flex items-center justify-center text-[11px] text-accent-fail">思维导图初始化失败：{error}</p>
       ) : null}
       {ready && error === null ? (
-        <div className="sc-mm-toolbar absolute right-1.5 top-1.5 flex max-w-[calc(100%-12px)] gap-1 rounded-lg border border-border-line bg-bg-panel/95 p-1 shadow-[0_1px_2px_rgba(15,17,21,0.05)]">
+        <div className="sc-mm-toolbar order-first flex shrink-0 flex-wrap gap-1 border-b border-border-line bg-bg-panel/95 p-1">
           <button
             type="button"
-            title="适配视图"
-            aria-label="适配视图"
+            title="适配全图"
+            aria-label="适配全图"
             aria-pressed={fitMode === "fit"}
             onClick={() => applyFitMode("fit")}
             className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus ${
@@ -347,6 +366,9 @@ export default function SyllabusMindmap({
             }`}
           >
             <Focus size={13} strokeWidth={1.8} aria-hidden />
+          </button>
+          <button type="button" title={fullscreen ? "退出大图查看（Esc）" : "大图查看"} aria-label={fullscreen ? "退出大图查看" : "大图查看"} onClick={() => setFullscreen(!fullscreen)} className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-bg-card">
+            {fullscreen ? <Minimize size={13} strokeWidth={1.8} /> : <Maximize size={13} strokeWidth={1.8} />}
           </button>
           <button
             type="button"
@@ -412,4 +434,5 @@ export default function SyllabusMindmap({
       ) : null}
     </div>
   );
+  return fullscreen ? <MindmapDialog onClose={() => setFullscreen(false)}>{view}</MindmapDialog> : view;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { CircleHelp } from "lucide-react";
+import MarkdownView from "./MarkdownView";
 
 /**
  * 提问块 AskFold（v1.12，M-C 显式提问，ui_design_spec §2.3.1 / §4.6）。
@@ -26,9 +27,7 @@ export default function AskFold({ question }: AskFoldProps) {
         </span>
         <span className="shrink-0 text-sm text-text-muted">导师提问 · 等待回答</span>
       </div>
-      <p className="whitespace-pre-wrap pl-[22px] text-sm leading-5 text-text-primary">
-        {question}
-      </p>
+      <div className="pl-[22px] text-text-primary"><MarkdownView content={question} compact modelOutput /></div>
     </div>
   );
 }

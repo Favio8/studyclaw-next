@@ -11,18 +11,21 @@ interface ApprovalPanelProps {
 }
 
 export default function ApprovalPanel({ agentId }: ApprovalPanelProps) {
+  return agentId ? <ApprovalRequests key={agentId} agentId={agentId} /> : null;
+}
+
+function ApprovalRequests({ agentId }: { agentId: string }) {
   const [items, setItems] = useState<ApprovalRequestView[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (!agentId) { setItems([]); return; }
-    try { setItems((await api.approvals(agentId)).items); setError(null); } catch { setError("审批状态暂时无法加载"); }
-  }, [agentId]);
+  const refresh = useCallback(() => api.approvals(agentId).then((result) => {
+    setItems(result.items);
+    setError(null);
+  }).catch(() => setError("审批状态暂时无法加载")), [agentId]);
 
   useEffect(() => {
     void refresh();
-    if (!agentId) return;
     const timer = window.setInterval(() => void refresh(), 1000);
     return () => window.clearInterval(timer);
   }, [agentId, refresh]);

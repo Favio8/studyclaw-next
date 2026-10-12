@@ -16,6 +16,7 @@ import { isAbortError } from "@/src/lib/chatStream";
 import { Clawzy } from "@/src/components/mascot";
 import { useAppStore } from "@/src/store/useAppStore";
 import type { WakeupCard as WakeupCardType } from "@/src/types/api";
+import MarkdownView from "./MarkdownView";
 
 export default function WakeupCard({ card }: { card: WakeupCardType }) {
   const activeCourseId = useAppStore((s) => s.activeCourseId);
@@ -82,7 +83,7 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
           跳过
         </button>
       </div>
-      <p className="mt-1.5 text-[14px] leading-6 text-text-primary">{card.question}</p>
+      <div className="mt-1.5 text-text-primary"><MarkdownView content={card.question} compact modelOutput /></div>
       <div className="mt-2 flex items-center gap-2">
         <input
           aria-label="唤醒快问答作"
@@ -104,12 +105,12 @@ export default function WakeupCard({ card }: { card: WakeupCardType }) {
         </button>
       </div>
       {feedback ? (
-        <p
+        <div
           role="status"
           className={`mt-2 text-[13px] leading-5 ${feedback.passed ? "text-accent-pass" : "text-accent-fail"}`}
         >
-          {feedback.text}
-        </p>
+          <MarkdownView content={feedback.text} compact modelOutput />
+        </div>
       ) : null}
       {error ? (
         <p role="alert" className="mt-2 text-[13px] leading-5 text-accent-fail">

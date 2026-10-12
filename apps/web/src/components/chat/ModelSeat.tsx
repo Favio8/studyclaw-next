@@ -27,10 +27,20 @@ function modelFor(directory: SessionModelDirectory, provider: string, model: str
 }
 
 export default function ModelSeat() {
+  const courseId = useAppStore((s) => s.activeCourseId);
+  const sessionId = useAppStore((s) => s.activeSessionId);
+  const workspacePath = useAppStore((s) => s.workspacePath);
+  const generation = useAppStore((s) => s.courseGeneration);
+  return <SessionModelSeat key={`${workspacePath}:${generation}:${courseId}:${sessionId}`} />;
+}
+
+function SessionModelSeat() {
+  const generation = useAppStore((s) => s.courseGeneration);
   const activeModel = useAppStore((s) => s.activeModel);
   const setActiveModel = useAppStore((s) => s.setActiveModel);
   const activeCourseId = useAppStore((s) => s.activeCourseId);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const workspacePath = useAppStore((s) => s.workspacePath);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [open, setOpen] = useState(false);
@@ -40,22 +50,48 @@ export default function ModelSeat() {
   const [selecting, setSelecting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const loadSeq = useRef(0);
+
+  const scopeIsCurrent = useCallback(() => {
+    const current = useAppStore.getState();
+    return current.workspacePath === workspacePath && current.activeCourseId === activeCourseId
+      && current.activeSessionId === activeSessionId && current.courseGeneration === generation;
+  }, [workspacePath, activeCourseId, activeSessionId, generation]);
 
   const loadDirectory = useCallback(async () => {
+    const request = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const next = activeCourseId && activeSessionId ? await api.sessionModels(activeCourseId, activeSessionId) : directoryFromSettings(await api.settings());
+      if (!scopeIsCurrent() || request !== loadSeq.current) return;
       setDirectory(next);
       setActiveModel(next.current ? { providerId: next.current.provider, model: next.current.model, ...(next.current.effort === undefined ? {} : { effort: next.current.effort }) } : null);
     } catch (cause) {
+      if (!scopeIsCurrent() || request !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "模型目录加载失败");
     } finally {
-      setLoading(false);
+      if (scopeIsCurrent() && request === loadSeq.current) setLoading(false);
     }
-  }, [activeCourseId, activeSessionId, setActiveModel]);
+  }, [activeCourseId, activeSessionId, setActiveModel, scopeIsCurrent]);
 
-  useEffect(() => { if (open) void loadDirectory(); }, [open, loadDirectory]);
+  // Restore the caption immediately; provider discovery remains a menu action.
+  useEffect(() => {
+    let alive = true;
+    const request = ++loadSeq.current;
+    void (async () => {
+      const next = activeCourseId && activeSessionId
+        ? await api.sessionModels(activeCourseId, activeSessionId, true)
+        : directoryFromSettings(await api.settings());
+      if (!alive || !scopeIsCurrent() || request !== loadSeq.current) return;
+      setDirectory((current) => ({ ...current, current: next.current }));
+      setActiveModel(next.current ? { providerId: next.current.provider, model: next.current.model, ...(next.current.effort === undefined ? {} : { effort: next.current.effort }) } : null);
+    })().catch((cause) => {
+      if (alive && scopeIsCurrent() && request === loadSeq.current) setError(cause instanceof Error ? cause.message : "模型加载失败");
+    });
+    return () => { alive = false; };
+  }, [activeCourseId, activeSessionId, scopeIsCurrent, setActiveModel]);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => { if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false); };
@@ -76,6 +112,7 @@ export default function ModelSeat() {
       const selection = { provider, model, ...(effort === undefined ? {} : { effort }) };
       if (activeCourseId && activeSessionId) {
         const result = await api.selectSessionModel(activeCourseId, activeSessionId, selection);
+        if (!scopeIsCurrent()) return;
         setActiveModel({ providerId: result.selected.provider, model: result.selected.model, ...(result.selected.effort === undefined ? {} : { effort: result.selected.effort }) });
         setDirectory((current) => ({ ...current, current: result.selected }));
       } else {
@@ -83,12 +120,14 @@ export default function ModelSeat() {
         // 服务端默认路由把座位静默打回。落盘到全局默认（部分更新语义），
         // 让新会话的 ensureSessionModel 兜底读到这次选择。
         await api.updateSettings({ provider, model });
+        if (!scopeIsCurrent()) return;
         setActiveModel({ providerId: provider, model, ...(effort === undefined ? {} : { effort }) });
         setDirectory((current) => ({ ...current, current: { provider, model, ...(effort === undefined ? {} : { effort }) }, routable: true }));
       }
       setOpen(false);
       setPane("root");
     } catch (cause) {
+      if (!scopeIsCurrent()) return;
       if (previous) setActiveModel(previous);
       flashStatusBanner(cause instanceof Error ? `模型切换失败：${cause.message}` : "模型切换失败");
     } finally { setSelecting(null); }
@@ -122,7 +161,7 @@ export default function ModelSeat() {
       aria-expanded={open}
       aria-haspopup="menu"
       title={modelTitle}
-      onClick={() => { setOpen((value) => !value); setPane("root"); }}
+      onClick={() => { if (!open) void loadDirectory(); setOpen((value) => !value); setPane("root"); }}
       className="flex h-7 max-w-[260px] items-center gap-1.5 rounded-lg border border-border-faint bg-bg-card/60 px-2 text-[13px] font-medium leading-5 text-text-primary transition-colors hover:bg-bg-card"
     >
       <Sparkles size={13} strokeWidth={1.8} className="shrink-0 text-text-faint" aria-hidden />

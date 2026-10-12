@@ -141,7 +141,14 @@ export async function smokeDirectoryPicker({ base, token, hostPid, directory, re
   }
   await exercise(false)
   const opened = await rpc('workspaces.open', { path: canonicalDirectory })
-  assert.equal(opened.workspace.path, canonicalDirectory)
+  // Same spelling trap as the picker result: the Host canonicalizes through
+  // Node's native realpath (GetFinalPathNameByHandle), which expands the 8.3
+  // short name, while `fs.realpathSync`'s JS implementation does not. Compare
+  // directory identity rather than the string.
+  assert(
+    sameDirectory(opened.workspace.path, canonicalDirectory),
+    `workspaces.open returned ${opened.workspace.path}, expected ${canonicalDirectory}`,
+  )
   const listed = await rpc('workspaces.courses', { path: canonicalDirectory })
   assert.equal(listed.missing, false)
   await exercise(true)

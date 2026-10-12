@@ -26,7 +26,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { createServer, request as httpRequest } from "node:http";
 import { createZip } from "../../../packages/course/builder/src/zip.ts";
@@ -35,6 +35,17 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+/** Same directory regardless of how the path is spelled (8.3 short name, symlink, case). */
+function sameDirectory(a: string, b: string): boolean {
+  try {
+    const left = statSync(a, { bigint: true });
+    const right = statSync(b, { bigint: true });
+    return left.ino === right.ino && left.dev === right.dev;
+  } catch {
+    return false;
+  }
+}
 
 const repoRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const tsxCli = join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
@@ -704,11 +715,17 @@ describe("M3 二进制导出/导入通道（真实 Host）", () => {
         method: "POST", headers: auth(), body: JSON.stringify({ payload: {} }),
       });
       const tree = await workspaces.json() as { result: { items: Array<{ path: string }> } };
-      // 工作区注册表存的是 fs.realpath 规范路径。tmpdir 在 macOS 上是 /var 软链到
-      // /private/var，在 GH Windows runner 上 TEMP 是 8.3 短名（RUNNER~1），两者都
-      // 与 realpath 结果不一致——直接拿未解析路径比对只在 tmpdir 恰好规范时才通过。
-      const canonicalCourse = realpathSync(join(target, courseId));
-      expect(tree.result.items.some(item => item.path === canonicalCourse)).toBe(true);
+      // The registry stores `fs.realpath`, but that canon is not enough to compare
+      // strings here: `tmpdir()` is the 8.3 short name (RUNNER~1) on a GitHub Windows
+      // runner and Node's realpath does NOT expand 8.3 short names, so the two sides
+      // can spell the same directory differently. Compare directory identity so the
+      // assertion stays about "the restored course is registered here".
+      const restoredCourse = join(target, courseId);
+      const registered = tree.result.items.find(item => sameDirectory(item.path, restoredCourse));
+      expect(
+        registered,
+        `restored course not registered; items=${JSON.stringify(tree.result.items.map(item => item.path))}`,
+      ).toBeDefined();
     } finally {
       rmSync(courseDir, { recursive: true, force: true });
       rmSync(target, { recursive: true, force: true });

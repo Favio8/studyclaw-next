@@ -7,10 +7,23 @@
  * 扫描件 OCR 文本层与 docx/xlsx/html 解析视图在 P2.5（依赖 MinerU）。
  */
 
-import ConceptEditor from "@/src/components/panel/ConceptEditor";
+import ConceptCardFill from "@/src/components/panel/ConceptCardFill";
 import MarkdownView from "@/src/components/chat/MarkdownView";
 import { useCallback, useEffect, useState } from "react";
-import { BookOpen, ChevronLeft, ChevronRight, MessageSquare, StickyNote, X, FolderOpen, Maximize, Minimize, Plus, Minus } from "lucide-react";
+import {
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+  Sparkles,
+  StickyNote,
+  X,
+  FolderOpen,
+  Maximize,
+  Minimize,
+  Plus,
+  Minus,
+} from "lucide-react";
 import { isReaderEditable, stepZoom, type ReaderZoom } from "@/src/lib/readerZoom";
 import { isModalOpen } from "@/src/lib/modalStack";
 import MaterialTree from "@/src/components/reader/MaterialTree";
@@ -30,6 +43,8 @@ import {
   readingOpen,
   readingSaveProgress,
 } from "@/src/lib/readingFlow";
+import { openSummaryPanel, runReadingSummary } from "@/src/lib/summaryFlow";
+import SummaryPanel from "@/src/components/reader/SummaryPanel";
 
 /** P3：划词建卡草稿确认面板（题干可编辑，确认后入池）。 */
 function CardDraftPanel() {
@@ -251,7 +266,17 @@ export default function ReaderView({ focus = false, onFocusChange }: { focus?: b
             </div>
           ) : null}
           <button type="button" aria-label="切换正文视图" aria-pressed={textView} onClick={() => setTextView(!textView)} className="rounded px-2 py-1 text-xs text-text-muted">{textView ? "原文" : "正文 / OCR"}</button>
-          {reader.source ? <ConceptEditor source={reader.source} /> : null}
+          {reader.source ? <button
+            type="button"
+            aria-label="AI 概括"
+            title="AI 概括（阅读前快速看重点）"
+            onClick={() => { openSummaryPanel(); void runReadingSummary(false); }}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-accent-focus transition-colors hover:bg-bg-card"
+          >
+            <Sparkles size={13} strokeWidth={1.8} aria-hidden />
+            AI 概括
+          </button> : null}
+          {reader.source ? <ConceptCardFill variant="toolbar" /> : null}
           <div className="flex items-center gap-1" aria-label="阅读缩放">
             <button type="button" aria-label="缩小" title="缩小（-）" onClick={() => changeZoom(-1)} className="p-1"><Minus size={15} /></button>
             <select aria-label="缩放模式" value={zoom} onChange={(event) => { const value = event.target.value; setZoom(value === "width" || value === "page" ? value : Number(value)); }} className="max-w-32 rounded border border-border-line bg-bg-panel px-1 py-1 text-xs">
@@ -315,6 +340,7 @@ export default function ReaderView({ focus = false, onFocusChange }: { focus?: b
           <ParsedView source={reader.source} zoom={textZoom} />
         )}
         {railOpen && !focus ? <div data-testid="annotation-drawer" className="absolute right-0 bottom-0 top-0 z-20 shadow-lv3"><AnnotationRail onLocate={locate} /></div> : null}
+        {reader.summary !== null ? <SummaryPanel /> : null}
         </div>
       </div>
       <SelectionPopover />

@@ -15,12 +15,14 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/src/lib/api";
+import { writeModelTestEvidence } from "@/src/lib/onboarding";
 import { useAppStore } from "@/src/store/useAppStore";
 import { useFocusTrap } from "@/src/hooks/useFocusTrap";
 import type {
   ProviderCatalogEntry,
   ProviderModelPayload,
   ProviderPayload,
+  ProviderTestView,
   SettingsPayload,
 } from "@/src/types/api";
 
@@ -113,7 +115,7 @@ function ProviderEditorCard({
   /** 创建来源的目录条目（预填 + placeholder）；自定义声明为 null。 */
   entry: ProviderCatalogEntry | null;
   creating: boolean;
-  onSave: (profile: EditorProfile, apiKey: string) => Promise<void>;
+  onSave: (profile: EditorProfile, apiKey: string, withTest?: boolean) => Promise<void>;
   onCancel: () => void;
   /** 添加卡草稿缓存：按目录条目 id 保存/恢复，切换条目不丢草稿（X4）。 */
   draftCache?: Map<string, AddCardDraft> | null;
@@ -204,7 +206,7 @@ function ProviderEditorCard({
     rowIdsValid &&
     capacitiesValid;
 
-  async function submit() {
+  async function submit(withTest = false) {
     if (!canSave) return;
     setBusy(true);
     setError(null);
@@ -228,6 +230,7 @@ function ProviderEditorCard({
           ...(provider !== null ? { overwrite: true } : {}),
         },
         apiKey.trim(),
+        withTest,
       );
     } catch (cause) {
       setError(errorMessage(cause));
@@ -623,11 +626,20 @@ function ProviderEditorCard({
         </button>
         <button
           type="button"
-          onClick={() => void submit()}
+          onClick={() => void submit(false)}
           disabled={busy || !canSave}
-          className="rounded-xl bg-accent-focus px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-focus-hover disabled:opacity-40"
+          className="rounded-xl border border-border-line px-3 py-1.5 text-xs text-text-muted hover:bg-bg-panel disabled:opacity-40"
         >
           {busy ? "保存中..." : "保存"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void submit(true)}
+          disabled={busy || !canSave}
+          title="保存配置并发起一次真实生成请求"
+          className="rounded-xl bg-accent-focus px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-focus-hover disabled:opacity-40"
+        >
+          {busy ? "测试中..." : "保存并测试"}
         </button>
       </div>
 
@@ -713,6 +725,8 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
   const [error, setError] = useState<string | null>(null);
   const [catalogFailed, setCatalogFailed] = useState(false);
   const [catalogRetry, setCatalogRetry] = useState(0);
+  /** G2 连通测试结果：分区级状态，卡片收起后仍可见。 */
+  const [testResult, setTestResult] = useState<ProviderTestView | null>(null);
   // X4：添加卡按目录条目缓存整卡草稿（切换条目不丢输入）。
   const [addDrafts] = useState(() => new Map<string, AddCardDraft>());
   // P2：空目录的添加卡被用户手动收起后，不因 SettingsDialog 的 loaded 刷新
@@ -775,7 +789,7 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
     setEditingId(id);
   }
 
-  async function handleSave(profile: EditorProfile, apiKey: string) {
+  async function handleSave(profile: EditorProfile, apiKey: string, withTest = false) {
     const wasActive = payload?.activeProviderId ?? "";
     const saved = await api.saveProvider(profile);
     const label = profile.name || profile.id;
@@ -804,12 +818,25 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
         ? `已保存并激活 ${label}（新对话与课程构建将使用它）`
         : `模型配置已保存（${label}）`,
     );
+    if (withTest) {
+      // PRD G2：保存后由用户明确发起的真实连通测试（一次短响应生成）；
+      // 「获取模型列表成功」不算测试通过。结果落在分区级状态，卡片收起后仍可见。
+      const result = await api.testProvider(profile.id);
+      setTestResult(result);
+      flashStatusBanner(result.ok
+        ? `✓ 模型连通测试成功（${result.model} · ${result.latencyMs}ms）`
+        : `✗ 模型连通测试失败：${result.message}`);
+      if (result.ok) {
+        writeModelTestEvidence({ providerId: result.providerId, model: result.model, baseUrl: profile.baseUrl ?? "" });
+        window.dispatchEvent(new Event("studyclaw:model-tested"));
+      }
+    }
   }
 
   /** X5：保存时若目标 id 已存在且未带 overwrite，后端返回 409；弹确认框。 */
-  async function handleSaveWithConflict(profile: EditorProfile, apiKey: string) {
+  async function handleSaveWithConflict(profile: EditorProfile, apiKey: string, withTest = false) {
     try {
-      await handleSave(profile, apiKey);
+      await handleSave(profile, apiKey, withTest);
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "provider-exists") {
         setConflict({ profile, apiKey });
@@ -873,6 +900,18 @@ export default function ModelsSection({ initial }: ModelsSectionProps) {
           配置会立即用于新的对话和课程构建任务。API Key 以写入方式保存，不显示明文。
         </p>
       </div>
+
+      {testResult !== null ? (
+        <div
+          data-testid="provider-test-result"
+          role="status"
+          className={`rounded-xl border p-3 text-xs ${testResult.ok ? "border-accent-pass/30 bg-accent-pass/5 text-accent-pass" : "border-accent-fail/30 bg-accent-fail/5 text-accent-fail"}`}
+        >
+          {testResult.ok
+            ? `✓ 模型连通测试成功（${testResult.model} · ${testResult.latencyMs}ms）`
+            : `✗ 模型连通测试失败：${testResult.message}。请检查 Base URL、API Key 与模型 ID 后重试。`}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-xl border border-accent-fail/30 bg-accent-fail/5 p-3 text-xs text-accent-fail" role="alert">

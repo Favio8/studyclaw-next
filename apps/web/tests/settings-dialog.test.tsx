@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { storeState, apiMocks } = vi.hoisted(() => ({
   storeState: {
     settingsOpen: true,
+    settingsSection: "general",
     setSettingsOpen: vi.fn(),
     setMode: vi.fn(),
     flashStatusBanner: vi.fn(),

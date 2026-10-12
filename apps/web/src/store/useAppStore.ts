@@ -9,6 +9,8 @@
 import { create } from "zustand";
 import type {
   AnnotationView,
+  ConceptCardStatusView,
+  ConceptFillItemView,
   CourseSummary,
   HeatmapPayload,
   MasteryPayload,
@@ -18,6 +20,7 @@ import type {
   SessionSummary,
     ToolCallView,
   AskView,
+  SummaryResultView,
   WakeupCard,
 } from "@/src/types/api";
 import type { LearningMode } from "@/src/types";
@@ -126,7 +129,7 @@ export interface ReadingReference {
   page: number;
   quote: string;
   result?: string;
-  kind?: "explain" | "translate";
+  kind?: "explain" | "translate" | "summary";
 }
 
 /** P3：划词建卡的草稿（生成后待用户确认，可编辑题干）。 */
@@ -151,6 +154,19 @@ export interface ReaderState {
   action: ReaderActionState | null;
   /** P3：划词建卡草稿（待确认）。 */
   cardDraft: ReaderCardDraft | null;
+  /** F3：AI 概括面板状态（null = 未打开）。 */
+  summary: SummaryState | null;
+}
+
+/** F3：AI 概括面板状态。 */
+export interface SummaryState {
+  scope: "document" | "chapter";
+  /** 当前阶段文案（读取正文 / 概括第 n/m 段 / 汇总要点）。 */
+  phase: string;
+  progress: { current: number; total: number } | null;
+  streaming: boolean;
+  result: SummaryResultView | null;
+  error: string | null;
 }
 
 export const initialReader: ReaderState = {
@@ -165,7 +181,43 @@ export const initialReader: ReaderState = {
   selection: null,
   action: null,
   cardDraft: null,
+  summary: null,
 };
+
+// ---------------------------------------------------------------------------
+// F2：概念补题任务状态（跨 Tab 共享；ProgressTab / SyllabusTab / ReaderView
+// 同时挂载，不能各自持有独立副本）。异步编排在 lib/conceptFillFlow.ts。
+// ---------------------------------------------------------------------------
+
+export interface ConceptFillState {
+  courseId: string | null;
+  jobId: string | null;
+  status: "idle" | "running" | "done" | "stopped" | "failed";
+  total: number;
+  coveredBefore: number;
+  processed: number;
+  generated: number;
+  currentConcept: string | null;
+  items: ConceptFillItemView[];
+  error: string | null;
+  sharedProblem: string | null;
+}
+
+export const initialConceptFill: ConceptFillState = {
+  courseId: null,
+  jobId: null,
+  status: "idle",
+  total: 0,
+  coveredBefore: 0,
+  processed: 0,
+  generated: 0,
+  currentConcept: null,
+  items: [],
+  error: null,
+  sharedProblem: null,
+};
+
+export type SettingsSection = "general" | "models" | "agent" | "parsing" | "data";
 
 export interface ChatMessage {
   id: string;
@@ -265,10 +317,19 @@ interface AppState {
   quiz: QuizState;
   /** 辅助阅读（PRD 需求三）。 */
   reader: ReaderState;
+  /** F2：概念补题任务（跨 Tab 共享）。 */
+  conceptFill: ConceptFillState;
+  conceptCardStatus: ConceptCardStatusView | null;
+  /** G2：设置弹层要打开的分区（引导入口直达模型配置）。 */
+  settingsSection: SettingsSection;
+  /** M2：新手引导被隐藏（可随时重新打开）。 */
+  onboardingHidden: boolean;
   /** 每次重置阅读上下文递增；防止同一路径重开后旧请求重新落地。 */
   readerGeneration: number;
   /** Identifies one course activation, including reopening the same path/name. */
   courseGeneration: number;
+  /** 课程数据修订号：补题/采用概念等写操作递增，供大纲/题池等独立加载的面板重新拉取。 */
+  courseDataRevision: number;
   /** 大纲树折叠状态（key=章节 id）；入 store 跨视图/重挂保持。 */
   syllabusCollapsed: Record<string, boolean>;
   /** 大纲树搜索词（入 store，切视图不丢）。 */
@@ -337,6 +398,12 @@ interface AppState {
   quizReset: () => void;
   setReader: (patch: Partial<ReaderState>) => void;
   readerReset: () => void;
+  setConceptFill: (patch: Partial<ConceptFillState>) => void;
+  conceptFillReset: () => void;
+  setConceptCardStatus: (status: ConceptCardStatusView | null) => void;
+  setSettingsSection: (section: SettingsSection) => void;
+  setOnboardingHidden: (hidden: boolean) => void;
+  bumpCourseDataRevision: () => void;
   setPaletteOpen: (open: boolean) => void;
   setWizardOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -399,8 +466,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   wizardOpen: false,
   settingsOpen: false,
   reader: { ...initialReader },
+  conceptFill: { ...initialConceptFill },
+  conceptCardStatus: null,
+  settingsSection: "general",
+  onboardingHidden: false,
   readerGeneration: 0,
   courseGeneration: 0,
+  courseDataRevision: 0,
 
   setCourses: (courses) => set({ courses }),
   setActiveCourse: (courseId) =>
@@ -420,6 +492,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   digest: null,
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
+      conceptFill: { ...initialConceptFill },
+      conceptCardStatus: null,
       readerGeneration: state.readerGeneration + 1,
       courseGeneration: state.courseGeneration + 1,
       syllabusCollapsed: {},
@@ -549,6 +623,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   quizReset: () => set({ quiz: { ...initialQuiz } }),
   setReader: (patch) => set((state) => ({ reader: { ...state.reader, ...patch } })),
   readerReset: () => set((state) => ({ reader: { ...initialReader }, readerGeneration: state.readerGeneration + 1 })),
+  setConceptFill: (patch) => set((state) => ({ conceptFill: { ...state.conceptFill, ...patch } })),
+  conceptFillReset: () => set({ conceptFill: { ...initialConceptFill } }),
+  setConceptCardStatus: (conceptCardStatus) => set({ conceptCardStatus }),
+  setSettingsSection: (settingsSection) => set({ settingsSection }),
+  setOnboardingHidden: (onboardingHidden) => set({ onboardingHidden }),
+  bumpCourseDataRevision: () => set((state) => ({ courseDataRevision: state.courseDataRevision + 1 })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
   setWizardOpen: (wizardOpen) => set({ wizardOpen }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -571,6 +651,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   digest: null,
       quiz: { ...initialQuiz },
       reader: { ...initialReader },
+      conceptFill: { ...initialConceptFill },
+      conceptCardStatus: null,
       readerGeneration: state.readerGeneration + 1,
       courseGeneration: state.courseGeneration + 1,
       syllabusCollapsed: {},

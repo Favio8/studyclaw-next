@@ -27,6 +27,16 @@ const { storeState, syllabus } = vi.hoisted(() => {
     setSyllabusStatusFilter: vi.fn((filter: string | null) => {
       storeState.syllabusStatusFilter = filter;
     }),
+    courseDataRevision: 0,
+    conceptCardStatus: null as unknown,
+    conceptFill: {
+      courseId: null as string | null, jobId: null as string | null, status: "idle" as const,
+      total: 0, coveredBefore: 0, processed: 0, generated: 0, currentConcept: null as string | null,
+      items: [] as unknown[], error: null as string | null, sharedProblem: null as string | null,
+    },
+    setConceptCardStatus: vi.fn(),
+    setSettingsOpen: vi.fn(),
+    setSettingsSection: vi.fn(),
   };
   const syllabus = {
     courseId: "course-1",
@@ -57,7 +67,10 @@ const { storeState, syllabus } = vi.hoisted(() => {
 });
 
 vi.mock("../src/store/useAppStore", () => ({
-  useAppStore: (selector: (state: typeof storeState) => unknown) => selector(storeState),
+  useAppStore: Object.assign(
+    (selector: (state: typeof storeState) => unknown) => selector(storeState),
+    { getState: () => storeState },
+  ),
 }));
 vi.mock("../src/lib/api", () => ({ api: { syllabus: vi.fn().mockResolvedValue(syllabus) } }));
 vi.mock("../src/components/panel/SyllabusGraph", () => ({

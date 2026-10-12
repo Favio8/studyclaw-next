@@ -50,10 +50,11 @@ import {
   updateSettings,
   agentEventToFrame,
   LearningAgentService,
+  testProviderConnection,
 } from '@studyclaw/chat-service'
 import { migrateLegacySession } from '@studyclaw/session'
 import type { LearningMode } from '@studyclaw/session'
-import { createCourseService, ReadingService, runReadingAction } from '@studyclaw/chat-service'
+import { createCourseService, ReadingService, runReadingAction, runReadingSummary } from '@studyclaw/chat-service'
 import { resolveSourceRef } from '@studyclaw/tools'
 import { AgentRegistry } from '@studyclaw/agent'
 import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
@@ -539,7 +540,10 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
     const activeRoot = (): string => requestRoot ?? registry.lastOpenedPath
     const courseService = createCourseService(configFacts)
     return {
-      conceptCards: async courseId => courseService.conceptCards(activeRoot(), courseId),
+      conceptCardStatus: async courseId => courseService.conceptCardStatus(activeRoot(), courseId) as unknown as Record<string, unknown>,
+      startConceptCardFill: async courseId => courseService.startConceptCardFill(activeRoot(), courseId),
+      conceptCardFillJob: jobId => courseService.conceptCardFillJob(jobId) as unknown as Record<string, unknown> | undefined,
+      stopConceptCardFill: jobId => courseService.stopConceptCardFill(jobId) as unknown as Record<string, unknown> | undefined,
       conceptDraft: async (courseId, sources) => courseService.conceptDraft(activeRoot(), courseId, sources),
       conceptApply: async (courseId, draftId, edits) => courseService.conceptApply(activeRoot(), courseId, draftId, edits),
       syllabus: async courseId => courseService.syllabus(activeRoot(), courseId),
@@ -626,6 +630,10 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       appendNotes: async source => {
         requireWorkspaceRootForSettings(activeRoot(), '追加笔记')
         return readingService.appendNotes(activeRoot(), source) as unknown as Record<string, unknown>
+      },
+      appendSummary: async (source, markdown) => {
+        requireWorkspaceRootForSettings(activeRoot(), '保存概括到笔记')
+        return readingService.appendSummary(activeRoot(), source, markdown) as unknown as Record<string, unknown>
       },
     }
   }
@@ -783,6 +791,11 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       remove: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '删除模型供应商'); return deleteProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
       activate: async providerId => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '激活模型供应商'); return activateProvider(registry.lastOpenedPath, providerId) as unknown as Record<string, unknown> },
       credential: async (providerId, apiKey) => { requireWorkspaceRootForSettings(registry.lastOpenedPath, '保存 API Key'); return setCredential(registry.lastOpenedPath, providerId, apiKey) as unknown as Record<string, unknown> },
+      test: async providerId => {
+        requireWorkspaceRootForSettings(registry.lastOpenedPath, '测试模型连接')
+        const resolved = await loadChatConfig(registry.lastOpenedPath, providerId === null ? undefined : { providerId })
+        return testProviderConnection(resolved) as unknown as Record<string, unknown>
+      },
     },
     courseService: wrapCourseService(),
     readingService: wrapReadingService(),
@@ -1162,6 +1175,11 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         // 阅读 LLM 动作（PRD 需求三）：划词解释/翻译，SSE 帧 token…/done/error。
         if (method === 'reading/explain' || method === 'reading/translate') {
           await handleReadingAction(method === 'reading/explain' ? 'explain' : 'translate', request, response, body)
+          return
+        }
+        // F3：阅读区 AI 概括（整份 / 当前章节），SSE 帧 stage/progress/result/done/error。
+        if (method === 'reading/summarize') {
+          await handleReadingSummary(request, response, body)
           return
         }
         if (method === 'acp') {
@@ -1544,6 +1562,66 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       }
     } catch (error) {
       writeFrame('error', { code: 'READING_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
+    }
+    response.end()
+  }
+
+  /**
+   * `POST /api/reading/summarize` (SSE)：阅读区 AI 概括（PRD F3）。帧：
+   * stage / progress / result / done / error。客户端断连即取消后台模型请求；
+   * 停止不写入完整结果缓存。
+   */
+  async function handleReadingSummary(
+    request: import('node:http').IncomingMessage,
+    response: import('node:http').ServerResponse,
+    body: string,
+  ): Promise<void> {
+    const abortController = new AbortController()
+    request.once('aborted', () => abortController.abort('client'))
+    request.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
+    let input: { source?: unknown; scope?: unknown; currentPage?: unknown; force?: unknown }
+    try {
+      input = JSON.parse(body === '' ? '{}' : body) as typeof input
+    } catch {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'request body is not valid JSON', details: null } }))
+      return
+    }
+    const source = typeof input.source === 'string' ? input.source : ''
+    const scope = input.scope === 'chapter' ? 'chapter' as const : 'document' as const
+    const currentPage = typeof input.currentPage === 'number' && Number.isFinite(input.currentPage) ? Math.max(1, Math.round(input.currentPage)) : 1
+    const force = input.force === true
+    if (source === '') {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: 'source is required', details: null } }))
+      return
+    }
+    if (registry.lastOpenedPath === '') {
+      response.writeHead(400)
+      response.end(JSON.stringify({ error: { code: 'invalid-request', message: '请先在左栏添加/打开一个项目', details: null } }))
+      return
+    }
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+    const writeFrame = (event: string, data: unknown): void => {
+      if (response.writableEnded || response.destroyed) return
+      response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    try {
+      for await (const frame of runReadingSummary(
+        { workspaceRoot: registry.lastOpenedPath, source, scope, currentPage, force },
+        configFacts,
+        abortController.signal,
+      )) {
+        writeFrame(String(frame['event'] ?? ''), frame['data'])
+      }
+    } catch (error) {
+      if (!abortController.signal.aborted) {
+        writeFrame('error', { code: 'SUMMARY_FAILED', message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) })
+      }
     }
     response.end()
   }

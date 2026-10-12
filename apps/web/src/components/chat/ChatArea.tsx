@@ -39,7 +39,6 @@ export default function ChatArea() {
   const sessionBanner = useAppStore((s) => s.sessionBanner);
   const wakeupCard = useAppStore((s) => s.wakeupCard);
   const suggestedEntry = useAppStore((s) => s.suggestedEntry);
-  const modeBanner = useAppStore((s) => s.modeBanner);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const setWizardOpen = useAppStore((s) => s.setWizardOpen);
   const { send, answer, retryLast, stop } = useChatStream();
@@ -121,14 +120,6 @@ export default function ChatArea() {
             <span className="min-w-0 flex-1 truncate font-medium text-text-primary">
               {activeSessionTitle || "新对话"}
             </span>
-            {modeBanner ? (
-              <span
-                key={modeBanner}
-                className="banner-flash shrink-0 text-xs text-accent-focus"
-              >
-                {modeBanner}
-              </span>
-            ) : null}
           </div>
           {sessionBanner ? (
             <div

@@ -1,4 +1,5 @@
-import { draftConcepts, applyConcepts, fillConceptCards, type ConceptDraft } from './concepts.ts'
+import { draftConcepts, applyConcepts, type ConceptDraft } from './concepts.ts'
+import { conceptCardStatus, startConceptCardFill, conceptCardFillJob, stopConceptCardFill, type ConceptCardStatus, type ConceptFillJobView } from './concept-cards.ts'
 /**
  * Course service: the host-side seam for the build/learning surface —
  * syllabus, progress, mastery, quiz, file enumeration, sync build, URL
@@ -508,7 +509,10 @@ async function* runEvalSubmit(
 }
 
 export interface CourseService {
-  conceptCards(workspaceRoot: string, courseId: string): Promise<Record<string, unknown>>
+  conceptCardStatus(workspaceRoot: string, courseId: string): Promise<ConceptCardStatus>
+  startConceptCardFill(workspaceRoot: string, courseId: string): Promise<{ jobId: string }>
+  conceptCardFillJob(jobId: string): ConceptFillJobView | undefined
+  stopConceptCardFill(jobId: string): ConceptFillJobView | undefined
   conceptDraft(workspaceRoot: string, courseId: string, sources: string[]): Promise<ConceptDraft>
   conceptApply(workspaceRoot: string, courseId: string, draftId: string, edits: Array<{ id: string; name: string }>): Promise<Record<string, unknown>>
   syllabus(workspaceRoot: string, courseId: string): Promise<Syllabus>
@@ -547,7 +551,20 @@ export interface CourseService {
 /** Assemble the course service for the active workspace. */
 export function createCourseService(getConfig: () => Promise<ResolvedChatConfig | null>): CourseService {
   return {
-    async conceptCards(workspaceRoot, courseId) { return fillConceptCards(await requireCourse(workspaceRoot, courseId), requireConfig(await getConfig())) },
+    async conceptCardStatus(workspaceRoot, courseId) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      const config = await getConfig()
+      // 「就绪」= 供应商/Base URL/模型齐备且能解析到凭据；只差密钥时也应先引导配置，
+      // 而不是让用户点了补题才在共享失败里看到「缺少 API Key」。
+      const ready = configProblem(config) === '' && (config?.apiKey ?? '') !== ''
+      return conceptCardStatus(dir, ready)
+    },
+    async startConceptCardFill(workspaceRoot, courseId) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      return { jobId: startConceptCardFill(dir, courseId, requireConfig(await getConfig())) }
+    },
+    conceptCardFillJob(jobId) { return conceptCardFillJob(jobId) },
+    stopConceptCardFill(jobId) { return stopConceptCardFill(jobId) },
     async conceptDraft(workspaceRoot, courseId, sources) {
       const dir = await requireCourse(workspaceRoot, courseId)
       return draftConcepts(dir, sources, requireConfig(await getConfig()))

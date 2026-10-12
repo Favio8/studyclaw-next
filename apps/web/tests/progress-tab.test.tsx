@@ -16,14 +16,39 @@ const { storeState, refreshPanelData } = vi.hoisted(() => {
       lastImport: null as unknown,
       activeCourseId: "course-1" as string | null,
       readingTraces: [] as Array<{ conceptId: string; count: number; lastAt: string }>,
+      courseDataRevision: 0,
+      conceptCardStatus: null as unknown,
+      conceptFill: {
+        courseId: null as string | null, jobId: null as string | null, status: "idle" as const,
+        total: 0, coveredBefore: 0, processed: 0, generated: 0, currentConcept: null as string | null,
+        items: [] as unknown[], error: null as string | null, sharedProblem: null as string | null,
+      },
+      setConceptCardStatus: vi.fn(),
+      setConceptFill: vi.fn(),
+      bumpCourseDataRevision: vi.fn(),
+      setSettingsOpen: vi.fn(),
+      setSettingsSection: vi.fn(),
+      setCenterView: vi.fn(),
+      setActiveTab: vi.fn(),
+      setRightPanelCollapsed: vi.fn(),
+      flashStatusBanner: vi.fn(),
     },
   };
 });
 
 vi.mock("../src/store/useAppStore", () => ({
-  useAppStore: (selector: (state: typeof storeState) => unknown) => selector(storeState),
+  useAppStore: Object.assign(
+    (selector: (state: typeof storeState) => unknown) => selector(storeState),
+    { getState: () => storeState },
+  ),
 }));
 vi.mock("../src/lib/panelData", () => ({ refreshPanelData, notifyPanelChanged: vi.fn() }));
+vi.mock("../src/lib/api", () => ({
+  api: {
+    conceptCardStatus: vi.fn(async () => ({ modelReady: true, conceptOrigin: "semantic", totalConcepts: 0, coveredConcepts: 0, missingConcepts: 0, missing: [], concepts: [] })),
+    courseFiles: vi.fn(async () => ({ files: [] })),
+  },
+}));
 
 import ProgressTab from "../src/components/panel/ProgressTab";
 

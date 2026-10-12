@@ -155,9 +155,11 @@ manifest 的产物名必须是单个 Markdown 文件名，不能含路径段；�
 | RPC | `reading.load` `reading.text` `reading.parsed` `reading.progress.save` | 装载 / md 正文 / 解析产物 / 进度 |
 | RPC | `reading.highlights.{list,add,update,remove}` | 标注 CRUD |
 | RPC | `reading.export` `reading.appendNotes` `reading.traces` | 导出、追加笔记、按概念聚合的「我的痕迹」 |
+| RPC | `reading.appendSummary` | 把 AI 概括结果追加到课程笔记 notes.md |
 | RPC | `courses.cardDraft` `courses.cardCommit` | 划词建卡 |
 | GET | `/api/reading.file?source=` | PDF 字节（带 Bearer token，路径守卫 `resolveSourceRef`，只放行 `.pdf`） |
 | SSE | `POST /api/reading/explain` `/api/reading/translate` | 划词解释/翻译，帧 `token…/done/error` |
+| SSE | `POST /api/reading/summarize` | F3 AI 概括（`{source, scope: document\|chapter, currentPage, force}`），帧 `stage/progress/result/done/error`；断连即取消后台请求 |
 
 ## 6. 右栏四个 Tab 的数据来源（排查指引）
 
@@ -214,8 +216,39 @@ manifest 的产物名必须是单个 Markdown 文件名，不能含路径段；�
 
 「AI 概念提炼」可针对当前资料或课程资料运行：读取真实页块 → 分批提炼候选并核对引用 → 先建立最多 6 个主题分组 → 用分组枚举合并 12–30 个核心概念 → 为已有题卡生成归属方案 → 用户改名 / 取消选择 → 采用。文件名、作者元数据和普通章节标签不作为学习概念；文档目录单独保留。调用复用现有供应商与加密凭据，采用 off 思考档位，候选按来源内容与模型缓存。
 
-新增 RPC：`courses.concepts.draft {courseId,sources}`、`courses.concepts.apply {courseId,draftId,edits:[{id,name}]}`、`courses.concepts.cards {courseId}`。采用前校验大纲 / 题卡与源文件版本；采用操作创建 `.studyclaw/concepts/before-<draftId>.zip`，保留原卡 ID、题干、答案及 history，无法归属或未评测的重复卡标记 deprecated。仅同一稳定概念 ID 延续掌握度，旧汇总保存在迁移记录和备份；标注内容及阅读位置保留，可明确关联的标注重新归属。缺题概念通过「补齐概念题卡」在采用后出题，已有题卡不重生。
+新增 RPC：`courses.concepts.draft {courseId,sources}`、`courses.concepts.apply {courseId,draftId,edits:[{id,name}]}`、`courses.concepts.cardStatus {courseId}`（只读覆盖统计）、`courses.concepts.cards {courseId}`（启动补题任务，返回 `jobId`）、`courses.concepts.cardsStatus {jobId}`、`courses.concepts.cardsStop {jobId}`。采用前校验大纲 / 题卡与源文件版本；采用操作创建 `.studyclaw/concepts/before-<draftId>.zip`，保留原卡 ID、题干、答案及 history，无法归属或未评测的重复卡标记 deprecated。仅同一稳定概念 ID 延续掌握度，旧汇总保存在迁移记录和备份；标注内容及阅读位置保留，可明确关联的标注重新归属。缺题概念通过「补齐概念题卡」在采用后出题，已有题卡不重生。
 
 Syllabus 可包含 `concept_origin`、`document_outline`；概念新增 `definition`、`learning_objective`、`evidence[{source,page,block_id,quote}]`。原文页码由解析器提供，引文必须匹配指定块；模型不能自行指定页码。大纲中可展开定义 / 目标 / 依据并跳页；引用跳转不增加阅读进度，多次同源跳转以最新打开周期为准。
 
 Office 需本机安装 LibreOffice（`STUDYCLAW_SOFFICE` 可指定 executable）。OCR 需 `uv tool install "mineru>=4.0,<5"`，使用本地 `mineru-kit parse --format middle_json`；Office 派生 PDF 在 `.studyclaw/previews/`，原文件不修改。预览字节复用 `/api/reading.file` 的鉴权与课程路径边界。
+
+## 9. 新手引导与概念补题（2026-10-12）
+
+### 9.1 新手引导
+
+六步路径固定在 `TodayView` 顶部（`OnboardingGuide`），左栏常驻入口可重新打开；隐藏偏好存 `localStorage`（`studyclaw.onboarding.hidden.v1`）。完成条件由真实数据推导，与应用状态同源：
+
+| 步骤 | 完成证据 |
+| --- | --- |
+| G1 课程目录 | 激活课程存在且骨架已初始化（`courses` 列表命中） |
+| G2 模型配置 | 已保存配置 + 一次明确发起的成功连通测试（`studyclaw.modelTest.v1`），或该配置已有真实 AI 请求成功（已采用 AI 概念 / 已保存评测） |
+| G3 资料导入 | `courses.files` 至少一份资料 |
+| G4 确认概念 | `concept_origin === 'semantic'` 且已采用概念数 > 0 |
+| G5 生成题卡 | 已采用概念均有 ≥1 张有效题卡（`courses.digest` 的 `taskCount`） |
+| G6 首次练习 | 至少一个概念 `evals > 0` |
+
+`settings.testProvider` 执行一次短响应真实生成（`saveProvider` 后由用户点击「保存并测试」触发），端点/模型/供应商变化后旧成功证据不再匹配。
+
+### 9.2 概念补题任务
+
+`courses.concepts.cardStatus` 只读返回 `{modelReady, conceptOrigin, totalConcepts, coveredConcepts, missingConcepts, missing[], concepts[]}`，用于入口文案与前置条件；不发送模型请求。`courses.concepts.cards` 启动 Host 内存任务并返回 `jobId`；`cardsStatus` 返回逐概念结果（`pending/running/filled/covered/failed/unprocessed`）、`processed`、`generated`、`currentConcept`、`sharedProblem`；`cardsStop` 取消后台模型请求并保留已落盘卡片。每概念默认目标 2 张，只处理缺题概念；成功落盘沿用 `writeTaskPool` 与课程锁。共享失败（认证/额度/端点不可用）暂停后续概念并标注未处理，重试只补仍缺题项。
+
+## 10. 阅读 AI 概括（2026-10-12）
+
+`POST /api/reading/summarize` SSE：请求 `{source, scope: 'document'|'chapter', currentPage, force}`。正文来自 `readSourceDocument` 的结构化块（真实页码）。单次容量内一次概括；超出则按顺序分段（约 12k 字符/段）逐段结构化后归并，**完整遍历所选范围**。章节范围由 `document_outline` 与真实页块匹配页码确定，不足两个可定位标题时明确不可用。
+
+- 出处校验：`block_id` 必须属于所选资料，引文必须出现在该块原文中，页码取自结构化正文；伪造引用被丢弃，要点无有效出处即被丢弃。
+- 进度/状态：`stage`（读取正文 / 概括第 n/m 段 / 汇总要点）、`progress`、`result`（含 `coverage{total,processed,complete,excluded}`）、`done`、`error`。失败分段计入 `excluded` 并标为部分完成；补生成复用已成功分段，只补失败段。
+- 停止：客户端断连即取消后台模型请求；未完成结果不写入完整缓存。
+- 缓存：`.studyclaw/summaries/<signature>.json`（课程路径 + 来源 + 原文 SHA + 范围 + 供应商/模型 + 提示词版本 + 分段签名），课程内隔离，切模型/改原文/换范围不误命中；派生数据，不计入可移植学习状态；`.studyclaw/` 已在资料扫描排除集合内。
+- 沉淀：保存到笔记走 `reading.appendSummary`（追加 notes.md，带资料名与时间标记），发送到对话复用阅读引用卡。

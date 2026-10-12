@@ -543,6 +543,17 @@ export class ReadingService {
     return { appended: true, count }
   }
 
+  /**
+   * F3：把 AI 概括结果保存到课程笔记（notes.md）。用户主动动作，沿用追加笔记
+   * 入口与课程锁；带资料名与生成时间标记，重复保存可追溯。
+   */
+  async appendSummary(workspaceRoot: string, source: string, markdown: string): Promise<{ appended: boolean }> {
+    const content = markdown.trim()
+    if (content === '') return { appended: false }
+    await appendCourseNotes(workspaceRoot, `\n<!-- reading-summary ${new Date().toISOString()} source=${source} -->\n${content}\n`)
+    return { appended: true }
+  }
+
   async exportMarkdown(workspaceRoot: string, source: string): Promise<{ markdown: string; count: number }> {
     const { file } = await withCourseLock(workspaceRoot, () => readAnnotations(join(workspaceRoot, '.studyclaw')))
     const entry = sourceEntry(file, source)

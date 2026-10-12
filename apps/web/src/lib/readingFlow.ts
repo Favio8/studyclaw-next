@@ -9,6 +9,7 @@ import { useAppStore } from "@/src/store/useAppStore";
 import type { AnnotationView } from "@/src/types/api";
 import type { ReaderSelection } from "@/src/store/useAppStore";
 import { refreshPanelData } from "@/src/lib/panelData";
+import { abortActiveSummary } from "@/src/lib/summaryFlow";
 
 /** 模块级「活跃阅读流」中止句柄（单例；与 quizFlow 的 eval 流同语义）。 */
 let activeAbort: AbortController | null = null;
@@ -38,21 +39,31 @@ function errorMessage(exc: unknown): string {
   return exc instanceof Error ? exc.message : String(exc);
 }
 
-/** Jump to evidence without saving it as reading progress; latest open owns the page. */
+/** Jump to evidence without saving it as reading progress; latest open owns the page.
+ *  Same-source navigation must not reload/reset the reader——否则概括面板、划词与
+ *  标注状态会被无谓清空（点击出处后无法继续看概括）。 */
 export async function readingOpenAt(source: string, page: number): Promise<void> {
+  const state = useAppStore.getState();
+  if (state.reader.source === source && state.reader.error === null && !state.reader.loading) {
+    state.setCenterView("reading");
+    state.setReader({ progress: { ...state.reader.progress, page } });
+    return;
+  }
   useAppStore.getState().setCenterView("reading");
   const pending = readingOpen(source);
   const isCurrent = readerScopeIsCurrent();
   await pending;
-  const state = useAppStore.getState();
-  if (isCurrent() && state.reader.error === null) state.setReader({ progress: { ...state.reader.progress, page } });
+  const next = useAppStore.getState();
+  if (isCurrent() && next.reader.error === null) next.setReader({ progress: { ...next.reader.progress, page } });
 }
 
 /** 打开一份资料：读进度 + 标注，按扩展名决定视图。 */
 export async function readingOpen(source: string): Promise<void> {
   // 先掐掉上一份资料的在途解释/翻译流：否则旧流的 token 会继续 append 进
-  // 新资料的 action 卡（store 是共享单例）。
+  // 新资料的 action 卡（store 是共享单例）。概括同理：切资料必须取消在途请求，
+  // 旧响应不得覆盖新阅读对象。
   abortActiveReading();
+  abortActiveSummary();
   useAppStore.getState().readerReset();
   useAppStore.getState().setReader({ loading: true, error: null, source, selection: null, action: null });
   const isCurrent = readerScopeIsCurrent();

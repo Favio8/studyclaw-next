@@ -156,10 +156,15 @@ export interface HostServices {
     remove(providerId: string): Promise<Record<string, unknown>>
     activate(providerId: string): Promise<Record<string, unknown>>
     credential(providerId: string, apiKey: string): Promise<Record<string, unknown>>
+    /** PRD G2：用户明确触发的真实连通测试（一次短响应生成）。 */
+    test(providerId: string | null): Promise<Record<string, unknown>>
   }
   /** Course build/learning surface over the active workspace. */
   readonly courseService: {
-    conceptCards(courseId: string): Promise<Record<string, unknown>>
+    conceptCardStatus(courseId: string): Promise<Record<string, unknown>>
+    startConceptCardFill(courseId: string): Promise<{ jobId: string }>
+    conceptCardFillJob(jobId: string): Record<string, unknown> | undefined
+    stopConceptCardFill(jobId: string): Record<string, unknown> | undefined
     conceptDraft(courseId: string, sources: string[]): Promise<Record<string, unknown>>
     conceptApply(courseId: string, draftId: string, edits: Array<{ id: string; name: string }>): Promise<Record<string, unknown>>
     syllabus(courseId: string): Promise<Record<string, unknown>>
@@ -204,6 +209,8 @@ export interface HostServices {
     /** P3：我的痕迹聚合 + 导出追加到 notes.md。 */
     traces(): Promise<Record<string, unknown>>
     appendNotes(source: string): Promise<Record<string, unknown>>
+    /** F3：把 AI 概括结果追加到课程笔记。 */
+    appendSummary(source: string, markdown: string): Promise<Record<string, unknown>>
   }
 }
 
@@ -635,10 +642,40 @@ const handlers = {
       return ok(await services.settingsService.credential(payload.providerId, payload.apiKey))
     },
   },
+  'settings.testProvider': {
+    // PRD G2：用户明确发起的真实连通测试（一次短响应生成），不做自动调用。
+    payload: z.object({ providerId: z.string().min(1).nullish() }),
+    async run(payload: { providerId?: string | null }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.settingsService.test(payload.providerId ?? null))
+    },
+  },
   'courses.concepts.cards': {
+    // F2：启动补题任务并返回 jobId（只补缺题概念；进度/停止走 cardsStatus / cardsStop）。
+    payload: z.object({ courseId: z.string().min(1) }),
+    async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<{ jobId: string }>> {
+      return ok(await services.courseService.startConceptCardFill(payload.courseId))
+    },
+  },
+  'courses.concepts.cardsStatus': {
+    payload: z.object({ jobId: z.string().min(1) }),
+    async run(payload: { jobId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      const job = services.courseService.conceptCardFillJob(payload.jobId)
+      if (job === undefined) return err('invalid-request', `任务不存在: ${payload.jobId}`)
+      return ok(job)
+    },
+  },
+  'courses.concepts.cardsStop': {
+    payload: z.object({ jobId: z.string().min(1) }),
+    async run(payload: { jobId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      const job = services.courseService.stopConceptCardFill(payload.jobId)
+      if (job === undefined) return err('invalid-request', `任务不存在: ${payload.jobId}`)
+      return ok(job)
+    },
+  },
+  'courses.concepts.cardStatus': {
     payload: z.object({ courseId: z.string().min(1) }),
     async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
-      return ok(await services.courseService.conceptCards(payload.courseId))
+      return ok(await services.courseService.conceptCardStatus(payload.courseId))
     },
   },
   'courses.concepts.draft': {
@@ -808,6 +845,13 @@ const handlers = {
     payload: z.object({ source: z.string().min(1).max(500) }),
     async run(payload: { source: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.readingService.appendNotes(payload.source))
+    },
+  },
+  'reading.appendSummary': {
+    // F3：AI 概括结果保存到课程 notes.md（用户主动动作）。
+    payload: z.object({ source: z.string().min(1).max(500), markdown: z.string().min(1).max(20_000) }),
+    async run(payload: { source: string; markdown: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.readingService.appendSummary(payload.source, payload.markdown))
     },
   },
   'courses.cardDraft': {

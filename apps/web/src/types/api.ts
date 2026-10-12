@@ -427,6 +427,121 @@ export interface ApiErrorPayload {
   error: { code: string; message: string; detail: unknown };
 }
 
+// ---------------------------------------------------------------------------
+// F2：概念补题（状态 / 逐概念结果）
+// ---------------------------------------------------------------------------
+
+export interface ConceptCoverageView {
+  conceptId: string;
+  name: string;
+  chapter: string;
+  covered: boolean;
+  cardCount: number;
+}
+
+export interface ConceptCardStatusView {
+  /** 是否已配置可用模型（未配置时前端显示「配置模型」而不是发送注定失败的请求）。 */
+  modelReady: boolean;
+  conceptOrigin: "semantic" | "headings";
+  totalConcepts: number;
+  coveredConcepts: number;
+  missingConcepts: number;
+  missing: Array<{ id: string; name: string; chapter: string }>;
+  concepts: ConceptCoverageView[];
+}
+
+export type ConceptFillItemStatus = "pending" | "running" | "filled" | "covered" | "failed" | "unprocessed";
+
+export interface ConceptFillItemView {
+  conceptId: string;
+  name: string;
+  status: ConceptFillItemStatus;
+  generated: number;
+  reason: string | null;
+}
+
+export interface ConceptFillJobView {
+  jobId: string;
+  courseId: string;
+  status: "running" | "done" | "stopped" | "failed";
+  total: number;
+  coveredBefore: number;
+  processed: number;
+  generated: number;
+  currentConcept: string | null;
+  items: ConceptFillItemView[];
+  error: string | null;
+  sharedProblem: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// F3：AI 阅读概括
+// ---------------------------------------------------------------------------
+
+export interface SummaryEvidenceView {
+  source: string;
+  blockId: string;
+  page: number;
+  quote: string;
+}
+
+export interface SummaryPointView {
+  text: string;
+  evidence: SummaryEvidenceView[];
+}
+
+export interface SummaryConceptView {
+  name: string;
+  explanation: string;
+  evidence: SummaryEvidenceView[];
+}
+
+export interface SummarySuggestionView {
+  label: string;
+  page: number;
+  blockId: string;
+  reason: string;
+}
+
+export interface SummaryCoverageView {
+  total: number;
+  processed: number;
+  complete: boolean;
+  excluded: string[];
+}
+
+export interface SummaryResultView {
+  source: string;
+  scope: "document" | "chapter";
+  chapterTitle: string | null;
+  range: { startPage: number; endPage: number } | null;
+  overview: string;
+  points: SummaryPointView[];
+  concepts: SummaryConceptView[];
+  suggestions: SummarySuggestionView[];
+  coverage: SummaryCoverageView;
+  model: string;
+  promptVersion: string;
+  generatedAt: string;
+  fromCache: boolean;
+}
+
+export type SummaryEvent =
+  | { event: "stage"; data: { phase: string; message: string } }
+  | { event: "progress"; data: { phase: string; current: number; total: number; segmentBlocks?: number } }
+  | { event: "result"; data: SummaryResultView }
+  | { event: "done"; data: { cached: boolean; complete?: boolean; chars?: number } }
+  | { event: "error"; data: { code: string; message: string } };
+
+/** G2：模型连通测试结果（用户明确发起的真实生成）。 */
+export interface ProviderTestView {
+  ok: boolean;
+  providerId: string;
+  model: string;
+  latencyMs: number;
+  message: string;
+}
+
 export interface SyncResponse {
   added: string[];
   changed: string[];

@@ -55,7 +55,9 @@ function SettingsDialogContent() {
   const setOpen = useAppStore((state) => state.setSettingsOpen);
   const setMode = useAppStore((state) => state.setMode);
   const flashStatusBanner = useAppStore((state) => state.flashStatusBanner);
-  const [section, setSection] = useState<Section>("general");
+  // 引导入口可指定要打开的分区（如直达「模型配置」）；其余入口默认通用设置。
+  const requestedSection = useAppStore((state) => state.settingsSection);
+  const [section, setSection] = useState<Section>(requestedSection);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [loaded, setLoaded] = useState<SettingsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);

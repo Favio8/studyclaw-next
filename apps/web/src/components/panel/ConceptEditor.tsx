@@ -1,34 +1,34 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/src/lib/api";
 import { refreshPanelData } from "@/src/lib/panelData";
 import { readingOpenAt } from "@/src/lib/readingFlow";
+import { registerConceptDialog } from "@/src/lib/conceptDialog";
+import { loadConceptCardStatus } from "@/src/lib/conceptFillFlow";
 import { useAppStore } from "@/src/store/useAppStore";
 import { useFocusTrap } from "@/src/hooks/useFocusTrap";
+import ConceptCardFill from "@/src/components/panel/ConceptCardFill";
 import type { SemanticDraft } from "@/src/types/api";
 import MarkdownView from "@/src/components/chat/MarkdownView";
 
-export default function ConceptEditor({ source, onApplied }: { source?: string; onApplied?: () => void }) {
-  const courseId = useAppStore(s => s.activeCourseId);
-  const [filling, setFilling] = useState(false);
-  const [fillError, setFillError] = useState<string | null>(null);
+/**
+ * F2：概念提炼入口 + 补题入口（覆盖统计/前置条件/进度/结果）。
+ * 弹层打开动作注册到 conceptDialog，供补题前置条件与新手引导直达。
+ */
+export default function ConceptEditor({ onApplied }: { onApplied?: () => void }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    registerConceptDialog(() => setOpen(true));
+    return () => registerConceptDialog(null);
+  }, []);
   return <>
-    <button type="button" onClick={() => setOpen(true)} className="rounded-md border border-border-line px-2 py-1 text-xs text-accent-focus">AI 概念提炼</button>
-    <button type="button" disabled={filling || !courseId} className="ml-2 rounded-md border border-border-line px-2 py-1 text-xs text-text-muted" onClick={async () => {
-      if (!courseId) return;
-      const context = useAppStore.getState(); setFilling(true); setFillError(null);
-      try { const result = await api.conceptCards(courseId); if (useAppStore.getState().courseGeneration === context.courseGeneration) { await refreshPanelData(); context.flashStatusBanner(result.generated ? `已为 ${result.conceptsFilled} 个缺题概念补齐 ${result.generated} 张题卡` : "每个概念都已有题卡"); } }
-      catch (error) { setFillError(error instanceof Error ? error.message : String(error)); }
-      finally { setFilling(false); }
-    }}>{filling ? "补齐中…" : "补齐概念题卡"}</button>
-    {fillError ? <span role="alert" className="text-xs text-accent-fail">{fillError}</span> : null}
-    {open ? createPortal(<ConceptDialog source={source} onClose={() => setOpen(false)} onApplied={onApplied} />, document.body) : null}
+    <ConceptCardFill />
+    {open ? createPortal(<ConceptDialog onClose={() => setOpen(false)} onApplied={onApplied} />, document.body) : null}
   </>;
 }
 
-function ConceptDialog({ source, onClose, onApplied }: { source?: string; onClose: () => void; onApplied?: () => void }) {
+function ConceptDialog({ onClose, onApplied }: { onClose: () => void; onApplied?: () => void }) {
   const container = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +46,7 @@ function ConceptDialog({ source, onClose, onApplied }: { source?: string; onClos
     if (!courseId) return;
     setBusy(true); setError(null);
     try {
-      const files = source ? [source] : (await api.courseFiles(courseId)).files.map(file => String(file.relative));
+      const files = (await api.courseFiles(courseId)).files.map(file => String(file.relative));
       if (!current()) return;
       const result = await api.conceptDraft(courseId, files);
       if (!current()) return;
@@ -62,7 +62,10 @@ function ConceptDialog({ source, onClose, onApplied }: { source?: string; onClos
     try {
       const result = await api.conceptApply(context.current.activeCourseId, draft.id, [...selected].map(id => ({ id, name: names[id] ?? "" })));
       if (!current()) return;
-      await refreshPanelData(); onApplied?.();
+      await refreshPanelData();
+      await loadConceptCardStatus();
+      useAppStore.getState().bumpCourseDataRevision();
+      onApplied?.();
       useAppStore.getState().flashStatusBanner(`已采用 ${result.concepts} 个概念，${result.rebound} 张题卡已归属；原课程已备份`);
       onClose();
     } catch (exc) { setError(exc instanceof Error ? exc.message : String(exc)); }

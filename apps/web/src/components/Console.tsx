@@ -49,6 +49,7 @@ export default function Console() {
   const centerView = useAppStore((s) => s.centerView);
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const modeBanner = useAppStore((s) => s.modeBanner);
   usePanelData(); // 右栏：progress/mastery/heatmap 随激活项目刷新（T3.2）
 
 
@@ -281,6 +282,18 @@ export default function Console() {
       {/* 弹层（卸载式渲染，T3.5） */}
       {paletteOpen && <CommandPalette />}
       {settingsOpen && <SettingsDialog />}
+
+      {/* 全局状态横幅：今天/阅读/对话共用（原先只在 ChatArea，其他视图看不到
+          「已保存到笔记」「模型连通测试」这类反馈）。置于弹层之上，1.6s 自动消失。 */}
+      {modeBanner ? (
+        <div
+          key={modeBanner}
+          role="status"
+          className="banner-flash pointer-events-none absolute left-1/2 top-3 z-[200] -translate-x-1/2 rounded-full border border-border-line bg-bg-panel px-3 py-1 text-[12px] text-accent-focus shadow-lv2"
+        >
+          {modeBanner}
+        </div>
+      ) : null}
     </div>
   );
 }

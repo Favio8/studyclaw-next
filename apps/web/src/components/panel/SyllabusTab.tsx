@@ -124,6 +124,7 @@ export default function SyllabusTab() {
 function SyllabusLoader({ courseId }: { courseId: string }) {
   const mastery = useAppStore((s) => s.mastery);
   const buildStatus = useAppStore((s) => s.buildStatus);
+  const dataRevision = useAppStore((s) => s.courseDataRevision);
   const focusConceptId = useAppStore((s) => s.focusConceptId);
   const setFocusConcept = useAppStore((s) => s.setFocusConcept);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
@@ -168,7 +169,7 @@ function SyllabusLoader({ courseId }: { courseId: string }) {
     return () => {
       alive = false;
     };
-  }, [buildStatus, courseId]);
+  }, [buildStatus, courseId, dataRevision]);
 
   // 引用稳定是硬约束：statusMap 传入 SyllabusGraph 参与节点构建 memo 链，
   // 每次渲染新建会让 dagre 布局逐键重跑——搜索输入时相机复位、拖拽位置丢失、

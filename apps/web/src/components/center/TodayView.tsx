@@ -1,168 +1,310 @@
 "use client";
 
 /**
- * M4「今天」落地视图——**只回答一个问题：现在该做什么？**
+ * 「今天」落地视图——回答**一件事**：现在该做什么？
  *
- * 刻意的克制：首屏只有一个大数字和一个主按钮，其余全部是可折叠的次级项。
- * 这不是偷懒，而是产品判断——「今天」页的价值在于**替用户消除决策**；一旦
- * 堆满信息，它就退化成又一个需要解读的仪表盘，反而增加了决策负担。
+ * 设计取向（"案头的一张纸"，不是卡片架）：
+ * - 整页铺满中栏，用**空气与细线**分隔区域，不给每一节套卡盒；
+ * - 名言是唯一的陈列级元素（不加框），下方细线撑到右缘；
+ * - 全页只有**一个实心按钮**（当前主行动），其余动作一律是文字链接；
+ * - 边栏是"页边注"：小字 + 账目式 `dl`，放上下文（节奏 / 上次 / 资料 / 概览），
+ *   与主区的动作形成一条竖直细线的语义分隔。
  *
- * 主按钮的默认动作：有到期卡 → 去复习；没有到期但有刚划的重点 → 回顾原文。
+ * 与右栏分工：完整掌握度表 / 热力图 / 题卡统计仍在右栏，这里只放**可执行**的
+ * 下一步与一屏可读的上下文。
  */
 
-import { useState, useSyncExternalStore } from "react";
-import { BookMarked, ChevronDown, RotateCcw } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Plus } from "lucide-react";
 import { useAppStore } from "@/src/store/useAppStore";
+import { api } from "@/src/lib/api";
 import { quizLoad } from "@/src/lib/quizFlow";
-import { panelSurfaceClass } from "@/src/components/panel/PanelPrimitives";
+import { loadConceptCardStatus, startConceptFill } from "@/src/lib/conceptFillFlow";
+import { openMaterialsDialog } from "@/src/lib/materialsDialog";
+import { useSessionActions } from "@/src/hooks/useSessionActions";
+import { pct, relativeTime } from "@/src/lib/format";
+import { localDayKey } from "@/src/lib/quotes";
+import OnboardingGuide from "@/src/components/center/OnboardingGuide";
+import QuoteCard from "@/src/components/center/QuoteCard";
 
-type Action = "review" | "reading";
+/** 「该练的概念」最多展示条数（到期 → 薄弱 → 未测）。 */
+const FOCUS_LIMIT = 10;
+const WEAK_THRESHOLD = 0.6;
 
-/**
- * 默认落地页从「对话」改成「今天」会改变老用户的习惯，所以只在**首次**出现时
- * 给一次可跳过的说明，之后永不再来打扰（localStorage 记位）。
- */
-const EXPLAINED_KEY = "studyclaw.today.explained.v1";
-
-function subscribeExplanation(callback: () => void): () => void {
-  window.addEventListener("storage", callback);
-  return () => window.removeEventListener("storage", callback);
-}
-
-function explainedSnapshot(): boolean {
-  try { return window.localStorage.getItem(EXPLAINED_KEY) === "1"; } catch { return true; }
-}
-
-const explainedServerSnapshot = () => true;
-
-function useExplainedOnce(): readonly [boolean, () => void] {
-  const persisted = useSyncExternalStore(subscribeExplanation, explainedSnapshot, explainedServerSnapshot);
-  const [dismissed, setDismissed] = useState(false);
-  const dismiss = () => {
-    setDismissed(true);
-    try {
-      window.localStorage.setItem(EXPLAINED_KEY, "1");
-    } catch {
-      // 写不进去只影响"下次还会看到"，不影响本次使用。
-    }
-  };
-  return [persisted || dismissed, dismiss] as const;
-}
-
-function pickAction(dueCount: number, recentHighlights: number): Action | null {
-  if (dueCount > 0) return "review";
-  // 没有到期卡时，只有在确实有刚划的重点时才引导回顾——空状态不做无意义引导。
-  return recentHighlights > 0 ? "reading" : null;
-}
+/** 文字型动作（全页只有主行动是实心按钮，其余保持低视觉重量）。 */
+const linkClass = "shrink-0 rounded text-[13px] text-accent-focus transition-colors hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus";
 
 export default function TodayView() {
+  const courseId = useAppStore((s) => s.activeCourseId);
   const digest = useAppStore((s) => s.digest);
+  const progress = useAppStore((s) => s.progress);
   const heatmap = useAppStore((s) => s.heatmap);
+  const cardStatus = useAppStore((s) => s.conceptCardStatus);
+  const courseSessions = useAppStore((s) => s.courseSessions);
+  const sessions = useAppStore((s) => s.sessions);
   const setCenterView = useAppStore((s) => s.setCenterView);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const setRightPanelCollapsed = useAppStore((s) => s.setRightPanelCollapsed);
-  const [showMore, setShowMore] = useState(false);
-  const [explained, dismissExplained] = useExplainedOnce();
+  const setFocusConcept = useAppStore((s) => s.setFocusConcept);
+  const { selectSession, createSession } = useSessionActions();
+  const [materials, setMaterials] = useState<{ key: string; count: number } | null>(null);
+
+  // 概念补题入口的覆盖统计由右栏组件加载；「今天」不在右栏，这里补一次只读查询。
+  useEffect(() => {
+    if (courseId !== null) void loadConceptCardStatus();
+  }, [courseId]);
+
+  // 「资料」行：课程资料数（本地目录扫描，只读）。切课时旧结果不落地。
+  useEffect(() => {
+    if (courseId === null) return;
+    let alive = true;
+    void api.courseFiles(courseId)
+      .then((payload) => { if (alive) setMaterials({ key: courseId, count: payload.files.filter((file) => file.supported).length }); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [courseId]);
 
   const dueCount = digest?.dueCount ?? 0;
   const recentHighlights = digest?.recentHighlights ?? 0;
-  const action = pickAction(dueCount, recentHighlights);
+  const today = localDayKey();
+  const materialCount = materials !== null && materials.key === courseId ? materials.count : null;
 
-  function start() {
-    if (action === "review") {
-      // 必须走与活动切换完全同款的三步（切活动 → 聚焦右栏 → 装载复习流）。
-      // 早期版本只做了前两步，主按钮点了却是一片空白——quizFlow 的活跃流要显式
-      // quizLoad 才会去取题，光切视图不会触发。
-      setCenterView("chat");
-      setActiveTab("quiz");
-      setRightPanelCollapsed(false);
-      void quizLoad("review");
-      return;
-    }
-    setCenterView("reading");
+  function startReview(): void {
+    setCenterView("chat");
+    setActiveTab("quiz");
+    setRightPanelCollapsed(false);
+    void quizLoad("review");
   }
 
-  // 薄弱：还没测过、但已经有阅读接触的概念——最值得先验一验的那批。
-  const untested = (digest?.concepts ?? [])
-    .filter((concept) => concept.evals === 0 && concept.exposure > 0)
+  /** 只练某个概念：切到题卡并带上 conceptId（RPC 已支持）。 */
+  function practiceConcept(conceptId: string): void {
+    setFocusConcept(conceptId);
+    setCenterView("chat");
+    setActiveTab("quiz");
+    setRightPanelCollapsed(false);
+    void quizLoad("new", false, conceptId);
+  }
+
+  function practiceAnything(): void {
+    setCenterView("chat");
+    setActiveTab("quiz");
+    setRightPanelCollapsed(false);
+    void quizLoad("new");
+  }
+
+  function fillCards(): void {
+    setActiveTab("progress");
+    setRightPanelCollapsed(false);
+    void startConceptFill();
+  }
+
+  const concepts = digest?.concepts ?? [];
+  const untested = concepts.filter((concept) => concept.evals === 0 && concept.exposure > 0);
+
+  // 今天要做的事：每条都可执行；没有的项直接不渲染。
+  const todo: Array<{ id: string; text: string; action: string; run: () => void }> = [];
+  if (cardStatus !== null && cardStatus.modelReady && cardStatus.conceptOrigin === "semantic" && cardStatus.missingConcepts > 0) {
+    todo.push({ id: "cards", text: `还有 ${cardStatus.missingConcepts} 个概念没有题卡`, action: "补齐题卡", run: fillCards });
+  }
+  if (untested.length > 0) {
+    todo.push({ id: "practice", text: `「${untested[0]!.name}」等 ${untested.length} 个概念有划线但还没测过`, action: "去练习", run: () => practiceConcept(untested[0]!.id) });
+  }
+  if (recentHighlights > 0 && dueCount === 0) {
+    todo.push({ id: "highlights", text: `近 24 小时划了 ${recentHighlights} 条重点`, action: "回顾原文", run: () => setCenterView("reading") });
+  }
+
+  // 该练的概念：到期（应付）→ 薄弱（该补）→ 未测（该开始），去重后取前 N 条。
+  const dueConcepts = concepts
+    .filter((concept) => concept.nextReviewAt !== null && concept.nextReviewAt <= today)
+    .sort((a, b) => String(a.nextReviewAt).localeCompare(String(b.nextReviewAt)));
+  const dueIds = new Set(dueConcepts.map((concept) => concept.id));
+  const weakConcepts = concepts
+    .filter((concept) => concept.evals > 0 && concept.mastery < WEAK_THRESHOLD && !dueIds.has(concept.id))
+    .sort((a, b) => a.mastery - b.mastery);
+  const weakIds = new Set(weakConcepts.map((concept) => concept.id));
+  const freshConcepts = concepts
+    .filter((concept) => concept.evals === 0 && !dueIds.has(concept.id) && !weakIds.has(concept.id))
+    .sort((a, b) => b.exposure - a.exposure || a.name.localeCompare(b.name));
+  const focusList = [
+    ...dueConcepts.map((concept) => ({ concept, reason: "到期" as const })),
+    ...weakConcepts.map((concept) => ({ concept, reason: "薄弱" as const })),
+    ...freshConcepts.map((concept) => ({ concept, reason: "未测" as const })),
+  ].slice(0, FOCUS_LIMIT);
+
+  const weekTasks = (heatmap?.days ?? []).slice(-7).reduce((sum, day) => sum + day.tasks, 0);
+  const recentSession = [...(courseSessions[courseId ?? ""] ?? sessions)]
+    .sort((a, b) => String(b.lastActiveAt).localeCompare(String(a.lastActiveAt)))[0] ?? null;
+  const nothingToDo = dueCount === 0 && todo.length === 0;
+
+  const cardsTotal = concepts.reduce((sum, concept) => sum + concept.taskCount, 0);
+  const annotationsTotal = concepts.reduce((sum, concept) => sum + concept.annotationCount, 0);
+  const unevaluated = concepts.filter((concept) => concept.evals === 0).length;
+
+  // 主题掌握度（账目式边栏）：按章节聚合，只列最需要补的 3 个。
+  const chapterStats = new Map<string, { sum: number; count: number }>();
+  for (const concept of concepts) {
+    const chapter = concept.chapter || "未分组";
+    const current = chapterStats.get(chapter) ?? { sum: 0, count: 0 };
+    current.sum += concept.mastery;
+    current.count += 1;
+    chapterStats.set(chapter, current);
+  }
+  const weakestChapters = [...chapterStats.entries()]
+    .map(([chapter, stat]) => ({ chapter, mastery: stat.sum / stat.count, count: stat.count }))
+    .sort((a, b) => a.mastery - b.mastery)
     .slice(0, 3);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto px-6 py-8" data-focus-zone="center">
-      <h1 className="text-[13px] font-medium tracking-wide text-text-faint">今天</h1>
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto px-10 py-9" data-focus-zone="center">
+      <div className="flex w-full flex-1 flex-col gap-9">
+        <QuoteCard />
 
-      {!explained ? (
-        <div className={`mx-auto mt-4 max-w-md ${panelSurfaceClass} p-3`}>
-          <p className="text-[12px] leading-5 text-text-muted">
-            首屏换成了「今天」：只回答一个问题——现在该做什么。原来的对话在左边的活动栏，随时切回去。
-          </p>
-          <button
-            type="button"
-            onClick={dismissExplained}
-            className="mt-2 rounded-md border border-border-line px-2.5 py-1 text-[11px] text-text-muted transition-colors hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
-          >
-            知道了
-          </button>
+        <OnboardingGuide />
+
+        {/* 主区（动作）｜ 边栏（上下文）：一条竖直细线的语义分隔，不用卡片墙。 */}
+        <div className="grid min-w-0 grid-cols-1 gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)]">
+          <div className="flex min-w-0 flex-col gap-9">
+            <section className="flex flex-col gap-6">
+              {dueCount > 0 ? (
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+                  <span className="text-[30px] font-semibold leading-none tabular-nums text-text-primary">{dueCount}</span>
+                  <span className="text-[15px] text-text-secondary">张卡片到期复习</span>
+                  <button
+                    type="button"
+                    onClick={startReview}
+                    className="ml-auto inline-flex min-h-10 shrink-0 items-center rounded-md bg-accent-focus px-5 text-[13.5px] font-medium text-bg-panel transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-focus"
+                  >
+                    开始复习
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[15px] leading-7 text-text-secondary">
+                  {recentHighlights > 0 ? "今天没有到期的复习。" : "今天没有到期的复习，也没有待消化的重点。"}
+                </p>
+              )}
+
+              {todo.length > 0 ? (
+                <ul className="divide-y divide-border-line/60 border-y border-border-line/60">
+                  {todo.map((item) => (
+                    <li key={item.id} className="flex items-center gap-4 py-3.5">
+                      <span className="min-w-0 flex-1 truncate text-[14px] text-text-secondary" title={item.text}>{item.text}</span>
+                      <button type="button" onClick={item.run} className={linkClass}>{item.action}</button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {nothingToDo ? (
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                  <button type="button" onClick={practiceAnything} className={linkClass}>随机练一组题</button>
+                  <button type="button" onClick={() => setCenterView("reading")} className={linkClass}>读一份资料</button>
+                  <button type="button" onClick={() => { setCenterView("chat"); void createSession(); }} className={linkClass}>新建对话</button>
+                </div>
+              ) : null}
+            </section>
+
+            {focusList.length > 0 ? (
+              <section className="flex flex-col gap-2.5">
+                <h2 className="text-[13px] text-text-muted">该练的概念</h2>
+                <ul className="divide-y divide-border-line/60 border-t border-border-line/60">
+                  {focusList.map(({ concept, reason }, index) => (
+                    <li
+                      key={concept.id}
+                      className={`relative flex items-center gap-4 py-3 ${index === 0 ? "before:absolute before:inset-y-2.5 before:-left-4 before:w-[2px] before:rounded-full before:bg-accent-focus" : ""}`}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-[14px] text-text-primary" title={concept.name}>{concept.name}</span>
+                      <span className="shrink-0 tabular-nums text-[12.5px] text-text-faint">{pct(concept.mastery)}</span>
+                      <span
+                        className={`w-8 shrink-0 text-right text-[12px] ${reason === "到期" ? "text-accent-warn" : "text-text-faint"}`}
+                        title={reason === "到期" ? `已到复习日期${concept.nextReviewAt !== null ? `（${concept.nextReviewAt}）` : ""}` : reason === "薄弱" ? "掌握度偏低" : "从未评测过"}
+                      >
+                        {reason === "到期" && concept.nextReviewAt !== null ? `到期 ${concept.nextReviewAt.slice(5)}` : reason}
+                      </span>
+                      <button type="button" onClick={() => practiceConcept(concept.id)} className={`${linkClass} w-10 text-right`}>练它</button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </div>
+
+          {/* 边栏：页边注（小字 + 细线 + 账目式 dl），放上下文而不是动作。 */}
+          <aside className="flex min-w-0 flex-col gap-7 border-t border-border-line/60 pt-8 lg:border-l lg:border-t-0 lg:pl-12 lg:pt-0">
+            <section className="flex flex-col gap-1">
+              <p className="text-[14px] text-text-secondary">连续学习 {heatmap?.streak.current ?? 0} 天</p>
+              <p className="text-[12.5px] text-text-faint">近 7 天练了 {weekTasks} 题</p>
+            </section>
+
+            <section className="flex items-baseline gap-4">
+              {recentSession !== null ? (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-[13.5px] text-text-secondary" title={recentSession.title}>
+                    继续上次：{recentSession.title || "新对话"}
+                  </span>
+                  <span className="shrink-0 text-[12px] text-text-faint">{relativeTime(recentSession.lastActiveAt)}</span>
+                  <button type="button" onClick={() => { if (courseId !== null) void selectSession(recentSession.sessionId, courseId); }} className={linkClass}>继续</button>
+                </>
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-[13.5px] text-text-muted">还没有对话记录</span>
+                  <button type="button" onClick={() => { setCenterView("chat"); void createSession(); }} className={`${linkClass} inline-flex items-center gap-1`}>
+                    <Plus size={12} strokeWidth={1.9} aria-hidden />
+                    新建对话
+                  </button>
+                </>
+              )}
+            </section>
+
+            <section className="flex items-baseline gap-4">
+              <span className="min-w-0 flex-1 truncate text-[13.5px] text-text-secondary">
+                {materialCount === null ? "正在读取资料…" : materialCount > 0 ? `${materialCount} 份资料可阅读` : "还没有导入资料"}
+              </span>
+              {materialCount === 0 ? (
+                <button type="button" onClick={() => openMaterialsDialog("upload")} className={linkClass}>导入资料</button>
+              ) : (
+                <button type="button" onClick={() => setCenterView("reading")} className={linkClass}>去阅读</button>
+              )}
+            </section>
+
+            {concepts.length > 0 || progress !== null ? (
+              <section className="flex flex-col gap-2.5">
+                <h2 className="text-[13px] text-text-muted">课程概览</h2>
+                <dl className="divide-y divide-border-line/50 border-y border-border-line/60 text-[13px]">
+                  {([
+                    ["总体掌握度", pct(progress?.overallMastery ?? 0)],
+                    ["概念", String(concepts.length)],
+                    ["题卡", String(cardsTotal)],
+                    ["关联标注", String(annotationsTotal)],
+                  ] as const).map(([label, value]) => (
+                    <div key={label} className="flex items-baseline justify-between py-2">
+                      <dt className="text-text-faint" title={label === "关联标注" ? "已关联到概念的划线数（未关联的不计入）" : undefined}>{label}</dt>
+                      <dd className="tabular-nums text-text-primary">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <div className="flex items-center justify-between gap-3">
+                  {unevaluated > 0 ? <span className="text-[12.5px] text-text-faint">{unevaluated} 个概念还没测过</span> : <span />}
+                  <button type="button" onClick={() => { setActiveTab("syllabus"); setRightPanelCollapsed(false); }} className={linkClass}>看大纲</button>
+                </div>
+              </section>
+            ) : null}
+
+            {weakestChapters.length > 0 ? (
+              <section className="flex flex-col gap-2.5">
+                <h2 className="text-[13px] text-text-muted">需要补的主题</h2>
+                <ul className="divide-y divide-border-line/50 border-y border-border-line/60 text-[13px]">
+                  {weakestChapters.map((item) => (
+                    <li key={item.chapter} className="flex items-baseline justify-between gap-3 py-2">
+                      <span className="min-w-0 truncate text-text-secondary" title={item.chapter}>{item.chapter}</span>
+                      <span className="shrink-0 tabular-nums text-text-faint">{pct(item.mastery)} · {item.count} 个</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </aside>
         </div>
-      ) : null}
-
-      <div className="mt-6 flex flex-col items-center text-center">
-        {action === null ? (
-          <>
-            <p className="text-[15px] leading-7 text-text-secondary">
-              {recentHighlights > 0 ? "今天没有到期的复习。" : "今天没有到期的复习，也没有待消化的重点。"}
-            </p>
-            <p className="mt-1 text-[12px] text-text-faint">随时可以读资料、划重点，或新建一次对话。</p>
-          </>
-        ) : (
-          <>
-            {/* 主角数字必须与当前动作一致：没有到期卡却显示「0 张卡片待复习」
-                是纯粹的噪声，会让人以为页面坏了。 */}
-            <p className="text-[56px] font-semibold leading-none tabular-nums text-text-primary">
-              {action === "review" ? dueCount : recentHighlights}
-            </p>
-            <p className="mt-2 text-[13px] text-text-muted">
-              {action === "review" ? "张卡片待复习" : "条重点待回顾"}
-            </p>
-            <button
-              type="button"
-              onClick={start}
-              className="mt-6 inline-flex min-h-10 items-center gap-2 rounded-md bg-accent-focus px-6 text-[13px] font-medium text-bg-panel transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-focus"
-            >
-              {action === "review" ? <RotateCcw size={15} strokeWidth={1.9} aria-hidden /> : <BookMarked size={15} strokeWidth={1.9} aria-hidden />}
-              开始今天
-            </button>
-          </>
-        )}
       </div>
-
-      <div className="mt-8 flex flex-col items-center gap-1 text-[12px] text-text-faint">
-        连续学习 {heatmap?.streak.current ?? 0} 天
-      </div>
-
-      {(untested.length > 0 || recentHighlights > 0) && (
-        <div className="mt-6">
-          <button
-            type="button"
-            onClick={() => setShowMore((value) => !value)}
-            aria-expanded={showMore}
-            className="mx-auto flex items-center gap-1 text-[12px] text-text-faint transition-colors hover:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
-          >
-            <ChevronDown size={13} strokeWidth={1.8} className={showMore ? "rotate-180 transition-transform" : "transition-transform"} aria-hidden />
-            {showMore ? "收起" : "更多"}
-          </button>
-          {showMore ? (
-            <ul className={`mx-auto mt-3 max-w-md space-y-1.5 ${panelSurfaceClass} p-3 text-[12px] leading-5 text-text-muted`}>
-              {recentHighlights > 0 ? <li>近 24 小时划了 {recentHighlights} 条重点</li> : null}
-              {untested.map((concept) => (
-                <li key={concept.id} className="truncate">
-                  「{concept.name}」有 {concept.exposure} 条划线，还没测过
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      )}
     </div>
   );
 }

@@ -35,10 +35,21 @@ const { storeState, apiMocks, syllabusFine, syllabusCoarse } = vi.hoisted(() => 
       setSyllabusMindmapCollapsed: vi.fn(),
       syllabusStatusFilter: null,
       setSyllabusStatusFilter: vi.fn(),
+      courseDataRevision: 0,
+      conceptCardStatus: null,
+      conceptFill: {
+        courseId: null, jobId: null, status: "idle" as const, total: 0, coveredBefore: 0,
+        processed: 0, generated: 0, currentConcept: null, items: [] as unknown[], error: null, sharedProblem: null,
+      },
+      setConceptCardStatus: vi.fn(),
+      setSettingsOpen: vi.fn(),
+      setSettingsSection: vi.fn(),
     },
     apiMocks: {
       syllabus: vi.fn(),
       setSyllabusGranularity: vi.fn(),
+      conceptCardStatus: vi.fn(async () => ({ modelReady: true, conceptOrigin: "semantic", totalConcepts: 0, coveredConcepts: 0, missingConcepts: 0, missing: [], concepts: [] })),
+      courseFiles: vi.fn(async () => ({ files: [] })),
     },
     syllabusFine: base("fine"),
     syllabusCoarse: base("coarse"),
@@ -46,7 +57,10 @@ const { storeState, apiMocks, syllabusFine, syllabusCoarse } = vi.hoisted(() => 
 });
 
 vi.mock("../src/store/useAppStore", () => ({
-  useAppStore: (selector: (state: typeof storeState) => unknown) => selector(storeState),
+  useAppStore: Object.assign(
+    (selector: (state: typeof storeState) => unknown) => selector(storeState),
+    { getState: () => storeState },
+  ),
 }));
 vi.mock("../src/lib/api", () => ({ api: apiMocks }));
 vi.mock("../src/lib/panelData", () => ({

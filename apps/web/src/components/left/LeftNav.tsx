@@ -13,6 +13,7 @@ import {
   Archive,
   Check,
   ChevronRight,
+  Compass,
   Copy,
   Folder,
   FolderPlus,
@@ -35,6 +36,8 @@ import { abortActiveChat } from "@/src/lib/chatStream";
 import { abortActiveEval } from "@/src/lib/quizFlow";
 import { abortActiveWakeupEval } from "@/src/lib/wakeup";
 import { api } from "@/src/lib/api";
+import { registerMaterialsDialog } from "@/src/lib/materialsDialog";
+import { persistOnboardingHidden } from "@/src/lib/onboarding";
 import { modeLabel } from "@/src/lib/modes";
 import { relativeTime } from "@/src/lib/format";
 import { adoptWorkspace } from "@/src/lib/workspaceActions";
@@ -145,9 +148,16 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   const wizardOpen = useAppStore((s) => s.wizardOpen);
   const setWizardOpen = useAppStore((s) => s.setWizardOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const setSettingsSection = useAppStore((s) => s.setSettingsSection);
   const workspacePath = useAppStore((s) => s.workspacePath);
   const flashStatusBanner = useAppStore((s) => s.flashStatusBanner);
   const { selectSession, createSession, renameSession, forkSession, archiveSession, reorderSession } = useSessionActions();
+
+  function openOnboarding(): void {
+    persistOnboardingHidden(false);
+    useAppStore.getState().setOnboardingHidden(false);
+    useAppStore.getState().setCenterView("today");
+  }
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -155,6 +165,14 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
   const [materialsOpen, setMaterialsOpen] = useState(false);
   // 资料弹窗的默认页：左栏两个入口分别指定（上传到当前课 / 从项目建新课）。
   const [materialsInitialTab, setMaterialsInitialTab] = useState<"upload" | "import">("upload");
+  // F1：新手引导与场景提示可直达资料导入弹层（模块级 opener，避免复制弹层与上传逻辑）。
+  useEffect(() => {
+    registerMaterialsDialog((tab) => {
+      setMaterialsInitialTab(tab);
+      setMaterialsOpen(true);
+    });
+    return () => registerMaterialsDialog(null);
+  }, []);
   const searchAreaRef = useRef<HTMLDivElement>(null);
   const [remoteSearch, setRemoteSearch] = useState<RemoteSearchState>({
     query: "", status: "idle", items: [], hasMore: false,
@@ -1101,9 +1119,20 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
         </button>
         <button
           type="button"
+          aria-label="新手引导"
+          title="新手引导"
+          className="mt-auto mb-3 flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+          onClick={() => {
+            closeSearch();
+            openOnboarding();
+          }}
+        >
+          <Compass {...iconProps} aria-hidden />
+        </button>
+        <button
+          type="button"
           aria-label="设置"
           title={workspacePath ? "设置" : "请先添加/打开一个项目，再打开设置"}
-          className="mt-auto flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
           onClick={() => {
             // FL-03：未打开工作区时设置会写到宿主进程 cwd 的游离 `.studyclaw/`
             //（UI 报"已保存"，重启即失忆）——入口直接拦截并引导先建项目。
@@ -1111,6 +1140,7 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
               flashStatusBanner("⚠ 请先添加/打开一个项目，再打开设置（配置需要项目目录落盘）");
               return;
             }
+            setSettingsSection("general");
             setSettingsOpen(true);
           }}
         >
@@ -1392,10 +1422,24 @@ export default function LeftNav({ collapsed: railCollapsed = false, onExpand, on
       </div>
         <button
           type="button"
+          aria-label="打开新手引导"
+          title="新手引导"
+          onClick={() => {
+            closeSearch();
+            openOnboarding();
+          }}
+          className="flex h-[38px] w-full items-center gap-2 rounded-xl px-2.5 text-[14px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"
+        >
+          <Compass size={16} strokeWidth={1.8} aria-hidden />
+          <span>新手引导</span>
+        </button>
+        <button
+          type="button"
           aria-label="打开设置"
           title="设置"
           onClick={() => {
             closeSearch();
+            setSettingsSection("general");
             setSettingsOpen(true);
           }}
           className="flex h-[38px] w-full items-center gap-2 rounded-xl px-2.5 text-[14px] text-text-muted transition-colors hover:bg-bg-card hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-focus"

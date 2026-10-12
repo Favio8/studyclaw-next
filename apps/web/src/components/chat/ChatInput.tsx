@@ -117,7 +117,7 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
 
   function withReference(text: string): string {
     if (!reference) return text;
-    return `${text}\n\n引用资料：${reference.source} · 第 ${reference.page} 页\n原文：\n${reference.quote}${reference.result ? `\n\n${reference.kind === "translate" ? "译文" : "解释"}：\n${reference.result}` : ""}`;
+    return `${text}\n\n引用资料：${reference.source} · 第 ${reference.page} 页\n原文：\n${reference.quote}${reference.result ? `\n\n${reference.kind === "translate" ? "译文" : reference.kind === "summary" ? "概括" : "解释"}：\n${reference.result}` : ""}`;
   }
 
   const activeHighlight = Math.min(highlight, Math.max(0, candidates.length - 1));
@@ -191,7 +191,7 @@ export default function ChatInput({ onSend, onAnswer, onStop, streaming, hero }:
           <details className="min-w-0 flex-1">
             <summary className="cursor-pointer truncate text-accent-focus">引用 · {reference.source.split(/[\\/]/).pop()} · 第 {reference.page} 页</summary>
             <blockquote className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap leading-5 text-text-muted">{reference.quote}</blockquote>
-            {reference.result ? <div className="mt-2 max-h-40 overflow-auto text-text-faint"><p className="mb-1">{reference.kind === "translate" ? "译文" : "解释"}：</p><MarkdownView content={reference.result} compact modelOutput /></div> : null}
+            {reference.result ? <div className="mt-2 max-h-40 overflow-auto text-text-faint"><p className="mb-1">{reference.kind === "translate" ? "译文" : reference.kind === "summary" ? "概括" : "解释"}：</p><MarkdownView content={reference.result} compact modelOutput /></div> : null}
           </details>
           <button type="button" aria-label="移除引用" onClick={() => setComposerReference(draftKey, null)} className="shrink-0 rounded p-1 text-text-faint hover:bg-bg-card"><X size={13} /></button>
         </div> : null}

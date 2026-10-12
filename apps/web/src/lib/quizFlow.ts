@@ -40,8 +40,8 @@ export function abortActiveEval(): void {
   }
 }
 
-/** 拉取题卡并重置到该模式首题。 */
-export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise<void> {
+/** 拉取题卡并重置到该模式首题。`conceptId` 传值时只取该概念的卡（「该练的概念」入口）。 */
+export async function quizLoad(mode: "review" | "new", dueOnly = false, conceptId: string | null = null): Promise<void> {
   const scope = captureCourseScope();
   const courseId = scope.courseId;
   if (!courseId) return;
@@ -64,7 +64,7 @@ export async function quizLoad(mode: "review" | "new", dueOnly = false): Promise
     styleSuggestion: null,
   });
   try {
-    const { tasks } = await api.quiz(courseId, mode, 5, dueOnly);
+    const { tasks } = await api.quiz(courseId, mode, 5, conceptId, dueOnly);
     // W-2：切课守卫——await 期间用户切项目时，旧课程的题卡不得覆盖新课程的
     // quiz 状态（Console.tsx / panelData.ts 均有同类守卫，唯独此处缺失）：
     // 覆盖后再作答即用新 courseId + 旧 taskId 提交，评测落到错课程。

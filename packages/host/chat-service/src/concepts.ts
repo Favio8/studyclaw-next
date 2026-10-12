@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { renameWithRetry } from '@studyclaw/fs-atomic';
 import { resolveSourceRef, withCourseLock } from '@studyclaw/tools';
-import { courseDataDirectory, annotationsFile, createCourseBackup, LlmTaskGenerator, loadSyllabus, loadTaskPool, readSourceDocument, saveProgressBoard, loadProgressBoard, stateDirOf, structuredCall, writeTaskPool, type SourceBlock, type Concept } from '@studyclaw/course-builder';
+import { courseDataDirectory, annotationsFile, createCourseBackup, loadSyllabus, loadTaskPool, readSourceDocument, saveProgressBoard, loadProgressBoard, stateDirOf, structuredCall, type SourceBlock, type Concept } from '@studyclaw/course-builder';
 import { createDeepSeekToolClient } from './adapter.ts';
 import type { ResolvedChatConfig } from './config.ts';
 
@@ -207,34 +207,4 @@ export async function applyConcepts(root: string, draftId: string, edits: Array<
     }
     return { concepts: records.length, rebound, archived, backup };
   });
-}
-
-/** Generate only uncovered, adopted concepts; the existing question pool is reused. */
-export async function fillConceptCards(root: string, config: ResolvedChatConfig): Promise<{ generated: number; conceptsFilled: number }> {
-  const syllabus = await loadSyllabus(root);
-  if (syllabus.concept_origin !== 'semantic') throw new Error('请先预览并采用 AI 概念，再补齐题卡');
-  const pool = await loadTaskPool(root);
-  const missing = syllabus.chapters.flatMap(chapter => chapter.concepts.map(concept => ({ chapter, concept }))).filter(({ concept }) => !pool.some(task => !task.deprecated && task.concept_id === concept.id));
-  const client = createDeepSeekToolClient(config);
-  const generator = new LlmTaskGenerator({ stream: options => client.stream({ ...options, reasoningEffort: ReasoningEffortId('off') }) }, { provider: config.providerId || 'studyclaw', model: config.model, temperature: 0.2 });
-  let generated = 0, conceptsFilled = 0;
-  for (const { concept, chapter } of missing) {
-    const ref = concept.evidence?.[0];
-    if (!ref) throw new Error(`概念 ${concept.name} 没有可出题的原文依据`);
-    const path = await resolveSourceRef(root, ref.source);
-    const document = await readSourceDocument(path, ref.source, stateDirOf(root));
-    const context = document.blocks.filter(block => concept.evidence!.some(item => item.block_id === block.id)).map(block => block.text).join('\n\n');
-    if (!context) throw new Error('概念依据已过期，请重新提炼');
-    const cards = await generator.generateTasks({ chunk_id: ref.block_id, chapter_id: chapter.id, concept_id: concept.id, title: concept.name, content: `${concept.definition}\n学习目标：${concept.learning_objective}\n\n原文：\n${context}`, source_ref: { file: ref.source, chunk_id: ref.block_id, page: ref.page } }, 2);
-    await withCourseLock(root, async () => {
-      const current = await loadTaskPool(root);
-      if (current.some(task => !task.deprecated && task.concept_id === concept.id)) return;
-      if (!(await loadSyllabus(root)).chapters.some(chapter => chapter.concepts.some(item => item.id === concept.id))) throw new Error('课程概念已变化，请刷新');
-      const ids = new Set(current.map(task => task.task_id));
-      const unique = cards.map(card => ({ ...card, task_id: ids.has(card.task_id) ? `${card.task_id}_${randomUUID().slice(0, 8)}` : card.task_id }));
-      await writeTaskPool(root, [...current, ...unique]);
-      generated += unique.length; conceptsFilled++;
-    });
-  }
-  return { generated, conceptsFilled };
 }

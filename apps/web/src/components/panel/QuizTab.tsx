@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
 import { useState } from "react";
 import { AlertCircle, BookMarked, Check, CircleHelp, ListChecks, RefreshCw, Send, Sparkles, Target, X } from "lucide-react";
@@ -128,12 +128,22 @@ export default function QuizTab() {
   const courseId = useAppStore((s) => s.activeCourseId);
   const quiz = useAppStore((s) => s.quiz);
   const setQuiz = useAppStore((s) => s.setQuiz);
+  const dataRevision = useAppStore((s) => s.courseDataRevision);
 
   useEffect(() => {
     if (!courseId) return;
     quizReset();
     void quizLoad("review");
   }, [courseId]);
+
+  // F2：补题/采用概念后题池变化——没有正在进行的作答时重新取题，新卡立即可测验。
+  const revisionRef = useRef(dataRevision);
+  useEffect(() => {
+    if (revisionRef.current === dataRevision) return;
+    revisionRef.current = dataRevision;
+    const current = useAppStore.getState().quiz;
+    if (current.phase === "idle") void quizLoad(current.mode);
+  }, [dataRevision]);
 
   if (!courseId) {
     return <PanelEmptyState icon={Target} title="请选择一个项目" description="激活项目后即可进行复习或开始新的练习。" />;

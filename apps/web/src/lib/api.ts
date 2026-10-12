@@ -16,6 +16,10 @@ import type {
   ReadingLoadPayload,
   ReadingParsedPayload,
   ReadingProgressView,
+  SummaryEvent,
+  ConceptCardStatusView,
+  ConceptFillJobView,
+  ProviderTestView,
   WakeupCard,
   EvalEvent,
   HeatmapDayDetail,
@@ -289,7 +293,16 @@ export const api = {
   /** 指定项目的课程列表（M1 起经 RPC workspaces.courses 读取）。 */
   courseList: (path: string) => rpc<{ courses: CourseSummary[]; missing: boolean }>("workspaces.courses", { path }),
 
-  conceptCards: (courseId: string) => rpc<{generated: number; conceptsFilled: number}>("courses.concepts.cards", {courseId}),
+  /** F2：只读覆盖统计（不发送模型请求）。 */
+  conceptCardStatus: (courseId: string) =>
+    rpc<ConceptCardStatusView>("courses.concepts.cardStatus", { courseId }),
+  /** F2：启动补题任务，返回 jobId；进度/停止走 cardsStatus / cardsStop。 */
+  conceptCardFillStart: (courseId: string) =>
+    rpc<{ jobId: string }>("courses.concepts.cards", { courseId }),
+  conceptCardFillStatus: (jobId: string) =>
+    rpc<ConceptFillJobView>("courses.concepts.cardsStatus", { jobId }),
+  conceptCardFillStop: (jobId: string) =>
+    rpc<ConceptFillJobView>("courses.concepts.cardsStop", { jobId }),
   conceptDraft: (courseId: string, sources: string[]) => rpc<import("@/src/types/api").SemanticDraft>("courses.concepts.draft", { courseId, sources }),
   conceptApply: (courseId: string, draftId: string, edits: Array<{ id: string; name: string }>) => rpc<{ concepts: number; rebound: number; archived: number; backup: string }>("courses.concepts.apply", { courseId, draftId, edits }),
   syllabus: (courseId: string) =>
@@ -379,8 +392,8 @@ export const api = {
   reorderSession: (courseId: string, sessionId: string, beforeId?: string) =>
     rpc<{ sessions: SessionSummary[] }>("sessions.reorder", { courseId, sessionId, beforeId }),
 
-  quiz: (courseId: string, mode: "review" | "new", count = 5, dueOnly = false) =>
-    rpc<{ tasks: QuizTaskView[] }>("courses.quiz", { courseId, mode, count, ...(dueOnly ? { dueOnly } : {}) }),
+  quiz: (courseId: string, mode: "review" | "new", count = 5, conceptId: string | null = null, dueOnly = false) =>
+    rpc<{ tasks: QuizTaskView[] }>("courses.quiz", { courseId, mode, count, conceptId, ...(dueOnly ? { dueOnly } : {}) }),
 
   /** L1：某概念最近评测趋势（连续未过 → 前端提示换学习风格）。 */
   evalTrend: (courseId: string, conceptId: string, limit = 3) =>
@@ -463,6 +476,16 @@ export const api = {
   /** 划词翻译（SSE：token…/done/error）。 */
   readingTranslate: (source: string, selection: string, signal?: AbortSignal) =>
     streamSse<ReadingActionEvent>("/api/reading/translate", { source, selection }, undefined, signal),
+  /** F3：AI 阅读概括（SSE：stage/progress/result/done/error）。 */
+  readingSummarize: (
+    source: string,
+    options: { scope: "document" | "chapter"; currentPage: number; force?: boolean },
+    signal?: AbortSignal,
+  ) =>
+    streamSse<SummaryEvent>("/api/reading/summarize", { source, ...options }, undefined, signal),
+  /** F3：概括结果保存到课程笔记。 */
+  readingAppendSummary: (source: string, markdown: string) =>
+    rpc<{ appended: boolean }>("reading.appendSummary", { source, markdown }),
   /** 资料字节（带鉴权；pdf.js 自己发请求不带 Bearer token）。 */
   readingFileBytes: async (source: string): Promise<ArrayBuffer> => {
     const response = await fetch(`/api/reading.file?source=${encodeURIComponent(source)}`, {
@@ -663,6 +686,10 @@ export const api = {
 
   setProviderCredential: (providerId: string, apiKey: string) =>
     rpc<SettingsPayload>("settings.setCredential", { providerId, apiKey }),
+
+  /** G2：用户明确发起的真实连通测试（一次短响应生成）。 */
+  testProvider: (providerId?: string | null) =>
+    rpc<ProviderTestView>("settings.testProvider", providerId ? { providerId } : {}),
 
   deleteProvider: (providerId: string) =>
     rpc<SettingsPayload>("settings.deleteProvider", { providerId }),

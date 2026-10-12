@@ -48,9 +48,23 @@ export async function readRequestBody(
   maxBytes: number = MAX_JSON_BODY_BYTES,
   timeoutMs: number = REQUEST_BODY_TIMEOUT_MS,
 ): Promise<string> {
+  return (await readRequestBodyBuffer(request, maxBytes, timeoutMs)).toString('utf8')
+}
+
+/** M3：二进制请求体（课程备份归档）的上限。JSON 的 2 MiB 对归档来说太小——
+ *  base64 还会再膨胀三分之一，几 MB 的会话历史就能撞线（实测 2.64 MB 被拒）。
+ *  备份是用户主动的本地操作，但仍必须有上界，不能变成无限制的内存缓冲。 */
+export const MAX_BINARY_BODY_BYTES = 512 * 1024 * 1024
+
+/** 与 readRequestBody 同款保护，但返回原始字节（不解码 UTF-8，二进制会被破坏）。 */
+export async function readRequestBodyBuffer(
+  request: ChunkSource,
+  maxBytes: number = MAX_JSON_BODY_BYTES,
+  timeoutMs: number = REQUEST_BODY_TIMEOUT_MS,
+): Promise<Buffer> {
   const chunks: Buffer[] = []
   let total = 0
-  return await new Promise<string>((resolve, reject) => {
+  return await new Promise<Buffer>((resolve, reject) => {
     let tooLarge = false
     let settled = false
     const settle = (action: () => void): void => {
@@ -78,7 +92,7 @@ export async function readRequestBody(
         settle(() => reject(new PayloadTooLargeError(maxBytes)))
         return
       }
-      settle(() => resolve(Buffer.concat(chunks).toString('utf8')))
+      settle(() => resolve(Buffer.concat(chunks)))
     })
     request.on('error', error => settle(() => reject(error)))
     // 'close' 在正常 'end' 之后也会触发；settled 标记保证只结算一次。
@@ -129,4 +143,15 @@ export function isLoopbackOrigin(origin: string | undefined): boolean {
   } catch {
     return false
   }
+}
+
+/** Validate Host independently of Origin, including navigation/static requests. */
+export function isLoopbackHost(host: string | undefined): boolean {
+  if (host === undefined || host === '' || /[\s/\\?#@]/.test(host)) return false
+  try {
+    const parsed = new URL(`http://${host}`)
+    return parsed.pathname === '/' && parsed.search === '' && parsed.hash === ''
+      && parsed.username === '' && parsed.password === ''
+      && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+  } catch { return false }
 }

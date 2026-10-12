@@ -12,8 +12,9 @@
 
 import { spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertHostArtifacts } from './bundle-contract.mjs'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const cliDir = join(repoRoot, 'apps', 'cli')
@@ -58,6 +59,7 @@ const manifest = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf8')) 
 // CLI 自包含 bundle：tsc -b（project references）→ tsdown 打平为 lib/bin.js。
 run(process.execPath, [join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc'), '-b', 'tsconfig.json'], cliDir)
 run(process.execPath, [pkgBinInPnpmStore('tsdown', 'dist/run.mjs')], cliDir)
+assertHostArtifacts(join(cliDir, 'lib'))
 // Web 静态导出（next build，output: 'export' → apps/web/out）。serve 会托管
 // 该目录；npm 包本身不含它（体积考量），但发布流程要确认导出通路可用。
 run(process.execPath, [pkgBinInPnpmStore('next', 'dist/bin/next'), 'build'], join(repoRoot, 'apps', 'web'))
@@ -65,6 +67,7 @@ run(process.execPath, [pkgBinInPnpmStore('next', 'dist/bin/next'), 'build'], joi
 rmSync(stageDir, { recursive: true, force: true })
 mkdirSync(join(stageDir, 'lib'), { recursive: true })
 cpSync(join(cliDir, 'lib', 'bin.js'), join(stageDir, 'lib', 'bin.js'))
+cpSync(join(cliDir, 'lib', 'worker.cjs'), join(stageDir, 'lib', 'worker.cjs'))
 for (const name of ['README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
   cpSync(join(repoRoot, name), join(stageDir, name))
 }

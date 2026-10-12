@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "allowImportingTsExtensions": true,
+    "rootDir": "../..",
+    "types": ["node"]
+  },
+  "include": ["*.ts", "*.mjs", "../../apps/cli/tsdown.config.ts"],
+  "exclude": ["*.spec.ts"]
+}

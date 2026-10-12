@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { documentKind, officePreview } from '@studyclaw/course-builder'
 /**
  * StudyClaw CLI entry (M1): `studyclaw serve` runs the host — cordis
  * assembly (storage + workspace registry) and a node:http server that
@@ -14,7 +15,7 @@ import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, dirname, resolve } from 'node:path'
 import { readFile, realpath, stat } from 'node:fs/promises'
-import { readFileSync, rmSync, writeFileSync, createReadStream } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -57,17 +58,19 @@ import { resolveSourceRef } from '@studyclaw/tools'
 import { AgentRegistry } from '@studyclaw/agent'
 import { hostRpc, authHeaders, defaultClientDeps } from './lib/client.ts'
 import { UsageError } from './lib/args.ts'
-import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from './lib/http-guards.ts'
+import { isLoopbackHost, isLoopbackOrigin, MAX_BINARY_BODY_BYTES, PayloadTooLargeError, readRequestBody, readRequestBodyBuffer, RequestBodyTimeoutError, sanitizeErrorMessage } from './lib/http-guards.ts'
 import { installHostFileLogging } from './lib/host-logger.ts'
 import { installProcessGuards } from './lib/process-guards.ts'
 import { runAcpStdio } from './lib/acp-stdio.ts'
 import { createStaticHost } from './lib/static-host.ts'
+import { pipeFileResponse } from './lib/stream-file.ts'
 import type { StaticHost } from './lib/static-host.ts'
 import { quizCommand } from './commands/quiz.ts'
 import { reviewCommand } from './commands/review.ts'
 import { chatCommand } from './commands/chat.ts'
 import { syncCommand } from './commands/sync.ts'
 import { courseCommand } from './commands/course.ts'
+import { exportCommand, importCommand } from './commands/transfer.ts'
 
 function hostHome(): string {
   // NEW-007：env 覆盖先 resolve 成绝对路径（相对路径以进程 cwd 锚定），
@@ -532,15 +535,27 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
   const configFacts = async (): Promise<import('@studyclaw/chat-service').ResolvedChatConfig | null> =>
     registry.lastOpenedPath === '' ? null : await loadChatConfig(registry.lastOpenedPath).catch(() => null)
 
-  function wrapCourseService(): HostServices['courseService'] {
-    const activeRoot = (): string => registry.lastOpenedPath
+  function wrapCourseService(requestRoot?: string): HostServices['courseService'] {
+    const activeRoot = (): string => requestRoot ?? registry.lastOpenedPath
     const courseService = createCourseService(configFacts)
     return {
+      conceptCards: async courseId => courseService.conceptCards(activeRoot(), courseId),
+      conceptDraft: async (courseId, sources) => courseService.conceptDraft(activeRoot(), courseId, sources),
+      conceptApply: async (courseId, draftId, edits) => courseService.conceptApply(activeRoot(), courseId, draftId, edits),
       syllabus: async courseId => courseService.syllabus(activeRoot(), courseId),
       setGranularity: async (courseId, granularity) => courseService.setGranularity(activeRoot(), courseId, granularity),
       progress: async courseId => courseService.progress(activeRoot(), courseId),
       mastery: async courseId => courseService.mastery(activeRoot(), courseId),
       quiz: async (courseId, mode, count, conceptId, dueOnly) => courseService.quiz(activeRoot(), courseId, mode, count, conceptId, dueOnly),
+      exportCourse: async (courseId, format) => courseService.exportCourse(activeRoot(), courseId, format),
+      importCourse: async (courseId, base64, force) => {
+        const root = activeRoot()
+        const result = await courseService.importCourse(root, courseId, base64, force)
+        // Each folder is a project. A nested restored folder is invisible until registered.
+        await registry.create(join(root, result.courseId))
+        return result
+      },
+      digest: async courseId => courseService.digest(activeRoot(), courseId),
       files: async courseId => courseService.files(activeRoot(), courseId),
       workspaceFiles: async () => courseService.workspaceFiles(activeRoot()),
       sync: async (courseId, sessionId) => courseService.sync(activeRoot(), courseId, sessionId),
@@ -701,7 +716,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       archive: (courseId, sessionId) => archiveSession(registry.lastOpenedPath, courseId, sessionId),
       reorder: (courseId, sessionId, beforeId) => reorderSession(registry.lastOpenedPath, courseId, sessionId, beforeId),
       restore: (courseId, sessionId) => restoreSession(registry.lastOpenedPath, courseId, sessionId),
-      models: (courseId, sessionId) => sessionModels(registry.lastOpenedPath, courseId, sessionId),
+      models: (courseId, sessionId, currentOnly) => sessionModels(registry.lastOpenedPath, courseId, sessionId, currentOnly),
       selectModel: (courseId, sessionId, selection) => selectSessionModel(registry.lastOpenedPath, courseId, sessionId, selection),
       events: (courseId, sessionId, afterSeq) => sessionEvents(registry.lastOpenedPath, courseId, sessionId, afterSeq),
     },
@@ -913,6 +928,11 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
 
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json; charset=utf-8')
+    if (!isLoopbackHost(request.headers.host)) {
+      response.writeHead(403)
+      response.end(JSON.stringify({ error: { code: 'host-forbidden', message: 'Host must be a loopback address', details: null } }))
+      return
+    }
     const url = new URL(request.url ?? '/', 'http://localhost')
     // 健康探针最先放行：标准 LB/容器探针用 GET/HEAD，不能被 POST 守卫拦成 405。
     if (url.pathname === '/api/health') {
@@ -940,8 +960,76 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
       response.end(JSON.stringify({ error: { code: 'unauthorized', message: `缺少或错误的访问令牌（token 记录于 ${join(hostHome(), 'host.json')}，请求头 Authorization: Bearer <token>）`, details: null } }))
       return
     }
+      if (url.pathname === '/api/courses.import' && request.method === 'POST') {
+        const courseId = url.searchParams.get('courseId') ?? ''
+        const force = url.searchParams.get('force') === '1'
+        const root = registry.lastOpenedPath
+        void (async () => {
+          const fail = (status: number, code: string, message: string): void => {
+            response.writeHead(status)
+            response.end(JSON.stringify({ error: { code, message, details: null } }))
+          }
+          if (root === '') {
+            fail(400, 'invalid-request', '尚未打开工作区/未选课程')
+            return
+          }
+          try {
+            const body = await readRequestBodyBuffer(request, MAX_BINARY_BODY_BYTES)
+            const result = await wrapCourseService(root).importCourse(courseId, body.toString('base64'), force)
+            response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            response.end(JSON.stringify({ ok: true, result }))
+          } catch (error) {
+            const code = (error as { code?: string }).code
+            fail(code === 'payload-too-large' ? 413 : 400,
+              code ?? 'import-failed',
+              sanitizeErrorMessage(error instanceof Error ? error.message : String(error)))
+          }
+        })()
+        return
+      }
     if (request.method === 'GET' || request.method === 'HEAD') {
       // FL-21：非 /api 的 GET/HEAD 交给静态托管（Web UI）；/api 的 GET 仍 405。
+      // M3 数据可移植性：走**二进制**通道而不是 JSON+base64。
+      // JSON 请求体上限 2 MiB，而 base64 还要再膨胀三分之一——一份几 MB 的
+      // 会话历史归档就会被 413 拒掉（实测 2.64 MB），换机还原对真实用户直接不可用。
+      if (url.pathname === '/api/courses.export' && (request.method === 'GET' || request.method === 'HEAD')) {
+        const courseId = url.searchParams.get('courseId') ?? ''
+        const format = url.searchParams.get('format') ?? 'markdown'
+        const root = registry.lastOpenedPath
+        void (async () => {
+          const fail = (status: number, code: string, message: string): void => {
+            response.writeHead(status)
+            response.end(JSON.stringify({ error: { code, message, details: null } }))
+          }
+          if (root === '' || courseId.trim() === '') {
+            fail(400, 'invalid-request', root === '' ? '尚未打开工作区/未选课程' : 'courseId 不能为空')
+            return
+          }
+          if (format !== 'markdown' && format !== 'backup') {
+            fail(400, 'invalid-request', 'format 只支持 markdown 或 backup')
+            return
+          }
+          try {
+            const payload = await wrapCourseService(root).exportCourse(courseId, format)
+            const bytes = Buffer.from(payload.base64, 'base64')
+            response.writeHead(200, {
+              'Content-Type': format === 'markdown' ? 'text/markdown; charset=utf-8' : 'application/zip',
+              'Content-Length': bytes.length,
+              'Content-Disposition': `attachment; filename="${encodeURIComponent(payload.filename)}"`,
+              'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff',
+            })
+            if (request.method === 'HEAD') {
+              response.end()
+              return
+            }
+            response.end(bytes)
+          } catch (error) {
+            fail(400, 'export-failed', sanitizeErrorMessage(error instanceof Error ? error.message : String(error)))
+          }
+        })()
+        return
+      }
       if (url.pathname === '/api/reading.file') {
         // 阅读器取资料字节（pdf.js 渲染用）。路径守卫与 read_source 同款
         // （resolveSourceRef：源根内、拒绝穿越/隐藏段/8.3 短名），再限定 .pdf。
@@ -964,9 +1052,13 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
             badRequest(error instanceof Error ? error.message : String(error))
             return
           }
-          if (!target.toLowerCase().endsWith('.pdf')) {
-            badRequest('阅读器只直接渲染 .pdf（其他格式走解析视图）')
+          if (!['pdf', 'office', 'image'].includes(documentKind(target) ?? '')) {
+            badRequest('该格式请使用正文视图')
             return
+          }
+          if (documentKind(target) === 'office') {
+            try { target = await officePreview(target, join(root, '.studyclaw')) }
+            catch (error) { badRequest(error instanceof Error ? error.message : String(error)); return }
           }
           const info = await stat(target).catch(() => null)
           if (info === null || !info.isFile()) {
@@ -975,7 +1067,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
             return
           }
           response.writeHead(200, {
-            'Content-Type': 'application/pdf',
+            'Content-Type': documentKind(target) === 'image' ? (target.toLowerCase().endsWith('.png') ? 'image/png' : target.toLowerCase().endsWith('.webp') ? 'image/webp' : 'image/jpeg') : 'application/pdf',
             'Content-Length': info.size,
             'Cache-Control': 'no-store',
             'X-Content-Type-Options': 'nosniff',
@@ -984,7 +1076,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
             response.end()
             return
           }
-          createReadStream(target).pipe(response)
+          pipeFileResponse(target, response)
         })()
         return
       }
@@ -1237,7 +1329,8 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
         rejected.push({ file: '(后续文件)', reason: `超过单次 ${UPLOAD_MAX_FILES} 个文件的上限` })
       })
       busboy.on('file', (_name, stream, info) => {
-        const filename = info.filename.split(/[\\/]/).pop() ?? 'upload.txt'
+        // Busboy 允许 filename 缺省（无文件名的 part），不能直接解引用。
+        const filename = (info.filename ?? '').split(/[\\/]/).pop() ?? ''
         const safe = filename.replace(/[^\w.\u4e00-\u9fff-]/g, '_').slice(0, 120) || 'upload.txt'
         const tmpPath = join(sourcesDir, `.upload-${randomUUID()}.tmp`)
         const writeStream = createWriteStream(tmpPath)
@@ -1458,12 +1551,12 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
   /**
    * `POST /api/chat/stream` (SSE): one chat turn over the active workspace's
    * course. Frames: meta / thinking / token / tool / ask / sync / done / error.
-   * Client disconnect stops the write side; the turn keeps persisting.
+   * Client disconnect cancels execution; emitted events remain persisted.
    */
   async function handleChatStream(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse, body: string): Promise<void> {
     const abortController = new AbortController()
     request.once('aborted', () => abortController.abort('client'))
-    request.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
+    response.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
     let input: { courseId?: unknown; message?: unknown; mode?: unknown; sessionId?: unknown; turnId?: unknown; conceptId?: unknown; fileRefs?: unknown; effort?: unknown; requestId?: unknown }
     try {
       const parsed = JSON.parse(body === '' ? '{}' : body) as typeof input
@@ -1561,7 +1654,7 @@ async function serve(port: number, options: ServeOptions = {}): Promise<void> {
   async function handleAgentAnswerStream(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse, body: string): Promise<void> {
     const abortController = new AbortController()
     request.once('aborted', () => abortController.abort('client'))
-    request.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
+    response.once('close', () => { if (!response.writableEnded) abortController.abort('client') })
     let input: { agentId?: unknown; answer?: unknown; requestId?: unknown }
     try { input = JSON.parse(body === '' ? '{}' : body) as typeof input } catch {
       response.writeHead(400)
@@ -1773,6 +1866,10 @@ async function main(): Promise<void> {
     // HANDOFF 待办 #2：顶层 course 命令接线（list/show，quiz/review 复用的
     // resolveCourse 同源）。
     await courseCommand(args.slice(1))
+  } else if (command === 'export') {
+    await exportCommand(args.slice(1))
+  } else if (command === 'import') {
+    await importCommand(args.slice(1))
   } else {
     usage()
     process.exit(command === '--help' ? 0 : 1)

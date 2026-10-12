@@ -96,6 +96,39 @@ export interface RpcEnvelope<T> {
   error?: { code?: string; message?: string }
 }
 
+/**
+ * M3：二进制通道。课程备份走 JSON+base64 会被 2 MiB 的 JSON 请求体上限拒掉
+ * （且 base64 还要再膨胀三分之一），所以导出/导入改用原始字节流。
+ * 保留 `{ok:true,result}` 信封形状，让错误仍能结构化传达给 CLI。
+ */
+export async function hostBinary<T>(
+  path: string,
+  init: { method: 'GET' | 'POST'; body?: Buffer },
+  deps: ClientDeps = defaultClientDeps(),
+): Promise<T> {
+  const response = await doFetch(deps, `${deps.baseUrl}${path}`, {
+    method: init.method,
+    headers: { ...(init.body === undefined ? {} : { 'content-type': 'application/zip' }), ...authHeaders(deps) },
+    ...(init.body === undefined ? {} : { body: init.body as unknown as BodyInit }),
+  })
+  const envelope = await response.json().catch(() => null) as RpcEnvelope<T> | null
+  if (!response.ok || envelope?.ok !== true) {
+    throw new CliError(envelope?.error?.code ?? `HTTP_${response.status}`, envelope?.error?.message ?? response.statusText)
+  }
+  return envelope.result as T
+}
+
+/** M3：取回二进制响应体（导出）。错误以 JSON 信封返回，需先探 content-type。 */
+export async function hostDownload(path: string, deps: ClientDeps = defaultClientDeps()): Promise<Buffer> {
+  const response = await doFetch(deps, `${deps.baseUrl}${path}`, { method: 'GET', headers: authHeaders(deps) })
+  const type = response.headers.get('content-type') ?? ''
+  if (!response.ok || type.includes('application/json')) {
+    const envelope = await response.json().catch(() => null) as RpcEnvelope<never> | null
+    throw new CliError(envelope?.error?.code ?? `HTTP_${response.status}`, envelope?.error?.message ?? response.statusText)
+  }
+  return Buffer.from(await response.arrayBuffer())
+}
+
 /** Unary RPC: 信封 `{ok:true,result} | {ok:false,error}`。 */
 export async function hostRpc<T>(method: string, payload: unknown, deps: ClientDeps = defaultClientDeps()): Promise<T> {
   const response = await doFetch(deps, `${deps.baseUrl}/api/${method}`, {

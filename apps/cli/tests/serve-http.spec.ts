@@ -28,6 +28,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { createServer, request as httpRequest } from "node:http";
+import { createZip } from "../../../packages/course/builder/src/zip.ts";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -158,7 +160,7 @@ async function waitForExit(child: ChildProcess, timeoutMs = 20_000): Promise<voi
  * `%2e%2e` 当 double-dot 段归一化掉（请求根本到不了服务端），只有裸 socket 才能
  * 验证服务端自己对编码点号的处理。
  */
-async function rawGet(target: string): Promise<{ status: number; body: string }> {
+async function rawGet(target: string, authority = `127.0.0.1:${host!.port}`): Promise<{ status: number; body: string }> {
   const sock = net.connect(host!.port, "127.0.0.1");
   return new Promise((resolvePromise, rejectPromise) => {
     let raw = "";
@@ -173,7 +175,7 @@ async function rawGet(target: string): Promise<{ status: number; body: string }>
       const split = raw.indexOf("\r\n\r\n");
       resolvePromise({ status, body: split < 0 ? "" : raw.slice(split + 4) });
     });
-    sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${host!.port}\r\nConnection: close\r\n\r\n`);
+    sock.write(`GET ${target} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`);
   });
 }
 
@@ -219,6 +221,12 @@ const auth = (token: string | null = host!.token): Record<string, string> => ({
 });
 
 describe("serve HTTP 边界（集成）", () => {
+  it("非 loopback Host 不得获取注入 token 的静态页面", async () => {
+    const response = await rawGet("/", "attacker.invalid");
+    expect(response.status).toBe(403);
+    expect(response.body).not.toContain("window.__STUDYCLAW__");
+  });
+
   it("health 免 token 可达", async () => {
     const res = await fetch(`${base()}/api/health`, { signal: AbortSignal.timeout(8_000) });
     expect(res.status).toBe(200);
@@ -356,6 +364,66 @@ describe("serve HTTP 边界（集成）", () => {
       rmSync(project, { recursive: true, force: true });
     }
   }, 40_000);
+});
+
+describe("聊天 SSE 取消（真实 Host 与模型 HTTP）", () => {
+  it("POST 请求体已完成后，停止响应流仍取消后台工具循环", async () => {
+    let modelCalls = 0;
+    const model = createServer((request, response) => {
+      let body = "";
+      request.on("data", chunk => { body += chunk; });
+      request.on("end", () => {
+        const payload = JSON.parse(body) as { tools?: unknown[] };
+        const toolCall = (payload.tools?.length ?? 0) > 0;
+        if (toolCall) modelCalls += 1;
+        setTimeout(() => {
+          if (response.destroyed) return;
+          response.writeHead(200, { "Content-Type": "text/event-stream" });
+          const delta = toolCall ? { tool_calls: [{ index: 0, id: `state-${modelCalls}`, type: "function", function: { name: "get_course_state", arguments: "{}" } }] } : { content: "测试对话" };
+          response.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "mock", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+          response.end("data: [DONE]\n\n");
+        }, 100);
+      });
+    });
+    await new Promise<void>(resolve => model.listen(0, "127.0.0.1", resolve));
+    const address = model.address() as net.AddressInfo;
+    const previous = process.env.STOP_CHAT_TEST_KEY;
+    process.env.STOP_CHAT_TEST_KEY = "test-key";
+    let fixtureHost: HostHandle | undefined;
+    const controller = new AbortController();
+    try {
+      fixtureHost = await startHost();
+      const course = join(fixtureHost.home, "course");
+      mkdirSync(join(course, ".studyclaw"), { recursive: true });
+      writeFileSync(join(course, ".studyclaw", "config.yaml"), `version: 1\nllm:\n  provider: mock\n  model: mock\n  api_key_env: STOP_CHAT_TEST_KEY\n  api_base: http://127.0.0.1:${address.port}/v1\n`);
+      const base = `http://127.0.0.1:${fixtureHost.port}`;
+      const headers = { Authorization: `Bearer ${fixtureHost.token}`, "Content-Type": "application/json" };
+      const opened = await fetch(`${base}/api/workspaces.open`, { method: "POST", headers, body: JSON.stringify({ payload: { path: course } }) });
+      expect((await opened.json() as { ok: boolean }).ok).toBe(true);
+      const response = await fetch(`${base}/api/chat/stream`, { method: "POST", headers, body: JSON.stringify({ courseId: "course", message: "持续查询课程状态", mode: "quick" }), signal: controller.signal });
+      expect(response.ok).toBe(true);
+      const reader = response.body!.getReader();
+      await reader.read();
+      const deadline = Date.now() + 10_000;
+      while (modelCalls < 2 && Date.now() < deadline) await sleep(20);
+      expect(modelCalls).toBeGreaterThanOrEqual(2);
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+      await sleep(250);
+      const stoppedAt = modelCalls;
+      await sleep(450);
+      expect(modelCalls).toBe(stoppedAt);
+    } finally {
+      controller.abort();
+      stop(fixtureHost);
+      if (fixtureHost !== undefined) await waitForExit(fixtureHost.child);
+      if (previous === undefined) delete process.env.STOP_CHAT_TEST_KEY;
+      else process.env.STOP_CHAT_TEST_KEY = previous;
+      model.closeAllConnections();
+      await new Promise<void>(resolve => model.close(() => resolve()));
+    }
+  });
 });
 
 describe("MinerU 解析接入（集成）", () => {
@@ -570,9 +638,126 @@ describe("reading.parsed 解析视图（集成）", () => {
     }
   }, 30_000);
 });
+describe("M3 二进制导出/导入通道（真实 Host）", () => {
+  /** 造一份**不可压缩**的历史数据，确保归档真的越过 2 MiB 这条线。 */
+  function writeFatCourse(dir: string): void {
+    const state = join(dir, ".studyclaw");
+    mkdirSync(join(state, "tasks"), { recursive: true });
+    mkdirSync(join(state, "history"), { recursive: true });
+    let seed = 24681357;
+    const nextInt = (): number => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed };
+    for (let i = 0; i < 260; i += 1) {
+      let chunk = "";
+      for (let j = 0; j < 16000; j += 1) chunk += String.fromCharCode(33 + (nextInt() % 90));
+      writeFileSync(join(state, "history", `sess-${i}.events.jsonl`), chunk, "utf8");
+    }
+    writeFileSync(join(state, "notes.md"), "# 笔记\n跨机还原验证\n", "utf8");
+  }
+
+  it("超过 2 MiB 的课程能完整导出并还原（JSON+base64 会在此被 413 拒掉）", async () => {
+    // 「项目即课程」：工作区就是课程目录，courseId 必须等于目录名。
+    const courseDir = mkdtempSync(join(tmpdir(), "studyclaw-e2e-"));
+    const courseId = basename(courseDir);
+    writeFatCourse(courseDir);
+    const target = mkdtempSync(join(tmpdir(), "studyclaw-e2e-target-"));
+    try {
+      const opened = await fetch(`${base()}/api/workspaces.open`, {
+        method: "POST", headers: auth(), body: JSON.stringify({ payload: { path: courseDir } }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      expect(opened.status).toBe(200);
+
+      const exported = await fetch(
+        `${base()}/api/courses.export?courseId=${encodeURIComponent(courseId)}&format=backup`,
+        { headers: { authorization: `Bearer ${host!.token}` }, signal: AbortSignal.timeout(120_000) });
+      expect(exported.status).toBe(200);
+      expect(exported.headers.get("content-type")).toBe("application/zip");
+      const archive = Buffer.from(await exported.arrayBuffer());
+      // 前提成立：这份归档按 base64 走 JSON 一定过不去。
+      expect(archive.toString("base64").length).toBeGreaterThan(2 * 1024 * 1024);
+
+      const opened2 = await fetch(`${base()}/api/workspaces.open`, {
+        method: "POST", headers: auth(), body: JSON.stringify({ payload: { path: target } }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      expect(opened2.status).toBe(200);
+
+      const imported = await fetch(`${base()}/api/courses.import`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${host!.token}`, "content-type": "application/zip" },
+        body: archive,
+        signal: AbortSignal.timeout(120_000),
+      });
+      expect(imported.status).toBe(200);
+      const envelope = await imported.json() as { ok?: boolean; result?: { courseId: string } };
+      expect(envelope.ok).toBe(true);
+      expect(envelope.result?.courseId).toBe(courseId);
+
+      const restoredHistory = join(target, courseId, ".studyclaw", "history");
+      expect(existsSync(restoredHistory)).toBe(true);
+      expect(readdirSync(restoredHistory).length).toBeGreaterThan(100);
+      expect(readFileSync(join(target, courseId, ".studyclaw", "notes.md"), "utf8")).toContain("跨机还原验证");
+      const workspaces = await fetch(`${base()}/api/workspaces.list`, {
+        method: "POST", headers: auth(), body: JSON.stringify({ payload: {} }),
+      });
+      const tree = await workspaces.json() as { result: { items: Array<{ path: string }> } };
+      expect(tree.result.items.some(item => item.path === join(target, courseId))).toBe(true);
+    } finally {
+      rmSync(courseDir, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  }, 240_000);
+
+  it("导出参数非法时给 400 而不是 500", async () => {
+    for (const query of ["courseId=&format=backup", "courseId=course&format=pdf"]) {
+      const res = await fetch(`${base()}/api/courses.export?${query}`, {
+        headers: { authorization: `Bearer ${host!.token}` }, signal: AbortSignal.timeout(15_000),
+      });
+      expect(res.status).toBe(400);
+    }
+  }, 30_000);
+
+  it("上传归档期间切项目，仍还原到请求开始时的目标", async () => {
+    const first = mkdtempSync(join(tmpdir(), "studyclaw-import-first-"));
+    const second = mkdtempSync(join(tmpdir(), "studyclaw-import-second-"));
+    const activate = async (path: string) => {
+      const result = await fetch(`${base()}/api/workspaces.open`, {
+        method: "POST", headers: auth(), body: JSON.stringify({ payload: { path } }),
+      });
+      expect(result.status).toBe(200);
+    };
+    const archive = createZip([
+      { path: "studyclaw-export.json", data: Buffer.from(JSON.stringify({ studyclaw_export: 1, course_id: "arrival" })) },
+      { path: ".studyclaw/notes.md", data: Buffer.from("original target") },
+    ]);
+    let upload: ReturnType<typeof httpRequest> | null = null;
+    try {
+      await activate(first);
+      upload = httpRequest(`${base()}/api/courses.import`, {
+        method: "POST", headers: { authorization: `Bearer ${host!.token}`, expect: "100-continue", "content-length": archive.length },
+      });
+      const response = new Promise<number>((resolve, reject) => {
+        upload!.once("error", reject);
+        upload!.once("response", incoming => { incoming.resume(); resolve(incoming.statusCode!); });
+      });
+      const continued = new Promise<void>(resolve => upload!.once("continue", resolve));
+      upload.flushHeaders();
+      await continued;
+      await activate(second);
+      upload.end(archive);
+      expect(await response).toBe(200);
+      expect(readFileSync(join(first, "arrival", ".studyclaw", "notes.md"), "utf8")).toBe("original target");
+      expect(existsSync(join(second, "arrival"))).toBe(false);
+    } finally {
+      upload?.destroy();
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("serve 关停与实例锁", () => {
-  it("C-1 回归：优雅关停后 host.json 与 host.lock 均被删除", async () => {
-    if (isWin) return; // Windows 无信号语义，SIGINT 被映射为强杀
+  it.skipIf(isWin)("C-1 回归：优雅关停后 host.json 与 host.lock 均被删除", async () => {
     const target = host!;
     const exiting = waitForExit(target.child);
     signalGracefully(target, "SIGINT");

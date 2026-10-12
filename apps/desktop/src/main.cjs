@@ -42,7 +42,7 @@ function paths() {
   const resourcesRoot = app.isPackaged ? process.resourcesPath : join(__dirname, '..', 'resources')
   const hostBundle = join(resourcesRoot, 'host', 'bin.js')
   const webDist = join(resourcesRoot, 'web')
-  return { resourcesRoot, hostBundle, webDist }
+  return { resourcesRoot, hostBundle, webDist, hostHome }
 }
 
 /** C-3：崩溃退避重启的挂起计时器——startHost 成功即取消（被顶替），stopHost
@@ -79,14 +79,21 @@ function startHost() {
     STUDYCLAW_WEB_DIST: webDist,
     NODE_ENV: 'production',
   }
-  host = spawn(process.execPath, [hostBundle, 'serve', '--port', '0'], {
+  const child = spawn(process.execPath, [hostBundle, 'serve', '--port', '0'], {
     env,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  host.stdout?.on('data', d => process.stdout.write(`[host] ${d}`))
-  host.stderr?.on('data', d => process.stderr.write(`[host] ${d}`))
-  host.on('exit', (code, signal) => {
+  host = child
+  child.stdout?.on('data', d => process.stdout.write(`[host] ${d}`))
+  child.stderr?.on('data', d => process.stderr.write(`[host] ${d}`))
+  child.on('error', error => {
+    if (host !== child) return
+    host = null
+    fatal(`无法启动本地学习服务：${error.message}`)
+  })
+  child.on('exit', (code, signal) => {
+    if (host !== child) return
     host = null
     if (quitting || isDev) return
     console.error(`[desktop] host exited code=${code} signal=${signal}`)
@@ -108,9 +115,9 @@ function startHost() {
         const target = `http://127.0.0.1:${cfg.port}/`
         const existing = BrowserWindow.getAllWindows()
         if (existing.length > 0) {
-          for (const w of existing) void w.loadURL(target)
+          return Promise.all(existing.map(w => w.loadURL(target)))
         } else {
-          void createMainWindow()
+          return createMainWindow()
         }
       }).catch(() => fatal('本地服务重启失败，请查看日志：' + join(hostHome, 'logs')))
     }, wait)
@@ -153,7 +160,7 @@ function stopHost() {
 function readHostConfig() {
   try {
     const cfg = JSON.parse(readFileSync(hostJsonPath, 'utf8'))
-    if (Number.isInteger(cfg.port) && cfg.port > 0) return cfg
+    if (Number.isInteger(cfg.port) && cfg.port > 0 && cfg.port <= 65535) return cfg
   } catch {}
   return null
 }
@@ -165,7 +172,7 @@ function waitForHost() {
       const cfg = readHostConfig()
       // pid 复核兜底（与 smoke-sidecar 同法）：host.json 是跨会话残留文件，
       // 只有本次 spawn 的 Host 写出的配置才能用于握手。
-      if (cfg && (host === null || cfg.pid === host.pid)) return resolve(cfg)
+      if (cfg && host !== null && cfg.pid === host.pid) return resolve(cfg)
       if (Date.now() - t0 > START_TIMEOUT_MS) return reject(new Error('host-start-timeout'))
       setTimeout(tick, 150)
     }
@@ -198,7 +205,7 @@ async function createMainWindow() {
   })
   // 外链一律走系统浏览器，绝不在应用内开新窗。
   win.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (/^https?:\/\//.test(target)) shell.openExternal(target)
+    openExternalWebLink(target)
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', (e, target) => {
@@ -206,11 +213,25 @@ async function createMainWindow() {
     // ——任意 localhost 端口放行会把"页内脚本可取 token"的面放大到同机全部
     // 本地服务。其余一律外开系统浏览器（与 setWindowOpenHandler 同语义）。
     const cfg = isDev ? { port: null } : readHostConfig()
-    const allowed = isDev ? target.startsWith(DEV_URL) : (cfg !== null && target.startsWith(`http://127.0.0.1:${cfg.port}/`))
-    if (!allowed) { e.preventDefault(); shell.openExternal(target) }
+    const base = isDev ? DEV_URL : cfg === null ? null : `http://127.0.0.1:${cfg.port}/`
+    let allowed = false
+    try {
+      const parsed = new URL(target)
+      allowed = base !== null && (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+        && parsed.origin === new URL(base).origin
+    } catch {}
+    if (!allowed) { e.preventDefault(); openExternalWebLink(target) }
   })
   await win.loadURL(url)
   win.on('closed', () => { win = null })
+}
+
+function openExternalWebLink(target) {
+  try {
+    const parsed = new URL(target)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+    void Promise.resolve(shell.openExternal(parsed.href)).catch(error => console.error('[desktop] 外链打开失败', error))
+  } catch {}
 }
 
 function fatal(message) {
@@ -244,6 +265,7 @@ if (!gotLock) { app.quit() } else {
   app.on('second-instance', () => {
     if (!win) return
     if (win.isMinimized()) win.restore()
+    win.show()
     win.focus()
   })
 
@@ -265,7 +287,7 @@ if (!gotLock) { app.quit() } else {
       if (host === null && !isDev) startHost()
       void createMainWindow().catch(e => fatal(`无法连接本地学习服务（${String(e && e.message || e)}）。数据目录：${hostHome}`))
     })
-  })
+  }).catch(error => fatal(`桌面初始化失败：${String(error && error.message || error)}`))
 
   app.on('before-quit', () => { quitting = true; stopHost() })
   app.on('window-all-closed', () => {
@@ -295,4 +317,15 @@ ipcMain.handle('studyclaw:host-info', () => {
   if (isDev) return { dev: true }
   const cfg = readHostConfig()
   return { dev: false, port: cfg === null ? null : cfg.port }
+})
+
+// 设置页「打开数据目录」：只在桌面壳里可用，纯 Web 端没有这个动作。
+// 固定只开 hostHome 这一个已解析路径，不接受前端传入的任意路径参数——
+// 否则渲染进程一旦被注入脚本，就能借这个通道打开任意本地目录。
+ipcMain.handle('studyclaw:open-data-dir', async () => {
+  const target = paths().hostHome
+  if (!existsSync(target)) mkdirSync(target, { recursive: true })
+  const error = await shell.openPath(target)
+  if (error !== '') throw new Error(error)
+  return { opened: true }
 })

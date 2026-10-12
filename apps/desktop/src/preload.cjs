@@ -6,6 +6,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 // C-5：host-info 只返回 {dev, port}，不透出 host.json 全文（含访问 token）。
 contextBridge.exposeInMainWorld('studyclawDesktop', {
   hostInfo: () => ipcRenderer.invoke('studyclaw:host-info'),
+  // 固定开 hostHome，不接受渲染进程传路径（见 main.cjs 同名 handler 的注释）。
+  openDataDir: () => ipcRenderer.invoke('studyclaw:open-data-dir'),
   isDesktop: true,
   platform: process.platform,
 })

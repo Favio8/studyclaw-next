@@ -17,6 +17,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdirSync } from 'node:fs'
+import { smokeDirectoryPicker } from '../../../scripts/release/smoke-directory-picker.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const desktop = resolve(here, '..')
@@ -77,6 +79,11 @@ try {
   const asset = await fetch(`http://127.0.0.1:${cfg.port}/icon.svg`)
   console.log('[smoke] GET /icon.svg   →', asset.status)
 
+  const pickerFixture = join(home, "内测 一📚 O'Brien 资料")
+  mkdirSync(pickerFixture)
+  await smokeDirectoryPicker({ base: `http://127.0.0.1:${cfg.port}`, token: cfg.token,
+    hostPid: cfg.pid, directory: pickerFixture })
+
   const ok = root.ok && injected && health.ok && asset.ok
 
   quitting = true
@@ -133,12 +140,13 @@ try {
   const pass = ok && cfg2 !== null && rehealthy
   console.log(pass ? '[smoke] RESULT: PASS' : '[smoke] RESULT: FAIL')
   if (!ok) console.log('[smoke] tail:', out.slice(-600))
-  process.exit(pass ? 0 : 1)
+  process.exitCode = pass ? 0 : 1
 } catch (error) {
   quitting = true
   console.error('[smoke] FAIL:', error instanceof Error ? error.message : error)
+  console.error('[smoke] Host diagnostic:', out.slice(-2000))
   try { child.kill('SIGKILL') } catch { /* already gone */ }
-  process.exit(1)
+  process.exitCode = 1
 } finally {
   rmSync(home, { recursive: true, force: true })
 }

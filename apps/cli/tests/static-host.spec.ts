@@ -3,7 +3,7 @@
  * 坏路径 400、tap 注入 bootstrap（token）。
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -25,6 +25,16 @@ async function makeDist(files: Record<string, string>): Promise<string> {
 }
 
 describe('createStaticHost', () => {
+  it('静态资源不能经目录链接泄漏 dist 外文件', async () => {
+    const root = await makeDist({ 'index.html': '<html>ok</html>' })
+    const outside = await makeDist({ 'fixture.txt': 'OUTSIDE STATIC FIXTURE' })
+    await symlink(outside, join(root, 'linked'), 'junction')
+    const host = (await createStaticHost({ root }))!
+    const result = await host.respond('/linked/fixture.txt')
+    expect(result?.status).toBe(403)
+    expect(String(result?.body)).not.toContain('OUTSIDE STATIC FIXTURE')
+  })
+
   it('dist 缺失时返回 null（宿主保持纯 API 行为）', async () => {
     const host = await createStaticHost({ root: join(await mkdtemp(join(tmpdir(), 'studyclaw-empty-')), 'nope') })
     expect(host).toBeNull()

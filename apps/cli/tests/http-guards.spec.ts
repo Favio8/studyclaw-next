@@ -8,13 +8,22 @@ import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
-import { isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from '../src/lib/http-guards.ts'
+import { isLoopbackHost, isLoopbackOrigin, PayloadTooLargeError, readRequestBody, RequestBodyTimeoutError, sanitizeErrorMessage } from '../src/lib/http-guards.ts'
 
 class FakeRequest extends EventEmitter {
   destroy(): void {
     this.emit('close')
   }
 }
+
+describe('loopback Host', () => {
+  it.each(['localhost:8080', '127.0.0.1:8080', '[::1]:8080', 'LOCALHOST'])('允许 %s', host => {
+    expect(isLoopbackHost(host)).toBe(true)
+  })
+  it.each([undefined, '', 'attacker.invalid', 'localhost.attacker.invalid', 'localhost/path', 'user@localhost', 'localhost:99999'])('拒绝 %s', host => {
+    expect(isLoopbackHost(host)).toBe(false)
+  })
+})
 
 function writeChunks(request: FakeRequest, chunks: Buffer[]): void {
   queueMicrotask(() => {

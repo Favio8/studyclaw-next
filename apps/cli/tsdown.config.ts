@@ -14,7 +14,7 @@ import { defineConfig } from 'tsdown'
  *   崩溃，且需要从包目录读取 cmaps/字体等静态资产）——两者由发布清单声明，
  *   经 npm 正常安装。
  */
-export default defineConfig({
+export default defineConfig([{
   entry: ['lib/types/bin.js'],
   outDir: 'lib',
   format: ['esm'],
@@ -23,8 +23,24 @@ export default defineConfig({
   fixedExtension: false,
   dts: false,
   clean: false,
+  // Packaging and desktop assembly copy bin.js as a standalone entry.
+  // Inline bundled dynamic imports (including multipart upload's Busboy).
+  outputOptions: { codeSplitting: false },
   deps: {
     alwaysBundle: [/^@studyclaw\//, /^@deepseek-ai\//, 'busboy', 'js-yaml', 'mammoth', 'turndown', 'xlsx', 'zod'],
     neverBundle: ['koffi', 'pdf-parse'],
   },
-})
+}, {
+  // A process entry cannot be inlined into bin.js: spawnDialogWorker resolves
+  // this sibling at runtime, outside the module import graph.
+  entry: { worker: '../../packages/host/directory-picker-native/lib/types/win32-dialog-worker.js' },
+  outDir: 'lib',
+  format: ['cjs'],
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: true,
+  dts: false,
+  clean: false,
+  outputOptions: { codeSplitting: false },
+  deps: { neverBundle: ['koffi'] },
+}])

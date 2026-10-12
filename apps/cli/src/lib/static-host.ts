@@ -7,8 +7,8 @@
  * @module @studyclaw/cli/lib/static-host
  */
 
-import { readFile, stat } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export interface StaticHostOptions {
   /** Static dist root（apps/web 的 export 产物目录）。 */
@@ -69,8 +69,8 @@ function withBootstrapTap(html: string, bootstrap: Record<string, unknown> | nul
 }
 
 export async function createStaticHost(options: StaticHostOptions): Promise<StaticHost | null> {
-  const root = resolve(options.root)
-  if ((await stat(root).catch(() => null))?.isDirectory() !== true) return null
+  const root = await realpath(resolve(options.root)).catch(() => null)
+  if (root === null || (await stat(root).catch(() => null))?.isDirectory() !== true) return null
   const indexCache = new Map<string, string>()
 
   return {
@@ -88,20 +88,28 @@ export async function createStaticHost(options: StaticHostOptions): Promise<Stat
         return { status: 403, body: JSON.stringify({ error: { code: 'forbidden', message: 'path traversal is not allowed', details: null } }), contentType: MIME['.json']! }
       }
       let filePath = candidate
-      const info = await stat(filePath).catch(() => null)
+      let info = await stat(filePath).catch(() => null)
       if (info === null || info.isDirectory()) {
         // SPA 回落：无扩展名的路由未命中 → index.html。
         if (info === null && /\.[A-Za-z0-9]+$/.test(decoded)) return null
         filePath = join(root, 'index.html')
         const indexInfo = await stat(filePath).catch(() => null)
         if (indexInfo === null || !indexInfo.isFile()) return null
+        info = indexInfo
       }
+      const canonical = await realpath(filePath).catch(() => null)
+      if (canonical === null) return null
+      const rel = relative(root, canonical)
+      if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        return { status: 403, body: JSON.stringify({ error: { code: 'forbidden', message: 'symlink escapes static root', details: null } }), contentType: MIME['.json']! }
+      }
+      filePath = canonical
       const file = await readFile(filePath).catch(() => null)
       if (file === null) return null
       let body: Buffer | string = file
       if (filePath.toLowerCase().endsWith('.html')) {
         // index.html 按 (root, mtime) 缓存 tap 注入结果，避免每请求重读重注入。
-        const cacheKey = `${filePath}:${(await stat(filePath)).mtimeMs}`
+        const cacheKey = `${filePath}:${info.mtimeMs}`
         let injected = indexCache.get(cacheKey)
         if (injected === undefined) {
           injected = withBootstrapTap(file.toString('utf8'), options.bootstrap ?? null)

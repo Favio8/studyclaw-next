@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertHostArtifacts } from '../../../scripts/release/bundle-contract.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const desktop = resolve(here, '..')
@@ -84,14 +85,18 @@ if (process.argv.includes('--build')) {
   run(nodeBin, [pkgBinInPnpmStore('next', 'dist/bin/next'), 'build'], join(repoRoot, 'apps', 'web'), 'web next build')
 }
 
+// Check the single-file contract before replacing an existing resource tree.
+const bundle = join(repoRoot, 'apps', 'cli', 'lib', 'bin.js')
+mustExist(bundle, 'Run the CLI bundle build first (node scripts/assemble-host.mjs --build).')
+assertHostArtifacts(dirname(bundle))
+
 // 1) clean output
 rmSync(resources, { recursive: true, force: true })
 mkdirSync(hostOut, { recursive: true })
 
 // 2) host ESM bundle
-const bundle = join(repoRoot, 'apps', 'cli', 'lib', 'bin.js')
-mustExist(bundle, 'Run the CLI bundle build first (node scripts/assemble-host.mjs --build).')
 cpSync(bundle, join(hostOut, 'bin.js'))
+cpSync(join(dirname(bundle), 'worker.cjs'), join(hostOut, 'worker.cjs'))
 // ESM marker: bin.js is ESM but keeps a .js extension; nearest package.json must declare type=module.
 // bin.js 顶层还会 createRequire('../package.json') 读取版本号（bundle 内联），
 // 因此 host/ 的上一级（resources/）也需要一份含 version 的 package.json。

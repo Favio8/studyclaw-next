@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))

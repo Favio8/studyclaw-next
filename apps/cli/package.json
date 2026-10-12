@@ -11,7 +11,9 @@
     "studyclaw": "./lib/bin.js"
   },
   "files": [
-    "lib/*.js"
+    "lib/*.js",
+    "lib/worker.cjs",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "dependencies": {
     "@studyclaw/acp": "workspace:^",

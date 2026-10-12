@@ -15,7 +15,7 @@ import type { ResolvedChatConfig } from '../src/config.ts'
 import type { ToolCall } from '@studyclaw/session'
 
 /** Stream one OpenAI chat.completion.chunk sequence over the response. */
-function sse(res: import('node:http').ServerResponse, chunks: string[]): void {
+function sse(res: import('node:http').ServerResponse, chunks: Array<Record<string, unknown>>): void {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
   res.write(`data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', model: 'mock', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`)
   for (const chunk of chunks) {
@@ -107,6 +107,60 @@ describe('DeepSeekAdapter tool client (mock OpenAI server)', () => {
 })
 
 describe('chatStream e2e (config + tools + persistence)', () => {
+  it('crosses eight real HTTP model rounds, receives complete source excerpts and finishes with an answer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sc-long-http-chat-'))
+    await mkdir(join(root, '.studyclaw'))
+    const lines = Array.from({ length: 2000 }, (_, i) => (i + 1) % 200 === 0
+      ? `CANARY-SECTION-${(i + 1) / 200}` : `Evidence line ${i + 1}: ${'complete source '.repeat(6)}`)
+    await writeFile(join(root, 'long.md'), lines.join('\n'))
+    let requests = 0
+    const received: string[] = []
+    const model = createServer((req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        requests += 1
+        const payload = JSON.parse(body) as { messages: Array<{ role: string; content: string }> }
+        const results = payload.messages.filter(message => message.role === 'tool')
+        const previous = results.at(-1)?.content
+        const next = previous === undefined ? 1 : Number(/下一段起始行: (\d+)/.exec(previous)?.[1] ?? 0)
+        if (next > 0) {
+          sse(res, [{ tool_calls: [{ index: 0, id: `section-${results.length}`, type: 'function', function: {
+            name: 'read_source', arguments: JSON.stringify({ path: 'long.md', startLine: next }),
+          } }] }])
+        } else {
+          received.push(...results.map(message => message.content))
+          sse(res, [{ content: '全文相关证据已经齐全。以下是三个分类轴的解释与对比。' }])
+        }
+      })
+    })
+    await new Promise<void>(resolve => model.listen(0, '127.0.0.1', resolve))
+    const address = model.address() as import('node:net').AddressInfo
+    try {
+      const config = { ...mockConfig, baseUrl: `http://127.0.0.1:${address.port}/v1` }
+      const tokens: string[] = []
+      const tools: Array<Record<string, unknown>> = []
+      for await (const event of chatStream(root, basename(root), { message: '请根据相关资料解释三个分类轴', mode: 'quick' }, config)) {
+        if (event.kind === 'token') tokens.push(event.delta)
+        if (event.kind === 'tool') tools.push(event.payload)
+      }
+      expect(requests).toBeGreaterThan(10)
+      expect(tools).toHaveLength(requests - 1)
+      expect(new Set(tools.map(tool => tool['callId'])).size).toBe(tools.length)
+      expect(tools.filter(tool => tool['status'] !== 'success')).toEqual([])
+      expect(tools.every(tool => tool['name'] === 'read_source')).toBe(true)
+      expect(tokens.join('')).toContain('以下是三个分类轴的解释与对比')
+      expect(tokens.join('')).not.toContain('已达上限')
+      expect(received).toHaveLength(tools.length)
+      expect(received[0]!.length).toBeGreaterThan(4000)
+      for (let i = 1; i <= 10; i += 1) expect(received.join('\n')).toContain(`CANARY-SECTION-${i}`)
+      expect(received.every(excerpt => !excerpt.includes('内容超预算已截断'))).toBe(true)
+    } finally {
+      model.closeAllConnections()
+      await new Promise<void>(resolve => model.close(() => resolve()))
+      await rm(root, { recursive: true, force: true })
+    }
+  })
   it('runs a full tool-loop turn and lists the session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'studyclaw-chat-e2e-'))
     const ws = join(root, 'ws')

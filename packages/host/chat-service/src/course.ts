@@ -1,3 +1,4 @@
+import { draftConcepts, applyConcepts, fillConceptCards, type ConceptDraft } from './concepts.ts'
 /**
  * Course service: the host-side seam for the build/learning surface —
  * syllabus, progress, mastery, quiz, file enumeration, sync build, URL
@@ -6,9 +7,8 @@
  * the config-backed LLM client.
  * @module @studyclaw/chat-service/src/course
  */
-
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, relative } from 'node:path'
 import {
   CourseBuilder,
@@ -23,8 +23,10 @@ import {
   saveProgressBoard,
   upsertProgressRecord,
   type Syllabus,
+  type HarnessTask,
   type TaskGenerator,
   reviewSchedule,
+  dueRecords,
 } from '@studyclaw/course-builder'
 import { DependencyInferrer } from '@studyclaw/course-builder'
 import {
@@ -46,11 +48,14 @@ import { withCourseLock } from '@studyclaw/tools'
 /** F-14：手动建卡的调用序号，保证 chunk_id 唯一。 */
 let manualCardSeq = 0
 import { stateDirOf } from '@studyclaw/course-builder'
+import { createCourseBackup, importCourseBackup, loadCourseExportData, renderCourseMarkdown } from '@studyclaw/course-builder'
 import { localDateKey } from '@studyclaw/course-builder'
 import type { ResolvedChatConfig } from './config.ts'
 import { createUserMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionEventStore, SessionStore, utcTs } from '@studyclaw/session'
 import { loadChatConfig } from './config.ts'
+import { loadReviewHints, readAnnotationsDigest } from './reading.ts'
+import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 export class CourseNotFoundError extends Error {
   constructor(courseId: string) {
@@ -229,7 +234,7 @@ async function saveLedgerFrames(workspaceRoot: string, evalId: string, frames: A
   const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`
   await writeFile(tmp, JSON.stringify({ frames, ts: Date.now() }), 'utf8')
   try {
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
@@ -279,8 +284,15 @@ export class JobManager {
     const job = this.jobs.get(jobId)!
     job.status = 'running'
     try {
-      const generator = requireGenerator(ctx)
-      const builder = projectBuilder(courseDir, generator, inferrerOf(ctx), ctx.config)
+      const existing = await loadSyllabus(courseDir)
+      // Adopted knowledge stays stable when files are synced. New source content
+      // enters the explicit draft/apply flow; syncing never recreates heading cards.
+      if (existing.concept_origin === 'semantic') {
+        job.result = { syllabusVersion: existing.version, tasksGenerated: 0, degraded: [] }
+        job.status = 'done'
+        return
+      }
+      const builder = projectBuilder(courseDir, { generateTasks: async () => [] }, null, ctx.config)
       // PERF-1：config.yaml 的 max_concurrency 终于被真正消费——旧链路解析
       // 后无任何并行消费点，builder 双层串行。
       const concurrency = Math.max(1, Math.min(8, ctx.config?.maxConcurrency ?? 4))
@@ -421,6 +433,8 @@ async function* runEvalSubmit(
         ef: nextLocal.ef,
         nextReviewAt: dueDateKey,
         misattribution: result.misconceptions.length > 0 ? '概念混淆' : 'none',
+        // 评测只改评测驱动的字段；阅读接触次数（M1）原样带过，不被重置。
+        exposure: record?.exposure ?? 0,
       })
       await saveProgressBoard(boardPath, updated)
       // 圆整到 3 位小数：指数平滑的浮点噪声（0.14700000000000002）不出线。
@@ -494,6 +508,9 @@ async function* runEvalSubmit(
 }
 
 export interface CourseService {
+  conceptCards(workspaceRoot: string, courseId: string): Promise<Record<string, unknown>>
+  conceptDraft(workspaceRoot: string, courseId: string, sources: string[]): Promise<ConceptDraft>
+  conceptApply(workspaceRoot: string, courseId: string, draftId: string, edits: Array<{ id: string; name: string }>): Promise<Record<string, unknown>>
   syllabus(workspaceRoot: string, courseId: string): Promise<Syllabus>
   setGranularity(workspaceRoot: string, courseId: string, granularity: 'fine' | 'coarse'): Promise<Syllabus>
   progress(workspaceRoot: string, courseId: string): Promise<Record<string, unknown>>
@@ -520,17 +537,31 @@ export interface CourseService {
   createCourse(workspaceRoot: string, courseName: string, importPaths: string[]): Promise<Record<string, unknown>>
   /** Write an empty course skeleton when none exists (no LLM, idempotent). */
   ensureCourse(workspaceRoot: string, courseId: string): Promise<{ ensured: boolean }>
+  /** M3：导出课程（markdown=人读迁移，backup=完整还原归档）。 */
+  exportCourse(workspaceRoot: string, courseId: string, format: 'markdown' | 'backup'): Promise<{ filename: string; base64: string; bytes: number }>
+  /** M3：从备份归档还原课程。目标已存在时默认拒绝（force 需显式传）。 */
+  importCourse(workspaceRoot: string, courseId: string, base64: string, force: boolean): Promise<{ courseId: string; files: number }>  /** M4/M5：一次聚合全课概念级摘要（看板 + 题卡数 + 标注数 + 最近接触）。供「今天」视图与大纲 Tab 共用，避免 N+1。 */
+  digest(workspaceRoot: string, courseId: string): Promise<Record<string, unknown>>
 }
 
 /** Assemble the course service for the active workspace. */
 export function createCourseService(getConfig: () => Promise<ResolvedChatConfig | null>): CourseService {
   return {
+    async conceptCards(workspaceRoot, courseId) { return fillConceptCards(await requireCourse(workspaceRoot, courseId), requireConfig(await getConfig())) },
+    async conceptDraft(workspaceRoot, courseId, sources) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      return draftConcepts(dir, sources, requireConfig(await getConfig()))
+    },
+    async conceptApply(workspaceRoot, courseId, draftId, edits) {
+      return applyConcepts(await requireCourse(workspaceRoot, courseId), draftId, edits)
+    },
     async syllabus(workspaceRoot, courseId) {
       const dir = await requireCourse(workspaceRoot, courseId)
       return loadSyllabus(dir)
     },
     async setGranularity(workspaceRoot, courseId, granularity) {
       const dir = await requireCourse(workspaceRoot, courseId)
+      if ((await loadSyllabus(dir)).concept_origin === 'semantic') throw new Error('AI 概念已按知识结构分组，请通过概念提炼重新编辑，文档目录保留在原文中')
       const config = await getConfig()
       const generator = requireGenerator({ workspaceRoot, config })
       // FL-06：粒度重切必须与正常构建同一 builder 口径。旧实现用裸
@@ -545,6 +576,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       const dir = await requireCourse(workspaceRoot, courseId)
       const board = await loadProgressBoard(join(stateDirOf(dir), 'progress.md'))
       return {
+        conceptOrigin: (await loadSyllabus(dir)).concept_origin ?? 'headings',
         overallMastery: board.overallMastery,
         dueCount: board.dueCount,
         lastUpdatedAt: board.lastUpdatedAt,
@@ -558,6 +590,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           ef: record.ef,
           nextReviewAt: record.nextReviewAt,
           misattribution: record.misattribution,
+          exposure: record.exposure,
         })),
       }
     },
@@ -581,7 +614,16 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
     async quiz(workspaceRoot, courseId, mode, count, conceptId, dueOnly) {
       const dir = await requireCourse(workspaceRoot, courseId)
       const tasks = await pickTasks(dir, mode, conceptId, count, localDateKey(), dueOnly)
-      return tasks.map(quizView)
+      const views = tasks.map(quizView)
+      // M2：复习模式随题回带该概念的原文划线（阅读→复习闭环）。只在复习时给，
+      // 新卡首次学习不该先看答案性线索；无标注则整个字段省略（不留空占位）。
+      if (mode !== 'review' || tasks.length === 0) return views
+      const hints = await loadReviewHints(dir, tasks.map(task => task.concept_id))
+      if (hints.size === 0) return views
+      return views.map(view => {
+        const hintsForConcept = hints.get(String(view['conceptId']))
+        return hintsForConcept !== undefined && hintsForConcept.length > 0 ? { ...view, hints: hintsForConcept } : view
+      })
     },
     async taskPool(workspaceRoot, courseId, conceptId, limit) {
       const dir = await requireCourse(workspaceRoot, courseId)
@@ -613,7 +655,7 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
           if (entry.isDirectory()) {
             if (['.studyclaw', 'courses', 'node_modules', '.git', '.next', 'tasks', 'history'].includes(entry.name)) continue
             await collect(path, depth + 1)
-          } else if (entry.isFile() && /\.(md|txt|pdf)$/i.test(entry.name) && !['syllabus.json', 'progress.md', 'notes.md', '.checksums', '.source-root.json'].includes(entry.name)) {
+          } else if (entry.isFile() && DEFAULT_SOURCE_EXTENSIONS.some(extension => entry.name.toLowerCase().endsWith(extension)) && !['syllabus.json', 'progress.md', 'notes.md', '.checksums', '.source-root.json'].includes(entry.name)) {
             const info = await stat(path)
             files.push({ name: entry.name, path, relative: rel, size: info.size, mtime: info.mtime.toISOString(), supported: true })
           }
@@ -622,12 +664,39 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       if ((await stat(workspaceRoot).catch(() => null))?.isDirectory()) await collect(workspaceRoot, 0)
       return { root: workspaceRoot, files: files.slice(0, 500) }
     },
+    async digest(workspaceRoot, courseId) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      const stateDir = stateDirOf(dir)
+      // 一次读三份数据，内存里按 conceptId 归并——前端不再为每个概念各发一次请求。
+      const [board, tasks, digestData] = await Promise.all([
+        loadProgressBoard(join(stateDir, 'progress.md')).catch(() => ({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] })),
+        loadTaskPool(dir).catch(() => [] as HarnessTask[]),
+        readAnnotationsDigest(dir, Date.now() - 24 * 60 * 60 * 1000).catch(() => ({ byConcept: new Map<string, { count: number; lastAt: string }>(), recentCount: 0 })),
+      ])
+      const taskCounts = new Map<string, number>()
+      for (const task of tasks) {
+        if (task.deprecated) continue
+        taskCounts.set(task.concept_id, (taskCounts.get(task.concept_id) ?? 0) + 1)
+      }
+      const concepts = board.concepts.map(record => ({
+        id: record.conceptId,
+        name: record.name,
+        chapter: record.chapter,
+        mastery: record.mastery,
+        evals: record.evals,
+        passRate: record.passRate,
+        nextReviewAt: record.nextReviewAt,
+        exposure: record.exposure,
+        taskCount: taskCounts.get(record.conceptId) ?? 0,
+        annotationCount: digestData.byConcept.get(record.conceptId)?.count ?? 0,
+        lastAnnotatedAt: digestData.byConcept.get(record.conceptId)?.lastAt ?? null,
+      }))
+      return { dueCount: dueRecords(board, localDateKey()).length, concepts, recentHighlights: digestData.recentCount }
+    },
     async sync(workspaceRoot, courseId, sessionId = null) {
       const dir = await requireCourse(workspaceRoot, courseId)
       const config = await configForSession(workspaceRoot, courseId, sessionId, await getConfig())
-      // Validate config upfront so misconfiguration surfaces immediately
-      // instead of silently failing inside the async job.
-      requireGenerator({ workspaceRoot, config })
+      // Source indexing is local. Questions are generated after concept adoption.
       const before = await loadTaskPool(dir)
       // Offload to async job so the HTTP request never times out — LLM
       // multi-call generation can take minutes. The job internally checks
@@ -907,6 +976,29 @@ export function createCourseService(getConfig: () => Promise<ResolvedChatConfig 
       }, null, 2) + '\n', 'utf8')
       return { ensured: true }
     },
+    async exportCourse(workspaceRoot, courseId, format) {
+      const dir = await requireCourse(workspaceRoot, courseId)
+      // 文件名用课程 id（目录名，天然是合法文件名），日期取本地日。
+      const stamp = localDateKey()
+      if (format === 'markdown') {
+        const markdown = renderCourseMarkdown(await loadCourseExportData(dir, courseId))
+        const bytes = Buffer.from(markdown, 'utf8')
+        return { filename: `${courseId}-${stamp}.md`, base64: bytes.toString('base64'), bytes: bytes.length }
+      }
+      const zip = await createCourseBackup(dir)
+      return { filename: `${courseId}-${stamp}.studyclaw.zip`, base64: zip.toString('base64'), bytes: zip.length }
+    },
+    async importCourse(workspaceRoot, courseId, base64, force) {
+      // 目标根就是当前工作区本身（项目即课程）。**不能用 requireCourse**——
+      // 它要求课程目录已存在，而换机还原恰恰是"这里还没有这门课"。
+      // 归档自带的 course_id 才是权威目录名，courseId 仅作为显式改名覆盖，
+      // 由 importCourseBackup 统一做路径守卫。
+      const result = await importCourseBackup(Buffer.from(base64, 'base64'), workspaceRoot, {
+        force,
+        ...(courseId !== '' ? { courseIdOverride: courseId } : {}),
+      })
+      return { courseId: result.courseId, files: result.files }
+    },
   }
 }
 
@@ -928,7 +1020,7 @@ async function enumerateFiles(root: string): Promise<{ root: string; files: Arra
       if (entry.isDirectory()) {
         if (INPLACE_SOURCE_EXCLUDED_DIRS.has(entry.name)) continue
         await collect(path, depth + 1)
-      } else if (entry.isFile() && /\.(md|txt|pdf)$/i.test(entry.name)) {
+      } else if (entry.isFile() && DEFAULT_SOURCE_EXTENSIONS.some(extension => entry.name.toLowerCase().endsWith(extension))) {
         const info = await stat(path)
         files.push({ name: entry.name, path, relative: relative(root, path).split('\\').join('/'), size: info.size, mtime: info.mtime.toISOString(), supported: true })
       }

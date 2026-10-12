@@ -258,4 +258,14 @@ describe('apiproxy dispatch', () => {
     const result = await dispatch('settings.get', undefined, harness.services)
     expect(result).toMatchObject({ ok: true, result: { ui: { defaultMode: 'socratic' }, llm: { model: 'mock', apiKeyConfigured: true } } })
   })
+
+  it('keeps native cancel normal and exposes picker failure for the directory-browser fallback', async () => {
+    expect(await dispatch('host.pickDirectory', undefined, harness.services)).toEqual({ ok: true, result: { path: null } })
+    const result = await dispatch('host.pickDirectory', undefined, {
+      ...harness.services,
+      pickDirectory: async () => { throw new Error('cannot load C:\\private\\worker.cjs') },
+    })
+    expect(result).toMatchObject({ ok: false, error: { code: 'directory-picker-unavailable', message: expect.stringContaining('原生目录选择器') } })
+    expect(JSON.stringify(result)).not.toContain('private')
+  })
 })

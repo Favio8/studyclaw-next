@@ -1,12 +1,13 @@
 /**
- * Progress board: the 9-column markdown contract (`progress.md`) — meta
- * lines, fixed column set with emoji mastery cells, parse/render round-trip,
- * atomic save, due records, and SM-2 scheduling. Ported from Python
- * `progress.py` + `scheduler.py`.
+ * Progress board: the markdown contract (`progress.md`) — meta lines, fixed
+ * column set with emoji mastery cells, parse/render round-trip, atomic save,
+ * due records, and SM-2 scheduling. Ported from Python `progress.py` +
+ * `scheduler.py`.
+ *
+ * 列数是 10（`streak`、`exposure` 是后续补入的）。模块注释与
+ * `docs/LEARNING_FLOW.md` 曾长期写作 "9-column"，均已订正。
  * @module @studyclaw/learning/src/progress
- */
-
-import { readFile, rename, rm, writeFile } from 'node:fs/promises'
+ */import { readFile, rm, writeFile } from 'node:fs/promises'import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 export interface ProgressRecord {
   readonly conceptId: string
@@ -20,6 +21,10 @@ export interface ProgressRecord {
   readonly ef: number
   readonly nextReviewAt: string | null
   readonly misattribution: string
+  /** 阅读接触次数（M1）：关联到本概念的标注累计条数。纯观测维度，
+   *  **不参与** `overallMastery` / `dueRecords` / SM-2 计算——掌握度语义必须保持
+   *  由 eval 单一驱动，混入"划线"会让指标不可解释。 */
+  readonly exposure: number
 }
 
 /** Mutable variant for when `name`/`chapter` must be refreshed from the latest syllabus. */
@@ -32,7 +37,7 @@ export interface ProgressBoard {
   readonly concepts: ProgressRecord[]
 }
 
-export const COLUMNS = ['concept_id', 'name', 'chapter', 'mastery', 'evals', 'pass_rate', 'ef', 'next_review_at', 'misattribution', 'streak'] as const
+export const COLUMNS = ['concept_id', 'name', 'chapter', 'mastery', 'evals', 'pass_rate', 'ef', 'next_review_at', 'misattribution', 'streak', 'exposure'] as const
 const NO_DATE = '-'
 const MASTERY_CELL_RE = /[🟢🟡🔴]?\s*(\d+(?:\.\d+)?)\s*%/
 const MASTERY_RE = /-\s*\*\*总体掌握度\*\*[:：]\s*([\d.]+)%/
@@ -111,6 +116,7 @@ function renderRecordRow(record: ProgressRecord): string {
     record.nextReviewAt !== null ? record.nextReviewAt.slice(0, 10) : NO_DATE,
     record.misattribution,
     String(record.streak ?? 0),
+    String(record.exposure ?? 0),
   ]
   return `| ${cells.join(' | ')} |`
 }
@@ -145,6 +151,9 @@ function parseRecordRow(line: string): ProgressRecord | null {
     nextReviewAt,
     misattribution: cells[8] ?? 'none',
     streak: Number(cells[9] ?? 0) || 0,
+    // `exposure` 追加在列尾（M1）。存量 progress.md 没有该列——缺列按 0 处理，
+    // 下次 save 时补写，不丢弃任何历史记录（与 `streak` 同样的追加策略）。
+    exposure: Number(cells[10] ?? 0) || 0,
   }
 }
 
@@ -154,9 +163,16 @@ function parsePercent(cell: string): number {
   return Math.min(1, Number(match[1]) / 100)
 }
 
+async function readBoardText(path: string): Promise<string> {
+  return readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  })
+}
+
 /** Load the board; missing file or malformed table yields an empty board. */
 export async function loadProgressBoard(path: string): Promise<ProgressBoard> {
-  const text = await readFile(path, 'utf8').catch(() => '')
+  const text = await readBoardText(path)
   const lines = text.split(/\r?\n/)
   let overallMastery = 0
   let dueCount = 0
@@ -183,7 +199,7 @@ export async function loadProgressBoard(path: string): Promise<ProgressBoard> {
 
 /** Render + atomic write the whole board (free-form notes after the table kept). */
 export async function saveProgressBoard(path: string, board: ProgressBoard, now = new Date()): Promise<void> {
-  const text = await readFile(path, 'utf8').catch(() => '')
+  const text = await readBoardText(path)
   const lines = text.split(/\r?\n/)
   let headerIdx = -1
   for (let i = 0; i < lines.length; i += 1) {
@@ -217,7 +233,7 @@ export async function saveProgressBoard(path: string, board: ProgressBoard, now 
   const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`
   await writeFile(tmp, rows.join('\n'), 'utf8')
   try {
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => undefined)
     throw error
@@ -236,6 +252,40 @@ export function upsertProgressRecord(board: ProgressBoard, record: ProgressRecor
 /** Records whose next review is due on/before `today`. */
 export function dueRecords(board: ProgressBoard, today: string): ProgressRecord[] {
   return board.concepts.filter(record => record.nextReviewAt !== null && record.nextReviewAt.slice(0, 10) <= today)
+}
+
+/**
+ * M1：累加一个概念的阅读接触次数。
+ *
+ * 只改 `exposure`，其余字段一律沿用原值——调用方必须已持有课程写锁，整个
+ * 读板→改板→存板的 RMW 在临界区内完成（与 applyEval 同一约束）。
+ *
+ * 概念尚无进度记录时补建一条 `evals: 0` 的记录：阅读是合法的"第一次接触"，
+ * 不能因为还没测验过就被丢弃。`name` 缺省用 conceptId，由后续 build/评测刷新。
+ */
+export function recordExposure(board: ProgressBoard, conceptId: string, delta: number): ProgressBoard {
+  const step = Math.trunc(delta)
+  if (!Number.isFinite(step) || step === 0) return board
+  const existing = board.concepts.find(concept => concept.conceptId === conceptId)
+  if (existing === undefined) {
+    return upsertProgressRecord(board, {
+      conceptId,
+      name: conceptId,
+      chapter: '',
+      mastery: 0,
+      evals: 0,
+      passRate: 0,
+      streak: 0,
+      ef: 2.5,
+      nextReviewAt: null,
+      misattribution: 'none',
+      exposure: Math.max(0, step),
+    })
+  }
+  return upsertProgressRecord(board, {
+    ...existing,
+    exposure: Math.max(0, existing.exposure + step),
+  })
 }
 
 /** SM-2 quality mapping (score ∈ [0,1] → q ∈ [1,5]). */

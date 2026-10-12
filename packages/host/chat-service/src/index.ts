@@ -42,5 +42,5 @@ export {
 export type { SessionSummaryView, SessionSearchView, RestoredSessionView, SessionModelDirectory, SessionModelSelection, SessionModelGroup, LearningAgentOptions, AgentRuntimeConfig, SessionEventView, MaintenanceJobView } from './service.ts'
 export { createCourseService, CourseNotFoundError, JobManager } from './course.ts'
 export type { CourseService, JobView } from './course.ts'
-export { ReadingService, runReadingAction } from './reading.ts'
-export type { AnnotationRecord, AnnotationColor, AnnotationRect, ReadingLoadResult, ReadingProgress, ReadingViewKind, ReadingActionInput } from './reading.ts'
+export { ReadingService, runReadingAction, loadReviewHints } from './reading.ts'
+export type { AnnotationRecord, AnnotationColor, AnnotationRect, ReadingLoadResult, ReadingProgress, ReadingViewKind, ReadingActionInput, ReviewHint } from './reading.ts'

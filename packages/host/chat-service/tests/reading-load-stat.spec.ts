@@ -51,6 +51,15 @@ async function workspace(): Promise<string> {
 }
 
 describe('reading.load 存在性检查', () => {
+  it('reading.text 截断大资料时不整读文件', async () => {
+    const root = await workspace()
+    await writeFile(join(root, 'sources', 'large.md'), Buffer.alloc(4 * 1024 * 1024, 0x41))
+    const result = await new ReadingService().readText(root, 'sources/large.md')
+    expect(result.text).toHaveLength(200_000)
+    expect(result.truncated).toBe(true)
+    expect(readFileCalls.some(path => path.endsWith('large.md'))).toBe(false)
+  })
+
   it('判定 .pdf 存在时不整读该文件', async () => {
     const root = await workspace()
     await writeFile(join(root, 'sources', 'big.pdf'), Buffer.alloc(1024 * 64, 0x41))

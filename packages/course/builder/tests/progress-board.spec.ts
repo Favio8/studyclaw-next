@@ -2,7 +2,8 @@
  * progress.md 表格契约与 SM-2 调度回归（批次B）：
  * - F-11：单元格转义 `|`/换行、解析容忍列数漂移、非表格行不再截断收集；
  * - F-12：streak 语义（连续成功次数）、EF 上限钳制、间隔封顶；
- * - 旧 9 列文件的向后兼容。
+ * - 旧列文件（9 列 / 10 列）的向后兼容；
+ * - M1：exposure（阅读接触次数）追加列的兼容与语义隔离。
  */
 
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -17,6 +18,8 @@ import {
   reviewSchedule,
   updateEf,
   intervalDays,
+  dueRecords,
+  recordExposure,
 } from '../src/progress.ts'
 
 const tmpRoots: string[] = []
@@ -34,6 +37,7 @@ function record(overrides: Partial<Parameters<typeof upsertProgressRecord>[1]> =
   return {
     conceptId: 'c_x', name: '概念X', chapter: '章一', mastery: 0.5, evals: 2,
     passRate: 0.5, streak: 1, ef: 2.4, nextReviewAt: null, misattribution: 'none',
+    exposure: 0,
     ...overrides,
   }
 }
@@ -108,6 +112,74 @@ describe('progress.md 表格契约（F-11）', () => {
     const reloaded = await loadProgressBoard(path)
     expect(reloaded.concepts).toHaveLength(1)
     expect(reloaded.concepts[0]).toMatchObject({ conceptId: 'c_meta', evals: 4 })
+  })
+})
+
+describe('M1：exposure（阅读接触次数）', () => {
+  it('存量 10 列文件（无 exposure 列）加载为 0，保存后补写该列且既有 10 列不丢', async () => {
+    const path = await makeBoardPath()
+    const legacyColumns = COLUMNS.slice(0, 10)
+    const lines = [
+      '# 学习进度',
+      '',
+      '- **总体掌握度**：80%',
+      '- **待复习卡片数**：0',
+      '- **最后更新时间**：2026-10-01 10:00',
+      '',
+      `| ${legacyColumns.join(' | ')} |`,
+      `|${legacyColumns.map(() => '---').join('|')}|`,
+      '| `c_old` | 旧格式 | 章一 | 🟢 80% | 3 | 100% | 2.50 | 2099-01-01 | none | 2 |',
+    ]
+    await writeFile(path, lines.join('\n'), 'utf8')
+    const board = await loadProgressBoard(path)
+    expect(board.concepts[0]).toMatchObject({ conceptId: 'c_old', exposure: 0, evals: 3, streak: 2, nextReviewAt: '2099-01-01' })
+
+    // 读后立即存（与 eval / 曝光链路同款 load→upsert→save）。
+    await saveProgressBoard(path, recordExposure(board, 'c_old', 4))
+    const reloaded = await loadProgressBoard(path)
+    expect(reloaded.concepts[0]).toMatchObject({ exposure: 4, evals: 3, streak: 2, misattribution: 'none' })
+    const text = await readFile(path, 'utf8')
+    expect(text).toContain('exposure')
+  })
+
+  it('重复累加到已有概念，只动 exposure，其余字段逐项保持', () => {
+    const base = upsertProgressRecord({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] },
+      record({ mastery: 0.62, evals: 5, passRate: 0.8, streak: 3, ef: 2.7, nextReviewAt: '2026-11-01', misattribution: '概念混淆' }))
+    const once = recordExposure(base, 'c_x', 1)
+    const twice = recordExposure(once, 'c_x', 1)
+    expect(twice.concepts[0]).toMatchObject({
+      exposure: 2, mastery: 0.62, evals: 5, passRate: 0.8,
+      streak: 3, ef: 2.7, nextReviewAt: '2026-11-01', misattribution: '概念混淆',
+    })
+  })
+
+  it('概念尚无进度记录时补建 evals=0 的行——阅读是合法的第一次接触', () => {
+    const board = recordExposure({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] }, 'c_new', 1)
+    expect(board.concepts[0]).toMatchObject({ conceptId: 'c_new', exposure: 1, evals: 0, mastery: 0, nextReviewAt: null })
+  })
+
+  it('delta 为 0 或负数时是空操作，且累计值不会被减到负数', () => {
+    const base = upsertProgressRecord({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] }, record())
+    expect(recordExposure(base, 'c_x', 0)).toBe(base)
+    expect(recordExposure(base, 'c_x', -3).concepts[0]!.exposure).toBe(0)
+  })
+
+  it('exposure 是纯观测维度：不影响总体掌握度，也不把概念算进到期队列', () => {
+    const board = recordExposure({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] },
+      record({ mastery: 0.9, nextReviewAt: null, exposure: 0 }), 99)
+    expect(board.concepts[0]!.exposure).toBe(99)
+    // nextReviewAt 仍为 null → 既不进到期队列，也不会因为"读过"就被安排复习。
+    expect(dueRecords(board, '2099-01-01')).toHaveLength(0)
+    expect(board.overallMastery).toBe(0)
+  })
+
+  it('章节名含 | 时新增列不破坏表格往返', async () => {
+    const path = await makeBoardPath()
+    const board = recordExposure(upsertProgressRecord({ overallMastery: 0, dueCount: 0, lastUpdatedAt: null, concepts: [] },
+      record({ name: '分类|维度', chapter: '第一章\n第二节' })), 'c_x', 7)
+    await saveProgressBoard(path, board)
+    const loaded = await loadProgressBoard(path)
+    expect(loaded.concepts[0]).toMatchObject({ name: '分类|维度', chapter: '第一章 第二节', exposure: 7 })
   })
 })
 

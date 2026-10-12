@@ -5,23 +5,22 @@
  * 人类可读。定位用双锚——几何 rects 归一化到 0-1（相对页面宽高），文本 quote
  * （Hypothesis 式 text/prefix/suffix）供版面轻微变化时重定位。
  *
- * 并发：Host 是单进程 Node，每个 RPC 在课程锁内完成"读 → 改 → 写"，
- * 多标签页只是请求先后到达，不会交叉在同一文件的读-改-写中间。
- * 损坏：JSON 解析失败 → 重命名 `.bak-<时间戳>` + 空结构重建，响应带 warning，
- * 阅读功能不整体不可用（storage-domain 的 quarantine 是记录级机制，不适用
- * 于裸 JSON 文件）。
+ * 并发：课程锁保护"读 → 改 → 写"和读取时触发的恢复，跨标签页/进程不丢更新。
+ * 损坏：JSON 语法/结构失败 → 唯一备份 `.bak-*` → 空结构重建，返回 recovered；
+ * 读取或备份失败则报告错误并保留原文件（storage-domain 的 quarantine 是
+ * 记录级机制，不适用于裸 JSON 文件）。
  * @module @studyclaw/chat-service/src/reading
  */
-
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
-import { resolveSourceRef, withCourseLock } from '@studyclaw/tools'
-import { loadParsedManifest, parsedDirOf, type ParsedEngine } from '@studyclaw/course-builder'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendCourseNotes, resolveSourceRef, withCourseLock } from '@studyclaw/tools'
+import { readSourceDocument, type SourceBlock, documentKind, extractTextToMarkdownWithEngine, parsedFileName, writeParsedText, saveParsedManifest, loadParsedManifest, loadProgressBoard, readParsedText, recordExposure, saveProgressBoard, type ParsedEngine } from '@studyclaw/course-builder'
 import { loadCourseState } from '@studyclaw/session'
 import type { ResolvedChatConfig } from './config.ts'
 import { createDeepSeekToolClient } from './adapter.ts'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { renameWithRetry } from '@studyclaw/fs-atomic'
 
 export type AnnotationColor = 'yellow' | 'green' | 'blue' | 'red'
 
@@ -60,7 +59,107 @@ interface AnnotationsFile {
   sources: Record<string, SourceAnnotations>
 }
 
-export type ReadingViewKind = 'pdf' | 'markdown' | 'unsupported'
+export type ReadingViewKind = 'pdf' | 'image' | 'markdown' | 'unsupported'
+
+/**
+ * M2：复习时的「回顾原文」线索。取自该概念的标注划线，**只进 UI，绝不进评测
+ * 提示词**——否则用户可以照抄原文，评测失真。
+ */
+export interface ReviewHint {
+  readonly text: string
+  readonly prefix: string
+  readonly suffix: string
+  readonly source: string
+  readonly page: number
+}
+
+/** 每题最多回看几条划线；再多就不是"回忆线索"而是"照抄答案"。 */
+export const MAX_REVIEW_HINTS = 2
+const CONTEXT_MAX = 60
+
+function clip(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`
+}
+
+/**
+ * M2：取一批概念的复习线索，一次读盘、一次组包——不做 per-concept 读盘
+ * （复习一批题往往同属少数概念，重复 I/O 没有收益）。
+ *
+ * 读取失败时降级为空 Map：复习流必须照常可用，标注只是锦上添花。
+ */
+export async function loadReviewHints(
+  workspaceRoot: string,
+  conceptIds: readonly string[],
+): Promise<Map<string, ReviewHint[]>> {
+  const wanted = new Set(conceptIds)
+  if (wanted.size === 0) return new Map()
+  const stateDir = join(workspaceRoot, '.studyclaw')
+  const { file } = await withCourseLock(workspaceRoot, () => readAnnotations(stateDir)).catch(() => ({
+    file: emptyFile() as AnnotationsFile,
+  }))
+  const collected = new Map<string, Array<{ readonly at: string; readonly hint: ReviewHint }>>()
+  for (const [source, entry] of Object.entries(file.sources)) {
+    for (const highlight of entry.highlights) {
+      const conceptId = highlight.conceptId
+      if (conceptId === null || !wanted.has(conceptId)) continue
+      const bucket = collected.get(conceptId) ?? []
+      bucket.push({
+        at: highlight.createdAt,
+        hint: {
+          text: highlight.quote.text,
+          prefix: clip(highlight.quote.prefix, CONTEXT_MAX),
+          suffix: clip(highlight.quote.suffix, CONTEXT_MAX),
+          source,
+          page: highlight.page,
+        },
+      })
+      collected.set(conceptId, bucket)
+    }
+  }
+  // 最近的划线最贴近当前记忆；createdAt 同值时按原文兜底，保证顺序确定（测试可复现）。
+  const result = new Map<string, ReviewHint[]>()
+  for (const [conceptId, entries] of collected) {
+    entries.sort((a, b) => b.at.localeCompare(a.at) || b.hint.text.localeCompare(a.hint.text))
+    result.set(conceptId, entries.slice(0, MAX_REVIEW_HINTS).map(entry => entry.hint))
+  }
+  return result
+}
+
+/**
+ * M4/M5：标注按概念聚合（总条数 + 最近一次时间），并**精确**统计近 24 小时
+ * 新建的条数——只凭「最近时间在窗口内」会把该概念更早的划线一并算进来。
+ *
+ * 读取失败返回空结构：摘要类信息缺失不该让整个面板报错。
+ *
+ * `courseDir` 是**课程目录**（锁的键必须与本模块其余读写一致，都是课程目录）。
+ * 曾误传 `stateDir` 作键，那会取到一把**与标注写入不互斥**的锁——摘要读盘可能
+ * 撞上另一次恢复/重建，两边各持不同的锁却操作同一个文件。
+ */
+export async function readAnnotationsDigest(
+  courseDir: string,
+  sinceMs: number,
+): Promise<{ byConcept: Map<string, { count: number; lastAt: string }>; recentCount: number }> {
+  const stateDir = join(courseDir, '.studyclaw')
+  const noData = { byConcept: new Map<string, { count: number; lastAt: string }>(), recentCount: 0 }
+  const file = await withCourseLock(courseDir, () => readAnnotations(stateDir))
+    .then(result => result.file)
+    .catch(() => emptyFile() as AnnotationsFile)
+  if (Object.keys(file.sources).length === 0) return noData
+  const since = new Date(sinceMs).toISOString()
+  const byConcept = new Map<string, { count: number; lastAt: string }>()
+  let recentCount = 0
+  for (const entry of Object.values(file.sources)) {
+    for (const highlight of entry.highlights) {
+      if (highlight.createdAt >= since) recentCount += 1
+      if (highlight.conceptId === null) continue
+      const current = byConcept.get(highlight.conceptId) ?? { count: 0, lastAt: '' }
+      current.count += 1
+      if (highlight.createdAt > current.lastAt) current.lastAt = highlight.createdAt
+      byConcept.set(highlight.conceptId, current)
+    }
+  }
+  return { byConcept, recentCount }
+}
 
 export interface ReadingLoadResult {
   readonly source: string
@@ -74,22 +173,56 @@ export interface ReadingLoadResult {
 
 const EMPTY_PROGRESS: ReadingProgress = { page: 1, percent: 0, updatedAt: '' }
 
-/** notes.md 追加写链条：同进程内并发 append 串行，避免读-改-写丢更新。 */
-let notesAppendChain: Promise<unknown> = Promise.resolve()
-
 function annotationsPathOf(stateDir: string): string {
   return join(stateDir, 'annotations.json')
 }
 
 function viewKindOf(source: string): ReadingViewKind {
   const lower = source.toLowerCase()
-  if (lower.endsWith('.pdf')) return 'pdf'
+  if (documentKind(source) === 'pdf' || documentKind(source) === 'office') return 'pdf'
+  if (documentKind(source) === 'image') return 'image'
   if (lower.endsWith('.md') || lower.endsWith('.txt')) return 'markdown'
   return 'unsupported'
 }
 
 function emptyFile(): AnnotationsFile {
-  return { version: 1, sources: {} }
+  return { version: 1, sources: Object.create(null) as Record<string, SourceAnnotations> }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isPage(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+function isUnit(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+/** Validate the persisted contract before any reader/export code consumes it. */
+function isAnnotationsFile(value: unknown): value is AnnotationsFile {
+  if (!isObject(value) || value['version'] !== 1 || !isObject(value['sources'])) return false
+  return Object.values(value['sources']).every(entry => {
+    if (!isObject(entry) || !isObject(entry['progress']) || !Array.isArray(entry['highlights'])) return false
+    const progress = entry['progress']
+    if (!isPage(progress['page']) || typeof progress['percent'] !== 'number'
+      || !Number.isFinite(progress['percent']) || progress['percent'] < 0 || progress['percent'] > 100
+      || typeof progress['updatedAt'] !== 'string') return false
+    return entry['highlights'].every(record => {
+      if (!isObject(record) || typeof record['id'] !== 'string' || !isPage(record['page'])
+        || !Array.isArray(record['rects']) || !isObject(record['quote'])) return false
+      const quote = record['quote']
+      return record['rects'].every(rect => isObject(rect) && ['x', 'y', 'w', 'h'].every(key => isUnit(rect[key])))
+        && ['text', 'prefix', 'suffix'].every(key => typeof quote[key] === 'string')
+        && typeof record['color'] === 'string' && ['yellow', 'green', 'blue', 'red'].includes(record['color'])
+        && typeof record['comment'] === 'string' && Array.isArray(record['tags'])
+        && record['tags'].every(tag => typeof tag === 'string')
+        && (record['conceptId'] === null || typeof record['conceptId'] === 'string')
+        && typeof record['createdAt'] === 'string'
+    })
+  })
 }
 
 /**
@@ -118,24 +251,27 @@ async function sha256Of(path: string): Promise<string> {
   return `sha256:${hash.digest('hex')}`
 }
 
-/** 读取标注文件；损坏时备份重建并报告 recovered。 */
+/** Caller holds the course lock: recovery also mutates the annotations file. */
 async function readAnnotations(stateDir: string): Promise<{ file: AnnotationsFile; recovered: boolean }> {
   const path = annotationsPathOf(stateDir)
-  const raw = await readFile(path, 'utf8').catch(() => '')
-  if (raw.trim() === '') return { file: emptyFile(), recovered: false }
+  const raw = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+  if (raw === null) return { file: emptyFile(), recovered: false }
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw) as unknown
-    if (typeof parsed !== 'object' || parsed === null) return { file: emptyFile(), recovered: true }
-    const sources = (parsed as { sources?: unknown }).sources
-    if (typeof sources !== 'object' || sources === null) return { file: emptyFile(), recovered: true }
-    return { file: { version: 1, sources: sources as Record<string, SourceAnnotations> }, recovered: false }
+    parsed = JSON.parse(raw) as unknown
   } catch {
-    const backup = `${path}.bak-${Date.now().toString(36)}`
-    await rename(path, backup).catch(() => {
-      // 备份失败（如权限）不阻塞重建：空结构优先保证阅读可用。
-    })
-    return { file: emptyFile(), recovered: true }
+    // Syntax errors and invalid structures use the same recovery path below.
   }
+  if (isAnnotationsFile(parsed)) return { file: parsed, recovered: false }
+  // Do not overwrite damaged data if the backup fails. The unique name and
+  // shared lock keep concurrent reads/writes from backing up a fresh update.
+  await renameWithRetry(path, `${path}.bak-${Date.now().toString(36)}-${randomUUID()}`)
+  const file = emptyFile()
+  await writeAnnotations(stateDir, file)
+  return { file, recovered: true }
 }
 
 async function writeAnnotations(stateDir: string, file: AnnotationsFile): Promise<void> {
@@ -143,14 +279,31 @@ async function writeAnnotations(stateDir: string, file: AnnotationsFile): Promis
   const path = annotationsPathOf(stateDir)
   const tmp = `${path}.tmp`
   await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, 'utf8')
-  await rename(tmp, path)
+  await renameWithRetry(tmp, path)
+}
+
+/**
+ * M1：累加 `progress.md` 里的阅读接触次数。调用方已持有课程写锁，整个读板→
+ * 改板→存板都在临界区内。
+ *
+ * 曝光是**非关键遥测**：失败只记日志，绝不抛出——用户的标注已经落盘，不该因为
+ * 一个统计数字写不进去而看到报错或丢失划线。
+ */
+async function bumpExposure(stateDir: string, conceptId: string): Promise<void> {
+  try {
+    const boardPath = join(stateDir, 'progress.md')
+    const board = await loadProgressBoard(boardPath)
+    await saveProgressBoard(boardPath, recordExposure(board, conceptId, 1))
+  } catch (error) {
+    console.warn('[reading] 曝光计数写入失败，已忽略（标注已保存）', error)
+  }
 }
 
 function sourceEntry(file: AnnotationsFile, source: string): SourceAnnotations {
-  const existing = file.sources[source]
+  const existing = Object.hasOwn(file.sources, source) ? file.sources[source] : undefined
   if (existing !== undefined && Array.isArray(existing.highlights)) return existing
   const fresh: SourceAnnotations = { progress: { ...EMPTY_PROGRESS }, highlights: [] }
-  file.sources[source] = fresh
+  Object.defineProperty(file.sources, source, { value: fresh, enumerable: true, configurable: true, writable: true })
   return fresh
 }
 
@@ -180,7 +333,7 @@ export class ReadingService {
 
   async load(workspaceRoot: string, source: string): Promise<ReadingLoadResult> {
     const stateDir = join(workspaceRoot, '.studyclaw')
-    const { file, recovered } = await readAnnotations(stateDir)
+    const { file, recovered } = await withCourseLock(workspaceRoot, () => readAnnotations(stateDir))
     const entry = sourceEntry(file, source)
     const target = await resolveSource(workspaceRoot, source).catch(() => null)
     // 存在性用 stat 判定，不要 readFile：后者会把整份资料读进内存只为丢弃
@@ -215,7 +368,7 @@ export class ReadingService {
   }
 
   async listHighlights(workspaceRoot: string, source: string): Promise<AnnotationRecord[]> {
-    const { file } = await readAnnotations(join(workspaceRoot, '.studyclaw'))
+    const { file } = await withCourseLock(workspaceRoot, () => readAnnotations(join(workspaceRoot, '.studyclaw')))
     return sourceEntry(file, source).highlights
   }
 
@@ -241,6 +394,9 @@ export class ReadingService {
       }
       entry.highlights.push(record)
       await writeAnnotations(stateDir, file)
+      // M1：划线即证据——关联了概念的标注顺带记一次"阅读接触"。
+      // 失败绝不回滚已保存的标注：曝光是观测维度，不是主流程。
+      if (record.conceptId !== null) await bumpExposure(stateDir, record.conceptId)
       return record
     })
   }
@@ -294,16 +450,24 @@ export class ReadingService {
     tier: string | null
     markdown: string
     reason: string | null
+    blocks?: SourceBlock[]
   }> {
     const target = await resolveSource(workspaceRoot, source)
     const stateDir = join(workspaceRoot, '.studyclaw')
     const manifest = await loadParsedManifest(stateDir)
     const entry = manifest[source]
-    if (entry === undefined || entry.engine !== 'mineru' || entry.out === null) {
-      return {
-        source, available: false, engine: null, tier: null, markdown: '',
-        reason: '这份资料还没有解析产物：在设置里启用 MinerU 并重新构建课程即可阅读',
-      }
+    if (entry === undefined || entry.out === null) {
+      const document = await readSourceDocument(target, source, stateDir)
+      const sha256 = await sha256Of(target)
+      const outcome = documentKind(source) === 'image' || document.blocks.some(block => block.bbox != null) ? { text: document.blocks.map(block => block.text).join('\n\n'), engine: 'mineru' as const } : await extractTextToMarkdownWithEngine(target)
+      const out = await writeParsedText(stateDir, parsedFileName(sha256, `${outcome.engine}-reading`), outcome.text)
+      manifest[source] = { sha256, engine: outcome.engine, tier: 'reading', out }
+      await withCourseLock(workspaceRoot, async () => {
+        const current = await loadParsedManifest(stateDir)
+        current[source] = manifest[source]!
+        await saveParsedManifest(stateDir, current)
+      })
+      return { source, available: true, engine: outcome.engine, tier: 'reading', markdown: outcome.text, reason: null, blocks: document.blocks }
     }
     const sha = await sha256Of(target).catch(() => null)
     if (sha === null) {
@@ -315,11 +479,12 @@ export class ReadingService {
         reason: '源文件已变化：重新构建课程后刷新即可阅读最新内容',
       }
     }
-    const markdown = await readFile(join(parsedDirOf(stateDir), entry.out), 'utf8').catch(() => '')
+    const markdown = await readParsedText(stateDir, entry.out) ?? ''
     if (markdown.trim() === '') {
       return { source, available: false, engine: entry.engine, tier: entry.tier, markdown: '', reason: '解析产物缺失或为空：重新构建课程' }
     }
-    return { source, available: true, engine: entry.engine, tier: entry.tier, markdown, reason: null }
+    const document = await readSourceDocument(target, source, stateDir)
+    return { source, available: true, engine: entry.engine, tier: entry.tier, markdown, reason: null, blocks: document.blocks }
   }
 
   async readText(workspaceRoot: string, source: string): Promise<{ text: string; truncated: boolean }> {
@@ -327,9 +492,21 @@ export class ReadingService {
     if (!/\.(md|txt)$/i.test(target)) {
       throw new Error('source 必须是课程资料根目录下的 .md/.txt 文件')
     }
-    const raw = await readFile(target, 'utf8').catch(() => null)
-    if (raw === null) throw new Error('资料不存在或不可读')
     const MAX = 200_000
+    // Four bytes per code point plus one lookahead bounds disk I/O and memory.
+    // Reading the whole file before slicing defeats this endpoint's limit.
+    const handle = await open(target, 'r').catch(() => null)
+    if (handle === null) throw new Error('资料不存在或不可读')
+    const bytes = Buffer.alloc(MAX * 4 + 4)
+    let offset = 0
+    try {
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
+        if (bytesRead === 0) break
+        offset += bytesRead
+      }
+    } finally { await handle.close() }
+    const raw = bytes.subarray(0, offset).toString('utf8')
     return { text: raw.length > MAX ? raw.slice(0, MAX) : raw, truncated: raw.length > MAX }
   }
 
@@ -338,7 +515,7 @@ export class ReadingService {
    * 无概念关联的标注不进聚合——避免把未归属的划线算成学习证据。
    */
   async traces(workspaceRoot: string): Promise<{ traces: Array<{ conceptId: string; count: number; lastAt: string }> }> {
-    const { file } = await readAnnotations(join(workspaceRoot, '.studyclaw'))
+    const { file } = await withCourseLock(workspaceRoot, () => readAnnotations(join(workspaceRoot, '.studyclaw')))
     const aggregated = new Map<string, { count: number; lastAt: string }>()
     for (const entry of Object.values(file.sources)) {
       for (const record of entry.highlights) {
@@ -362,25 +539,12 @@ export class ReadingService {
   async appendNotes(workspaceRoot: string, source: string): Promise<{ appended: boolean; count: number }> {
     const { markdown, count } = await this.exportMarkdown(workspaceRoot, source)
     if (count === 0) return { appended: false, count: 0 }
-    const stateDir = join(workspaceRoot, '.studyclaw')
-    await mkdir(stateDir, { recursive: true })
-    const notesPath = join(stateDir, 'notes.md')
-    // 读-改-写串行化：并发导出（多点两次/多标签页）若各读各写，后写的
-    // 会覆盖前一份内容。模块级链保证同一进程内 append 顺序不丢。
-    const run = notesAppendChain.then(async () => {
-      const existing = await readFile(notesPath, 'utf8').catch(() => '')
-      const separator = existing === '' || existing.endsWith('\n') ? '\n' : '\n\n'
-      await writeFile(notesPath, `${existing}${separator}<!-- reading-export ${new Date().toISOString()} source=${source} -->\n${markdown}\n`, 'utf8')
-    })
-    notesAppendChain = run.catch(() => {
-      // 单次失败不毒化链条（调用方仍会收到本次错误）。
-    })
-    await run
+    await appendCourseNotes(workspaceRoot, `\n<!-- reading-export ${new Date().toISOString()} source=${source} -->\n${markdown}\n`)
     return { appended: true, count }
   }
 
   async exportMarkdown(workspaceRoot: string, source: string): Promise<{ markdown: string; count: number }> {
-    const { file } = await readAnnotations(join(workspaceRoot, '.studyclaw'))
+    const { file } = await withCourseLock(workspaceRoot, () => readAnnotations(join(workspaceRoot, '.studyclaw')))
     const entry = sourceEntry(file, source)
     const byPage = new Map<number, AnnotationRecord[]>()
     for (const record of entry.highlights) {
@@ -471,6 +635,7 @@ export async function* runReadingAction(
       '你是 StudyClaw 的阅读讲解助手。学生正在精读课程资料并选中了一段文本。',
       '请结合下方课程状态，把这段内容讲懂：先点明它属于哪个概念/章节，再解释关键点，',
       '最后给一个记忆锚点。不要泛泛百科，不要重复学生已经选中的原文。',
+      '使用规范 Markdown 排版，强调符号紧贴内容（如 **关键点**），代码放在代码围栏内。',
       '',
       '## 课程状态',
       await courseStateSummary(input.workspaceRoot),

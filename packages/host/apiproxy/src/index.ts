@@ -67,6 +67,7 @@ export type RpcErrorCode =
   | 'approval-not-found'
   | 'provider-exists'
   | 'annotation-not-found'
+  | 'directory-picker-unavailable'
 
 export interface RpcError {
   readonly code: RpcErrorCode
@@ -119,7 +120,7 @@ export interface HostServices {
     archive(courseId: string, sessionId: string): Promise<{ sessionId: string; archived: true }>
     reorder(courseId: string, sessionId: string, beforeId?: string): Promise<{ sessions: SessionSummaryView[] }>
     restore(courseId: string, sessionId: string): Promise<RestoredSessionView>
-    models(courseId: string, sessionId: string): Promise<SessionModelDirectory>
+    models(courseId: string, sessionId: string, currentOnly?: boolean): Promise<SessionModelDirectory>
     selectModel(courseId: string, sessionId: string, selection: SessionModelSelection): Promise<SessionModelSelection>
     events(courseId: string, sessionId: string, afterSeq?: number): Promise<{ events: SessionEventView[]; lastSeq: number }>
   }
@@ -158,11 +159,17 @@ export interface HostServices {
   }
   /** Course build/learning surface over the active workspace. */
   readonly courseService: {
+    conceptCards(courseId: string): Promise<Record<string, unknown>>
+    conceptDraft(courseId: string, sources: string[]): Promise<Record<string, unknown>>
+    conceptApply(courseId: string, draftId: string, edits: Array<{ id: string; name: string }>): Promise<Record<string, unknown>>
     syllabus(courseId: string): Promise<Record<string, unknown>>
     setGranularity(courseId: string, granularity: 'fine' | 'coarse'): Promise<Record<string, unknown>>
     progress(courseId: string): Promise<Record<string, unknown>>
     mastery(courseId: string): Promise<Record<string, unknown>>
     quiz(courseId: string, mode: 'review' | 'new', count: number, conceptId: string | null, dueOnly?: boolean): Promise<Array<Record<string, unknown>>>
+    exportCourse(courseId: string, format: 'markdown' | 'backup'): Promise<{ filename: string; base64: string; bytes: number }>
+    importCourse(courseId: string, base64: string, force: boolean): Promise<{ courseId: string; files: number }>
+    digest(courseId: string): Promise<Record<string, unknown>>
     files(courseId: string): Promise<Record<string, unknown>>
     workspaceFiles(): Promise<Record<string, unknown>>
     sync(courseId: string, sessionId?: string | null): Promise<Record<string, unknown>>
@@ -318,7 +325,12 @@ const handlers = {
   'host.pickDirectory': {
     payload: null,
     async run(_payload: void, services: HostServices): Promise<RpcResponse<{ path: string | null }>> {
-      return ok({ path: await services.pickDirectory() })
+      try {
+        return ok({ path: await services.pickDirectory() })
+      } catch (error) {
+        console.error('[studyclaw] native directory picker failed:', error)
+        return err('directory-picker-unavailable', '原生目录选择器无法启动，请使用目录浏览选择项目')
+      }
     },
   },
   'host.browseDirectory': {
@@ -519,9 +531,9 @@ const handlers = {
     },
   },
   'sessions.models': {
-    payload: z.object({ courseId: z.string().min(1), sessionId: z.string().min(1) }),
-    async run(payload: { courseId: string; sessionId: string }, services: HostServices): Promise<RpcResponse<SessionModelDirectory>> {
-      return ok(await services.sessionService.models(payload.courseId, payload.sessionId))
+    payload: z.object({ courseId: z.string().min(1), sessionId: z.string().min(1), currentOnly: z.boolean().optional() }),
+    async run(payload: { courseId: string; sessionId: string; currentOnly?: boolean }, services: HostServices): Promise<RpcResponse<SessionModelDirectory>> {
+      return ok(await services.sessionService.models(payload.courseId, payload.sessionId, payload.currentOnly))
     },
   },
   'sessions.selectModel': {
@@ -623,6 +635,24 @@ const handlers = {
       return ok(await services.settingsService.credential(payload.providerId, payload.apiKey))
     },
   },
+  'courses.concepts.cards': {
+    payload: z.object({ courseId: z.string().min(1) }),
+    async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.conceptCards(payload.courseId))
+    },
+  },
+  'courses.concepts.draft': {
+    payload: z.object({ courseId: z.string().min(1), sources: z.array(z.string().min(1).max(500)).min(1).max(20) }),
+    async run(payload: { courseId: string; sources: string[] }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.conceptDraft(payload.courseId, payload.sources))
+    },
+  },
+  'courses.concepts.apply': {
+    payload: z.object({ courseId: z.string().min(1), draftId: z.string().uuid(), edits: z.array(z.object({ id: z.string().min(1), name: z.string().trim().min(1).max(100) })).min(1).max(60) }),
+    async run(payload: { courseId: string; draftId: string; edits: Array<{ id: string; name: string }> }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.conceptApply(payload.courseId, payload.draftId, payload.edits))
+    },
+  },
   'courses.syllabus': {
     payload: z.object({ courseId: z.string().min(1) }),
     async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
@@ -653,10 +683,32 @@ const handlers = {
       return ok({ tasks: await services.courseService.quiz(payload.courseId, payload.mode, payload.count, payload.conceptId ?? null, payload.dueOnly ?? false) })
     },
   },
+  'courses.digest': {
+    // M4/M5：一次拿全课概念级摘要（掌握度 + 题卡数 + 标注数 + 近 24h 新划线）。
+    // 「今天」视图与大纲 Tab 共用它，避免前端按概念逐个请求。
+    payload: z.object({ courseId: z.string().min(1) }),
+    async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
+      return ok(await services.courseService.digest(payload.courseId))
+    },
+  },
   'courses.files': {
     payload: z.object({ courseId: z.string().min(1) }),
     async run(payload: { courseId: string }, services: HostServices): Promise<RpcResponse<Record<string, unknown>>> {
       return ok(await services.courseService.files(payload.courseId))
+    },
+  },
+  'courses.export': {
+    // M3 数据可移植性。产物以 base64 回传给调用方落盘——路径裁决权留在 Host，
+    // 调用方（CLI / Web）只负责把字节写到用户指定的位置。
+    payload: z.object({ courseId: z.string().min(1), format: z.enum(['markdown', 'backup']).default('markdown') }),
+    async run(payload: { courseId: string; format: 'markdown' | 'backup' }, services: HostServices): Promise<RpcResponse<{ filename: string; base64: string; bytes: number }>> {
+      return ok(await services.courseService.exportCourse(payload.courseId, payload.format))
+    },
+  },
+  'courses.import': {
+    payload: z.object({ courseId: z.string().default(''), base64: z.string().min(1), force: z.boolean().default(false) }),
+    async run(payload: { courseId: string; base64: string; force: boolean }, services: HostServices): Promise<RpcResponse<{ courseId: string; files: number }>> {
+      return ok(await services.courseService.importCourse(payload.courseId, payload.base64, payload.force))
     },
   },
   'courses.evalTrend': {

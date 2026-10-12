@@ -58,7 +58,8 @@ StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装
 
 - **双轨评测**：主观题走 Rubric 采分点命中（二元判定 + 苏格拉底式反馈，评测走专用快路由省 token）；选择题按 answer-key **本地零 LLM 秒判**。
 - **SM-2 间隔重复**：掌握度 0~1、通过阈值 0.6、难度因子 EF 钳制 [1.3, 2.9]、经典 1/6/15… 天间隔；到期队列优先、抽卡零泄题；误区可触发生成动态变体卡。
-- **可视化进度**：9 列 `progress.md`、掌握度指数平滑、日期驱动的学习热力图、大纲关系图（React Flow）与思维导图（Mind Elixir）双视图。
+- **可视化进度**：10 列 `progress.md`、掌握度指数平滑、日期驱动的学习热力图、大纲关系图（React Flow）与思维导图（Mind Elixir）双视图；大纲概念行尾直接显示题卡数 / 标注数 / 下次复习。
+- **「今天」落地视图**：默认首屏，只回答"现在该做什么"——一个大数字（待复习张数）+ 一个主按钮，次级信息默认收起。它的价值在于**替你消除决策**，而不是再做一块仪表盘。
 - **交互演示块**：AI 可在讲解中插入自包含的可交互 HTML 演示（沙箱 iframe + CSP 断网，无外部资源、无持久化）。
 
 ### 辅助阅读
@@ -68,8 +69,11 @@ StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装
 - **划词动作**：四色高亮、**结合课程状态的解释**、中英互译、**一键生成题卡**（草稿可编辑，确认后入池接 SM-2）；解释/翻译走阅读专用模型与档位，不与判题路径抢配置。
 - **标注即数据**：落 `<课程>/.studyclaw/annotations.json`（人类可读），归一化坐标 + quote 双锚，版面变化可重定位；可导出 Markdown、追加进课程笔记，并按概念聚合进右栏「我的痕迹」。
 - **多格式兜底**：md/txt 直接渲染；扫描件 PDF 与 docx/xlsx/html 走**解析视图**（可选 MinerU 引擎，内容寻址缓存 + 逐文件 manifest 归因）；没有解析产物时给出可读原因而不是空白页。
+- **阅读进学习闭环**：划线关联到概念后计入该概念的「阅读接触」(`exposure`)——纯观测维度，不改掌握度、不干扰 SM-2；复习该概念时随题回看**原文划线**，形成「划线 → 复习回看 → 评测 → 掌握度回写」的完整环路。
 
 ### Agent 能力
+
+- 学习对话由模型完成回答后结束，默认没有固定工具轮数上限；停止生成会取消后台执行。资料读取按实际返回范围提供续读位置，避免长章节在回传途中被截断却标成已读。
 
 - **23 个工具**：13 个学习工具（读资料、查课程状态、题池、记忆、建卡、复习、测验、评测、写笔记等）+ 10 个通用工具（文件读写、命令执行、网页抓取、网络搜索、plan/todo、子 Agent、LSP）。
 - **完整 Agent Runtime**：对齐主流编码 Agent 的 durable inbox（消息排队 / 插队 / 转向 / 注入）、turn/step 状态机、**工具审批队列**（allow/deny/cancel/超时全部持久化）、子 Agent、空闲维护任务；另支持 **ACP 协议**（NDJSON 流式，可接入兼容的 Agent 客户端）。
@@ -80,12 +84,25 @@ StudyClaw 是一个跑在你自己电脑上的 AI 学习助手。给它一个装
 - **零遥测、零分析 SDK、零自动更新上报**；唯一的网络请求发往你配置的模型端点，以及你主动调用的搜索工具。
 - API Key 使用 **AES-256-GCM 加密落盘**，主密钥与凭据分离存放（0600 权限、原子写入、旧明文自动迁移）。
 - 本地服务默认只绑 `127.0.0.1`，启动随机 token、恒定时间比对、loopback Origin 白名单防跨站调用。
+  所有入口先校验本地 `Host` 头，非本地主机名取不到带启动 token 的静态页面。
+- 资料、源根绑定、静态资源与解析缓存一律按**真实路径**校验边界：链接不能绕过各自的
+  目录范围，缓存产物名必须是单个文件名。
+- 大文本读取有界；PDF 以文件流下发，断连即释放句柄、磁盘错误只影响当前响应。
 - **文件即状态**：不跑数据库服务，所有课程与会话数据是普通文本文件，断电可恢复、可 Git 管理、可人工审阅。
+- 写操作按课程串行化：读—改—写整段在锁内完成，失败写入不污染后续成功值；
+  I/O 读取错误直接报告，不当作空状态重写。
+- 课程 ID 是文件夹名，因此异步回写同时校验**项目路径 + 激活代次**——同名项目、
+  A → B → A 快速切换都不会让旧响应覆盖当前状态。
 
 ### 工程化
 
 - TypeScript 全严格类型；pnpm monorepo（25 个内部包 + vendored cordis 基座）。
-- **1000+ 测试用例**（单元 + 组件 + HTTP/SSE 集成），CI 含类型检查、双端测试、tsc 误发射守卫、以及「打包 → 真装 → 真跑」的发布门禁。
+- **1400+ 测试用例**（单元 + 组件 + HTTP/SSE 集成），CI 含类型检查、双端测试、前端
+  **零警告** ESLint 门禁、发布脚本的类型检查、tsc 误发射守卫，以及
+  「打包 → 真装 → 真跑」的发布门禁。前端 lint 以 `--max-warnings 0` 执行，
+  Hook 生命周期、ref 读写与状态归属问题必须真正修好，不接受关规则消音。
+- CLI 产物是**单文件 bundle**：关闭 code splitting，并由 AST 守卫在打包阶段拒绝
+  仍依赖本地 chunk 的构建结果；另携带独立进程入口 `lib/worker.cjs`，供 Windows 系统目录选择器使用，打包与桌面组装会检查其存在。
 - 前端 Next.js 16 **纯静态导出**，由同一个 Node Host 托管，无需任何反向代理。
 
 ## 学习闭环
@@ -110,7 +127,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     subgraph Browser["浏览器 · 纯静态前端"]
-        UI["Next.js 16 / React 19 三栏控制台<br/>左栏导航 · 中栏对话 · 右栏进度/大纲/热力/题卡"]
+        UI["Next.js 16 / React 19 三栏控制台<br/>左栏导航 · 中栏 今天/对话/测验/复习/阅读 · 右栏进度/大纲/热力/题卡"]
     end
     subgraph Host["本地 Host · apps/cli 单进程 node:http"]
         RPC["RPC 路由约 50 方法 · zod 校验"]
@@ -190,7 +207,7 @@ pnpm serve --open
 
 ### 方式三：npm 全局安装
 
-> npm 包为 `@studyclaw/cli`（单文件 Bundle，外部原生依赖为 koffi/pdf-parse）；发布与版本说明见 [CHANGELOG.md](./CHANGELOG.md) 和 [发布手册](./docs/RELEASE_RUNBOOK.md)。
+> npm 包为 `@studyclaw/cli`（单文件 Host Bundle + 目录选择器 `worker.cjs`，外部原生依赖为 koffi/pdf-parse）；发布与版本说明见 [CHANGELOG.md](./CHANGELOG.md) 和 [发布手册](./docs/RELEASE_RUNBOOK.md)。
 
 ```bash
 npm install -g @studyclaw/cli
@@ -214,6 +231,10 @@ Host 与命令行共用一个二进制 `studyclaw`：
 | `serve [--port <n>] [--open] [--insecure-no-token]` | 启动本地 Host + 静态托管（默认 8080；`--open` 自动开浏览器） |
 | `status` | 查看 Host 与工作区状态 |
 | `course <list\|show> [<courseId>]` | 列出当前工作区课程 / 查看课程概要（多课程时交互选择） |
+| `export [--course <id>] [--format markdown\|backup] [--out <路径>]` | 导出课程：markdown 为人读迁移产物，backup 为可完整还原的归档（**不含任何凭据**） |
+| `import <备份.zip> [--course-id <id>] [--force]` | 从备份归档还原课程；目标同名时默认拒绝，`--force` 才覆盖 |
+
+备份包含学习状态、题卡答案和会话历史；原始资料需另行复制，模型配置与凭据需重新设置。导入在当前项目下建立独立目录并注册为新项目，Web 刷新后可在左栏打开；安装失败会恢复旧目录。
 | `sync [--course <id>]` | 同步资料变更、增量重建 |
 | `quiz [count] [--mode new\|review] [--course <id>] [--concept <id>]` | 命令行抽题测验 |
 | `review [count] [--course <id>] [--concept <id>]` | 到期复习 |
@@ -295,8 +316,18 @@ studyclaw-next/
 - [x] **桌面壳（Electron + sidecar，免装 Node）**：Windows 安装包验证通过，macOS 有 CI 整机冒烟（Linux 仅出包、未跑应用）
 - [x] **辅助阅读**：三区阅读台、pdf.js 划词/标注/进度、划词解释翻译与建卡、解析视图与可选 MinerU 引擎
 - [x] 社区 Issue 模板：bug / feature / 安全上报分流（`.github/ISSUE_TEMPLATE/`）
+- [x] **全项目对抗性审查**：数据与边界（写入串行化、真实路径守卫、I/O 错误不吞）、
+  前端异步竞态（同名课程 / A→B→A 隔离）、桌面生命周期、发布单文件契约、
+  前端 lint 存量清零并升级为零警告门禁
+- [x] **Windows 原子替换收敛**：裸 `rename()` 覆盖已存在文件会被杀软/索引器顶成 EPERM，
+  18 处 write-temp + rename 统一到 `@studyclaw/fs-atomic` 的退避重试实现
 - [ ] **v0.1.x 收尾**：跨平台真机验证（macOS/Linux 人工各跑一次安装与 `studyclaw status`）、浏览器级 E2E 全覆盖（阅读器已有真浏览器路径 `apps/web/scripts/e2e-reader.mjs`，其余面板仍是 jsdom 组件测试 + HTTP/SSE 集成测试）
-- [ ] `studyclaw course` 顶层命令接线
+- [x] `studyclaw course` 顶层命令接线（`course list` / `course show`）
+- [x] **产品闭环补齐**：阅读进入学习闭环（`exposure` 曝光列 + 复习时回看原文划线）、
+  「今天」落地视图（默认首屏，一个数字 + 一个按钮）、大纲概念级证据汇总（`courses.digest`，无 N+1）
+- [x] **数据可移植性**：Web 设置「数据导出导入」与 `studyclaw export`/`import` 双入口
+  （Markdown 迁移产物 / 完整归档，**不含任何凭据**；目标同名默认拒绝，需显式勾选 +
+  `--force`）；桌面端可一键打开数据目录
 - [ ] 国际化（i18n）与英文界面
 - [ ] 可选的在线 / 多端同步形态（坚持端到端加密、本地优先不动摇）
 
@@ -305,6 +336,10 @@ studyclaw-next/
 **Q：会把我的资料或学习记录上传到哪里吗？**
 
 A：不会。资料解析、课程状态、SM-2 调度全部在本地完成；只有对话 / 评测请求会发往你自己配置的模型端点。没有任何遥测。
+
+**Q：换电脑 / 换工具时，我的学习数据怎么带走？**
+
+A：设置 →「数据导出导入」，或命令行 `studyclaw export`。markdown 为人类可读的单文件迁移产物（进度表、大纲、题卡含答案、阅读标注、笔记），可直接全文检索或投喂 Obsidian / Logseq 等笔记工具；`--format backup` 则导出完整归档，再用 `studyclaw import` 原样还原。**导出物不含任何凭据**（不含 API Key、Token、主密钥）。课程本身也就是一堆普通文件，随时可以手工复制。
 
 **Q：必须用 DeepSeek 吗？**
 

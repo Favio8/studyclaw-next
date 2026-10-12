@@ -12,7 +12,19 @@ git status --porcelain          # 必须为空
 git log --oneline -3            # 确认 HEAD 是待发布提交
 pnpm typecheck                 # project references + Web 类型生成与检查
 pnpm test                      # Node + Web 两个测试项目
+pnpm --filter web lint         # 零错误、零警告
+pnpm release:pack
+pnpm release:verify
+pnpm release:publint
 ```
+
+CLI 和桌面侧均交付单文件 Host `bin.js` **及独立目录选择器进程入口 `worker.cjs`**：tsdown 显式关闭 code splitting，打包与组装前用 AST 检查 Host 的本地 import/export/dynamic import，并检查 worker 存在。该 worker 由 `spawn` 启动，不在模块导入图中，不能依靠单文件 AST 检查证明它已打包。npm 产物还须包含 `THIRD_PARTY_NOTICES.md`。
+
+`release:verify` 使用真正安装的 CLI 和 Host，验证 multipart 上传以及 backup 导出 → 导入 → 项目注册 → 打开 → Markdown 再导出的完整往返；不以 CLI 的 RPC 桩测试替代这条发布门禁。
+
+Windows 上 `release:verify` 和桌面 `scripts/smoke-sidecar.mjs` 还会打开真实系统文件夹窗口，选择含中文、空格、单引号及 emoji 的隔离目录，验证 RPC 返回完整路径 → 打开项目 → 读取课程，以及取消返回 null、没有残留窗口。脚本只操作测试 Host 子进程的窗口。Electron 的外部内存限制由真实路径选择覆盖，取消测试不能替代此验收。Windows CI 的 desktop-smoke 已接入此门禁；本机运行通过不代表远端 CI 已运行。
+
+`release:verify` 在隔离 home 中安装 tarball、运行 `--help` / `status`，再启动安装后的真实 Host，打开离线测试课程并执行 multipart 上传；测试 Host 不继承真实模型凭据。不能只用入口可启动作为上传链路可用的证据。这些命令仅构建和验证，不发布。
 
 ## 1. npm 发布 @studyclaw/cli
 

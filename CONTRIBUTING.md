@@ -41,6 +41,7 @@ cd apps/web && pnpm dev          # 终端 B：前端 dev server（:3000，/api/*
 ```bash
 pnpm typecheck   # 全 project references 图 + Web 类型生成与检查，必须零错误
 pnpm test        # 后端 + Web 全部测试（默认超时已内置为 60s，与 CI 同口径）
+pnpm --filter web lint  # 前端 ESLint：零错误、零警告，CI Web job 同样执行
 ```
 
 - 测试共 1000+ 用例（单元 / jsdom 组件 / HTTP·SSE 集成）。极慢的机械盘上若仍见 I/O 超时假红，可加

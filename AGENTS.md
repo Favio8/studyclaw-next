@@ -29,6 +29,7 @@
 | `packages/host/` | API 校验、聊天/课程编排、本地目录选择 |
 | `packages/{course,learning,session,agent,tools,acp}/` | 摄取构建、评测/SM-2、会话、Agent Runtime、工具与 ACP |
 | `packages/{storage,settings,credentials,workspace,llm}/` | 存储、设置、加密凭据、工作区注册和模型适配 |
+| `packages/util/fs-atomic` | 原子替换的 `renameWithRetry`（Windows 临时占用退避重试）；**所有** write-temp + rename 都必须走它，裸 `rename()` 在 Windows 上会间歇性 EPERM |
 | `vendor/` | Cordis 等源码内置依赖；遵守 [vendor/AGENTS.md](vendor/AGENTS.md) |
 | `scripts/`、`.github/workflows/` | 构建、发布验证与 CI |
 
